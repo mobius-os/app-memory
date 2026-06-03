@@ -144,6 +144,20 @@ export default function App({ appId, token }) {
     return () => { alive = false; };
   }, []);
 
+  // autoPauseRedraw is off (the link particles need a per-frame redraw), so the
+  // canvas keeps painting forever. Pause the whole render loop while the page is
+  // backgrounded (phone locked / tab switched away) so an unseen graph doesn't
+  // burn battery; resume on return. The particles still flow while visible.
+  useEffect(() => {
+    const onVis = () => {
+      const fg = fgRef.current;
+      if (!fg) return;
+      try { document.hidden ? fg.pauseAnimation() : fg.resumeAnimation(); } catch { /* ref shape */ }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
+
   // --- Load the graph index. ---
   useEffect(() => {
     let alive = true;
