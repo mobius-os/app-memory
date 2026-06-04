@@ -8,16 +8,36 @@
  *     problem: { severity:'warn'|'error', kind, detail }
  *   GET /api/storage/shared/memory/<node.path>  → raw markdown (frontmatter + body)
  *
- * Everything else here is presentation. The graph library
- * (react-force-graph-2d) and the markdown renderer (marked + DOMPurify) load
- * from esm.sh with react externalized so the single bundled React instance is
- * shared. All canvas drawing is done in CSS px (divided by globalScale) so it
+ * Everything else here is presentation. Optional graph/markdown libraries load
+ * through the runtime import map when the platform vendors them, then from a
+ * same-origin /vendor path, then finally from esm.sh as today's warm-cache
+ * fallback. All canvas drawing is done in CSS px (divided by globalScale) so it
  * stays crisp on HiDPI; react-force-graph handles the dpr backing store.
  */
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
 const GRAPH_URL = '/api/storage/shared/memory/graph.json';
 const NOTE_BASE = '/api/storage/shared/memory/';
+const GRAPH_DEPTH_MIN = 1;
+const GRAPH_DEPTH_MAX = 4;
+
+export const RUNTIME_MODULE_CANDIDATES = {
+  forceGraph2d: [
+    'react-force-graph-2d',
+    '/vendor/react-force-graph-2d@1.27.1/react-force-graph-2d.mjs',
+    'https://esm.sh/react-force-graph-2d@1.27.1?external=react,react-dom',
+  ],
+  marked: [
+    'marked',
+    '/vendor/marked@14.1.4/marked.mjs',
+    'https://esm.sh/marked@14.1.4',
+  ],
+  dompurify: [
+    'dompurify',
+    '/vendor/dompurify@3.1.7/dompurify.mjs',
+    'https://esm.sh/dompurify@3.1.7',
+  ],
+};
 
 // Stable, theme-agnostic accent palette for primary-MOC color coding.
 // Chosen for distinguishability in both light and dark mode; MOC nodes
@@ -67,6 +87,54 @@ function fmtBytes(n) {
 function norm(v, min, max) {
   if (max <= min) return v > min ? 1 : 0;
   return Math.max(0, Math.min(1, (v - min) / (max - min)));
+}
+
+export async function importFirstAvailable(candidates, importer = (spec) => import(spec)) {
+  let lastErr = null;
+  for (const spec of candidates) {
+    try {
+      return await importer(spec);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('No runtime module candidates');
+}
+
+function edgeEndpointId(value) {
+  return typeof value === 'object' && value ? value.id : value;
+}
+
+export function deriveLocalGraph(graph, centerId, depth = 1) {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph?.edges) ? graph.edges : [];
+  if (!centerId || !nodes.some((node) => node.id === centerId)) {
+    return { nodes, edges };
+  }
+
+  const maxDepth = clamp(Number(depth) || 1, GRAPH_DEPTH_MIN, GRAPH_DEPTH_MAX);
+  const seen = new Set([centerId]);
+  let frontier = new Set([centerId]);
+
+  for (let step = 0; step < maxDepth; step++) {
+    const next = new Set();
+    for (const edge of edges) {
+      const source = edgeEndpointId(edge.source);
+      const target = edgeEndpointId(edge.target);
+      const sourceIn = frontier.has(source);
+      const targetIn = frontier.has(target);
+      if (sourceIn && !seen.has(target)) next.add(target);
+      if (targetIn && !seen.has(source)) next.add(source);
+    }
+    if (next.size === 0) break;
+    for (const id of next) seen.add(id);
+    frontier = next;
+  }
+
+  return {
+    nodes: nodes.filter((node) => seen.has(node.id)),
+    edges: edges.filter((edge) => seen.has(edgeEndpointId(edge.source)) && seen.has(edgeEndpointId(edge.target))),
+  };
 }
 
 export function nodeRadius(node = {}) {
@@ -137,6 +205,9 @@ export default function App({ appId, token }) {
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
+  const [localFocus, setLocalFocus] = useState(false);
+  const [focusDepth, setFocusDepth] = useState(1);
+  const [focusNodeId, setFocusNodeId] = useState(null);
   const [FG, setFG] = useState(null); // ForceGraph2D component
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
@@ -155,9 +226,7 @@ export default function App({ appId, token }) {
     let alive = true;
     (async () => {
       try {
-        const mod = await import(
-          'https://esm.sh/react-force-graph-2d@1.27.1?external=react,react-dom'
-        );
+        const mod = await importFirstAvailable(RUNTIME_MODULE_CANDIDATES.forceGraph2d);
         if (alive) setFG(() => mod.default);
       } catch (e) {
         // Graph view degrades to the list view if the lib can't load.
@@ -248,35 +317,55 @@ export default function App({ appId, token }) {
   // --- Node radius from importance + usage. ---
   const radiusForNode = useCallback((n) => nodeRadius(n), []);
 
+  const focusNode = useMemo(() => {
+    if (!graph || !focusNodeId) return null;
+    return graph.nodes.find((n) => n.id === focusNodeId) || null;
+  }, [graph, focusNodeId]);
+
+  useEffect(() => {
+    if (!graph || !focusNodeId) return;
+    if (!graph.nodes.some((n) => n.id === focusNodeId)) {
+      setFocusNodeId(null);
+      setLocalFocus(false);
+    }
+  }, [graph, focusNodeId]);
+
+  const visibleGraph = useMemo(() => {
+    if (!graph) return null;
+    return localFocus
+      ? deriveLocalGraph(graph, focusNodeId, focusDepth)
+      : { nodes: graph.nodes, edges: graph.edges };
+  }, [graph, localFocus, focusNodeId, focusDepth]);
+
   // --- Neighbor sets for hover dimming. ---
   const neighbors = useMemo(() => {
     const map = new Map();
-    if (!graph) return map;
+    if (!visibleGraph) return map;
     const add = (a, b) => {
       if (!map.has(a)) map.set(a, new Set());
       map.get(a).add(b);
     };
-    for (const e of graph.edges) {
+    for (const e of visibleGraph.edges) {
       const s = typeof e.source === 'object' ? e.source.id : e.source;
       const t = typeof e.target === 'object' ? e.target.id : e.target;
       add(s, t); add(t, s);
     }
     return map;
-  }, [graph]);
+  }, [visibleGraph]);
 
   // --- react-force-graph mutates node objects (x/y/vx/vy) in place, so it
   //     needs its own object references. Build once per graph. ---
   const fgData = useMemo(() => {
-    if (!graph) return { nodes: [], links: [] };
+    if (!visibleGraph) return { nodes: [], links: [] };
     return {
-      nodes: graph.nodes.map((n) => ({ ...n })),
-      links: graph.edges.map((e) => ({
+      nodes: visibleGraph.nodes.map((n) => ({ ...n })),
+      links: visibleGraph.edges.map((e) => ({
         source: typeof e.source === 'object' ? e.source.id : e.source,
         target: typeof e.target === 'object' ? e.target.id : e.target,
         kind: e.kind,
       })),
     };
-  }, [graph]);
+  }, [visibleGraph]);
 
   // --- Smooth hover focus: a 0..1 value per node that eases toward 1 for the
   //     hovered node + its neighbors and toward 0 for everything else, so the
@@ -297,7 +386,7 @@ export default function App({ appId, token }) {
       const k = 1 - Math.pow(0.0015, dt / 1000); // ~time-constant ease
       let moving = false;
       const cur = focusRef.current;
-      if (graph) for (const n of graph.nodes) {
+      if (visibleGraph) for (const n of visibleGraph.nodes) {
         const want = targets(n.id);
         const goal = want == null ? 1 : want;
         const v0 = cur.has(n.id) ? cur.get(n.id) : 1;
@@ -313,7 +402,7 @@ export default function App({ appId, token }) {
     cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [hoverId, neighbors, graph]);
+  }, [hoverId, neighbors, visibleGraph]);
 
   const focusOf = useCallback((id) => {
     const v = focusRef.current.get(id);
@@ -355,8 +444,8 @@ export default function App({ appId, token }) {
     (async () => {
       try {
         const [mk, dp] = await Promise.all([
-          import('https://esm.sh/marked@14.1.4'),
-          import('https://esm.sh/dompurify@3.1.7'),
+          importFirstAvailable(RUNTIME_MODULE_CANDIDATES.marked),
+          importFirstAvailable(RUNTIME_MODULE_CANDIDATES.dompurify),
         ]);
         if (alive) {
           setMarked(() => mk.marked || mk.default);
@@ -580,6 +669,8 @@ export default function App({ appId, token }) {
     return c;
   }, [graph]);
 
+  const visibleCounts = visibleGraph || { nodes: [], edges: [] };
+
   // ---------------------------------------------------------------- render ---
   return (
     <div style={S.root}>
@@ -706,7 +797,7 @@ export default function App({ appId, token }) {
                 cooldownTicks={Infinity}
                 cooldownTime={45000}
                 d3AlphaDecay={0.0145}
-                onNodeClick={(n) => { setSelected(n); setHoverId(null); }}
+                onNodeClick={(n) => { setSelected(n); setFocusNodeId(n.id); setHoverId(null); }}
                 onNodeHover={(n) => setHoverId(n ? n.id : null)}
                 onBackgroundClick={() => setSelected(null)}
                 d3VelocityDecay={0.26}
@@ -721,7 +812,54 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            <div style={S.graphHint}>Drag to pan · scroll to zoom · tap a node to read it</div>
+            <div style={S.graphHint} className="mg-graph-hint">Drag to pan · scroll to zoom · tap a node to read it</div>
+
+            <div style={S.graphTools} className="mg-graph-tools">
+              <div style={S.focusSwitch}>
+                <button
+                  className="mg-tgl"
+                  style={{ ...S.focusBtn, ...(!localFocus ? S.focusActive : {}) }}
+                  onClick={() => setLocalFocus(false)}
+                >
+                  All
+                </button>
+                <button
+                  className="mg-tgl"
+                  style={{ ...S.focusBtn, ...(localFocus ? S.focusActive : {}), ...(!focusNode ? S.focusDisabled : {}) }}
+                  disabled={!focusNode}
+                  onClick={() => {
+                    if (focusNode) setLocalFocus(true);
+                  }}
+                  title={focusNode ? 'Show nearby notes' : 'Select a node first'}
+                >
+                  Local
+                </button>
+              </div>
+
+              <div style={{ ...S.depthControl, ...(!localFocus ? S.depthMuted : {}) }}>
+                <div style={S.depthTop}>
+                  <span style={S.depthLabel}>{focusNode ? (focusNode.title || focusNode.id) : 'No focus'}</span>
+                  <span style={S.depthValue}>{localFocus ? `${visibleCounts.nodes.length}/${graph.nodes.length}` : graph.nodes.length}</span>
+                </div>
+                <input
+                  className="mg-depth"
+                  type="range"
+                  min={GRAPH_DEPTH_MIN}
+                  max={GRAPH_DEPTH_MAX}
+                  step="1"
+                  value={focusDepth}
+                  disabled={!localFocus || !focusNode}
+                  onChange={(e) => setFocusDepth(Number(e.target.value))}
+                  aria-label="Local graph depth"
+                />
+                <div style={S.depthMarks}>
+                  <span>1</span>
+                  <span>2</span>
+                  <span>3</span>
+                  <span>4</span>
+                </div>
+              </div>
+            </div>
 
             {legendItems.length > 0 && (
               <div style={S.legend} className="mg-scroll">
@@ -739,7 +877,7 @@ export default function App({ appId, token }) {
                     onMouseLeave={() => setHoverId(null)}
                     onClick={() => {
                       const n = graph.nodes.find((x) => x.id === it.slug);
-                      if (n) setSelected(n);
+                      if (n) { setSelected(n); setFocusNodeId(n.id); }
                     }}
                   >
                     <span style={{ ...S.legendSwatch, background: it.color }} />
@@ -771,7 +909,7 @@ export default function App({ appId, token }) {
                     <tr
                       key={n.id}
                       style={S.tr}
-                      onClick={() => { setSelected(n); }}
+                      onClick={() => { setSelected(n); setFocusNodeId(n.id); }}
                       className="mg-row"
                     >
                       <td style={S.tdTitle}>
@@ -1124,6 +1262,40 @@ const S = {
     pointerEvents: 'none', opacity: 0.92, whiteSpace: 'nowrap', maxWidth: '92%',
     overflow: 'hidden', textOverflow: 'ellipsis',
   },
+  graphTools: {
+    position: 'absolute', top: 12, right: 12, width: 198, padding: 10,
+    background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12,
+    boxShadow: '0 8px 28px rgba(0,0,0,0.28)', backdropFilter: 'blur(4px)',
+    display: 'flex', flexDirection: 'column', gap: 9,
+  },
+  focusSwitch: {
+    display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 3, padding: 3,
+    background: 'var(--surface2)', borderRadius: 9, border: '1px solid var(--border)',
+  },
+  focusBtn: {
+    border: 'none', background: 'transparent', color: 'var(--muted)', borderRadius: 6,
+    padding: '5px 8px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+    fontFamily: 'var(--font)', transition: 'color 0.15s, background 0.15s, opacity 0.15s',
+  },
+  focusActive: {
+    background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
+  },
+  focusDisabled: { opacity: 0.45, cursor: 'not-allowed' },
+  depthControl: { display: 'flex', flexDirection: 'column', gap: 5 },
+  depthMuted: { opacity: 0.72 },
+  depthTop: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  depthLabel: {
+    minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    color: 'var(--text)', fontSize: 11.5, fontWeight: 600,
+  },
+  depthValue: {
+    color: 'var(--muted)', fontSize: 10.5, fontWeight: 700,
+    fontVariantNumeric: 'tabular-nums', flexShrink: 0,
+  },
+  depthMarks: {
+    display: 'flex', justifyContent: 'space-between', color: 'var(--muted)',
+    fontSize: 9.5, fontWeight: 700, padding: '0 2px',
+  },
 
   legend: {
     position: 'absolute', left: 12, bottom: 12, background: 'var(--surface)',
@@ -1292,6 +1464,10 @@ const CSS = `
 .mg-close:hover { background: var(--border); color: var(--text); }
 .mg-discuss:hover { filter: brightness(1.06); }
 .mg-discuss:active { transform: translateY(1px); }
+.mg-depth {
+  width: 100%; margin: 0; accent-color: var(--accent);
+}
+.mg-depth:disabled { cursor: not-allowed; }
 
 .mg-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
 .mg-scroll::-webkit-scrollbar-thumb {
@@ -1316,6 +1492,8 @@ const CSS = `
 .mg-panel { inset: 0 0 0 auto; width: min(460px, 92vw); animation: mg-panel-in 0.22s cubic-bezier(0.22,1,0.36,1); }
 .mg-scrim { animation: mg-scrim-in 0.2s ease; }
 @media (max-width: 640px) {
+  .mg-graph-hint { display: none; }
+  .mg-graph-tools { top: 8px !important; right: 8px !important; left: 8px !important; width: auto !important; }
   .mg-panel {
     inset: auto 0 0 0; width: 100%; height: 82%; border-left: none;
     border-top: 1px solid var(--border); border-radius: 18px 18px 0 0;

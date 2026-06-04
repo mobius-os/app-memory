@@ -1,7 +1,7 @@
 {
   "id": "mind",
   "name": "Mind",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "An Obsidian-style graph of everything the agent has learned, every interaction and lesson it picks up. Nodes are concepts and entities, edges are how they connect, and it grows over time. It is the agent's own memory made browsable, not a profile it keeps of you.",
   "author": "mobius-os",
   "license": "MIT",

@@ -21,7 +21,10 @@ execFileSync(esbuild, [
 })
 
 const {
+  RUNTIME_MODULE_CANDIDATES,
   MEMORY_SANITIZE_OPTIONS,
+  deriveLocalGraph,
+  importFirstAvailable,
   neutralizeMemoryMarkdown,
   nodeRadius,
   safeMemoryPath,
@@ -76,4 +79,53 @@ test('memory sanitizer forbids network-bearing tags and attributes', () => {
   assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('href'))
   assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('src'))
   assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('srcset'))
+})
+
+test('deriveLocalGraph returns the selected neighborhood by depth', () => {
+  const graph = {
+    nodes: ['a', 'b', 'c', 'd', 'x'].map((id) => ({ id })),
+    edges: [
+      { source: 'a', target: 'b', kind: 'link' },
+      { source: { id: 'b' }, target: { id: 'c' }, kind: 'link' },
+      { source: 'c', target: 'd', kind: 'link' },
+      { source: 'x', target: 'd', kind: 'link' },
+    ],
+  }
+
+  assert.deepEqual(
+    deriveLocalGraph(graph, 'a', 1).nodes.map((n) => n.id),
+    ['a', 'b'],
+  )
+  assert.deepEqual(
+    deriveLocalGraph(graph, 'a', 2).nodes.map((n) => n.id),
+    ['a', 'b', 'c'],
+  )
+  assert.deepEqual(
+    deriveLocalGraph(graph, 'a', 2).edges.map((e) => [e.source.id || e.source, e.target.id || e.target]),
+    [['a', 'b'], ['b', 'c']],
+  )
+})
+
+test('deriveLocalGraph falls back to the full graph without a valid center', () => {
+  const graph = {
+    nodes: [{ id: 'a' }, { id: 'b' }],
+    edges: [{ source: 'a', target: 'b', kind: 'link' }],
+  }
+
+  assert.equal(deriveLocalGraph(graph, null, 1).nodes.length, 2)
+  assert.equal(deriveLocalGraph(graph, 'missing', 1).edges.length, 1)
+})
+
+test('importFirstAvailable tries importmap, vendor, then CDN candidates in order', async () => {
+  const seen = []
+  const mod = await importFirstAvailable(['bare', '/vendor/lib.mjs', 'https://esm.sh/lib'], async (spec) => {
+    seen.push(spec)
+    if (spec !== 'https://esm.sh/lib') throw new Error('nope')
+    return { ok: true }
+  })
+
+  assert.deepEqual(seen, ['bare', '/vendor/lib.mjs', 'https://esm.sh/lib'])
+  assert.equal(mod.ok, true)
+  assert.equal(RUNTIME_MODULE_CANDIDATES.forceGraph2d[0], 'react-force-graph-2d')
+  assert.ok(RUNTIME_MODULE_CANDIDATES.marked[1].startsWith('/vendor/'))
 })
