@@ -211,6 +211,7 @@ export default function App({ appId, token }) {
   const [FG, setFG] = useState(null); // ForceGraph2D component
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
+  const panelNavRef = useRef(null);
 
   const wrapRef = useRef(null);
   const fgRef = useRef(null);
@@ -475,6 +476,23 @@ export default function App({ appId, token }) {
 
   const closePanel = useCallback(() => setSelected(null), []);
 
+  const openPanel = useCallback(async (node) => {
+    if (!node) return;
+    if (!selected && window.mobius?.nav?.open) {
+      try { panelNavRef.current?.close?.(); } catch {}
+      const handle = window.mobius.nav.open('mind-note', () => {
+        panelNavRef.current = null;
+        setSelected(null);
+      });
+      panelNavRef.current = handle;
+      await handle.ready?.catch(() => false);
+      if (panelNavRef.current !== handle) return;
+    }
+    setSelected(node);
+    setFocusNodeId(node.id);
+    setHoverId(null);
+  }, [selected]);
+
   const discuss = useCallback((node) => {
     const title = node.title || node.id;
     const draft = "Let's talk about what you know: " + title;
@@ -487,10 +505,20 @@ export default function App({ appId, token }) {
   // Esc closes the panel — keyboard parity with the scrim tap.
   useEffect(() => {
     if (!selected) return;
-    const onKey = (e) => { if (e.key === 'Escape') setSelected(null); };
+    const onKey = (e) => { if (e.key === 'Escape') closePanel(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selected]);
+  }, [selected, closePanel]);
+
+  useEffect(() => {
+    if (selected) return;
+    try { panelNavRef.current?.close?.(); } catch {}
+    panelNavRef.current = null;
+  }, [!!selected]);
+
+  useEffect(() => () => {
+    try { panelNavRef.current?.close?.(); } catch {}
+  }, []);
 
   // --- Canvas link painter: a soft curve, brighter when it touches the
   //     hovered focus. Drawn before nodes (react-force-graph paints links
@@ -797,9 +825,9 @@ export default function App({ appId, token }) {
                 cooldownTicks={Infinity}
                 cooldownTime={45000}
                 d3AlphaDecay={0.0145}
-                onNodeClick={(n) => { setSelected(n); setFocusNodeId(n.id); setHoverId(null); }}
+                onNodeClick={openPanel}
                 onNodeHover={(n) => setHoverId(n ? n.id : null)}
-                onBackgroundClick={() => setSelected(null)}
+                onBackgroundClick={closePanel}
                 d3VelocityDecay={0.26}
                 warmupTicks={28}
               />
@@ -877,7 +905,7 @@ export default function App({ appId, token }) {
                     onMouseLeave={() => setHoverId(null)}
                     onClick={() => {
                       const n = graph.nodes.find((x) => x.id === it.slug);
-                      if (n) { setSelected(n); setFocusNodeId(n.id); }
+                      if (n) openPanel(n);
                     }}
                   >
                     <span style={{ ...S.legendSwatch, background: it.color }} />
@@ -909,7 +937,7 @@ export default function App({ appId, token }) {
                     <tr
                       key={n.id}
                       style={S.tr}
-                      onClick={() => { setSelected(n); setFocusNodeId(n.id); }}
+                      onClick={() => openPanel(n)}
                       className="mg-row"
                     >
                       <td style={S.tdTitle}>
