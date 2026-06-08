@@ -2,7 +2,7 @@
   "id": "mind",
   "name": "Mind",
   "version": "1.3.1",
-  "description": "A browsable graph of what Möbius has learned — its own memory, grown over time, not a profile it keeps of you.",
+  "description": "A browsable graph of what Möbius has learned, grown over time. It is the agent’s own memory, not a profile it keeps of you.",
   "author": "mobius-os",
   "license": "MIT",
   "homepage": "https://github.com/mobius-os/app-mind",
