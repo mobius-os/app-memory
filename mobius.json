@@ -1,7 +1,7 @@
 {
   "id": "mind",
   "name": "Mind",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "description": "A browsable graph of what Möbius has learned over time, the agent’s own memory.",
   "author": "mobius-os",
   "license": "MIT",

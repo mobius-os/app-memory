@@ -24,6 +24,7 @@ const {
   RUNTIME_MODULE_CANDIDATES,
   MEMORY_SANITIZE_OPTIONS,
   deriveLocalGraph,
+  filterNodes,
   importFirstAvailable,
   neutralizeMemoryMarkdown,
   nodeRadius,
@@ -114,6 +115,67 @@ test('deriveLocalGraph falls back to the full graph without a valid center', () 
 
   assert.equal(deriveLocalGraph(graph, null, 1).nodes.length, 2)
   assert.equal(deriveLocalGraph(graph, 'missing', 1).edges.length, 1)
+})
+
+test('filterNodes returns null when no filter is active', () => {
+  const nodes = [{ id: 'a', title: 'Alpha', mocs: [], tags: [] }]
+  assert.equal(filterNodes(nodes, {}), null)
+  assert.equal(filterNodes(nodes, { query: '', mocSlug: null }), null)
+})
+
+test('filterNodes matches by title substring (case-insensitive)', () => {
+  const nodes = [
+    { id: 'note-alpha', title: 'Alpha note', mocs: [], tags: [] },
+    { id: 'note-beta', title: 'Beta study', mocs: [], tags: [] },
+    { id: 'note-gamma', title: 'Gamma', mocs: [], tags: ['learning'] },
+  ]
+  const result = filterNodes(nodes, { query: 'alpha' })
+  assert.equal(result.length, 1)
+  assert.equal(result[0].id, 'note-alpha')
+})
+
+test('filterNodes matches by tag', () => {
+  const nodes = [
+    { id: 'a', title: 'A', mocs: [], tags: ['machine-learning'] },
+    { id: 'b', title: 'B', mocs: [], tags: ['cooking'] },
+  ]
+  const result = filterNodes(nodes, { query: 'learning' })
+  assert.equal(result.length, 1)
+  assert.equal(result[0].id, 'a')
+})
+
+test('filterNodes matches by id', () => {
+  const nodes = [
+    { id: 'special-topic', title: 'Special', mocs: [], tags: [] },
+    { id: 'other', title: 'Other', mocs: [], tags: [] },
+  ]
+  const result = filterNodes(nodes, { query: 'special-topic' })
+  assert.equal(result.length, 1)
+  assert.equal(result[0].id, 'special-topic')
+})
+
+test('filterNodes filters by MOC membership', () => {
+  const nodes = [
+    { id: 'hub', title: 'Hub', type: 'moc', mocs: [], tags: [] },
+    { id: 'member', title: 'Member', mocs: ['hub'], tags: [] },
+    { id: 'outsider', title: 'Outsider', mocs: ['other'], tags: [] },
+  ]
+  const result = filterNodes(nodes, { mocSlug: 'hub' })
+  assert.equal(result.length, 2)
+  assert.ok(result.some((n) => n.id === 'hub'))
+  assert.ok(result.some((n) => n.id === 'member'))
+  assert.ok(!result.some((n) => n.id === 'outsider'))
+})
+
+test('filterNodes combines MOC and search filters', () => {
+  const nodes = [
+    { id: 'hub', title: 'Hub', type: 'moc', mocs: [], tags: [] },
+    { id: 'member-a', title: 'Alpha note', mocs: ['hub'], tags: [] },
+    { id: 'member-b', title: 'Beta note', mocs: ['hub'], tags: [] },
+  ]
+  const result = filterNodes(nodes, { query: 'alpha', mocSlug: 'hub' })
+  assert.equal(result.length, 1)
+  assert.equal(result[0].id, 'member-a')
 })
 
 test('importFirstAvailable tries importmap, vendor, then CDN candidates in order', async () => {

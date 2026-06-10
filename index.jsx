@@ -194,6 +194,66 @@ function relDate(s) {
   return Math.floor(days / 365) + 'y ago';
 }
 
+// filterNodes — pure helper used by both the component and the test suite.
+// Returns the filtered subset of `nodes` that match the given `query` (case-
+// insensitive substring across title/id/tags) and/or `mocSlug` (member of MOC).
+// Returns null when neither filter is active (caller treats null as "show all").
+export function filterNodes(nodes, { query = '', mocSlug = null } = {}) {
+  const q = (query || '').trim().toLowerCase();
+  const hasMoc = Boolean(mocSlug);
+  const hasSearch = Boolean(q);
+  if (!hasMoc && !hasSearch) return null;
+  return nodes.filter((n) => {
+    if (hasMoc) {
+      const inMoc = n.id === mocSlug || (Array.isArray(n.mocs) && n.mocs.includes(mocSlug));
+      if (!inMoc) return false;
+    }
+    if (hasSearch) {
+      const titleHit = (n.title || n.id).toLowerCase().includes(q);
+      const tagHit = Array.isArray(n.tags) && n.tags.some((t) => t.toLowerCase().includes(q));
+      const idHit = n.id.toLowerCase().includes(q);
+      if (!titleHit && !tagHit && !idHit) return false;
+    }
+    return true;
+  });
+}
+
+// Debounce hook — returns the debounced value after `delay` ms of quiet.
+function useDebounce(value, delay) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]);
+  return debounced;
+}
+
+// Guarded signal emit — silently no-ops when the platform bridge is absent.
+// Each event is a line in signals.jsonl under the app's storage.
+function emitSignal(appId, token, name, data = {}) {
+  try {
+    const payload = { name, ts: new Date().toISOString(), ...data };
+    fetch(`/api/storage/apps/${appId}/signals.jsonl`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+  } catch {}
+}
+
+// 60-day stale threshold in milliseconds.
+const STALE_AGE_MS = 60 * 24 * 60 * 60 * 1000;
+
+function isStaleNote(node) {
+  // A note is "stale?" when access_count is 0 (effectively unused) AND
+  // the updated frontmatter date is older than 60 days.
+  if ((Number(node.access_count) || 0) !== 0) return false;
+  if (!node.updated) return false;
+  const t = Date.parse(node.updated);
+  if (Number.isNaN(t)) return false;
+  return Date.now() - t > STALE_AGE_MS;
+}
+
 export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ready | empty | error
@@ -212,6 +272,11 @@ export default function App({ appId, token }) {
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
   const panelNavRef = useRef(null);
+  const [searchRaw, setSearchRaw] = useState('');
+  const [mocFilter, setMocFilter] = useState(null); // string | null — MOC slug to filter by
+  const searchQuery = useDebounce(searchRaw, 180);
+  const searchInputRef = useRef(null);
+  const appReadyFiredRef = useRef(false);
 
   const wrapRef = useRef(null);
   const fgRef = useRef(null);
@@ -276,11 +341,23 @@ export default function App({ appId, token }) {
       setStatus(nodes.length === 0 ? (hasErrors ? 'broken' : 'empty') : 'ready');
     } catch (e) {
       // A failed background refresh must not blow away an already-good graph.
-      if (!quiet) { setErrMsg(String(e.message || e)); setStatus('error'); }
+      if (!quiet) {
+        const msg = String(e.message || e);
+        setErrMsg(msg);
+        setStatus('error');
+        emitSignal(appId, token, 'error', { message: 'graph load failed: ' + msg });
+      }
     }
-  }, [authHeaders]);
+  }, [authHeaders, appId, token]);
 
   useEffect(() => { loadGraph(false); }, [loadGraph]);
+
+  // Emit app_ready once with the node count after the first successful load.
+  useEffect(() => {
+    if (status !== 'ready' || appReadyFiredRef.current) return;
+    appReadyFiredRef.current = true;
+    emitSignal(appId, token, 'app_ready', { node_count: graph?.nodes?.length ?? 0 });
+  }, [status, appId, token, graph]);
 
   // Re-fetch the graph when the user returns to the app (tab visible / window
   // focused). The nightly rebuild happens while Mind is closed; this is what
@@ -362,11 +439,25 @@ export default function App({ appId, token }) {
   // focusNodeId — selecting a node (which sets focusNodeId) would otherwise
   // recompute this memo, churn a new object down to fgData, and reheat the
   // whole layout. Only the local-focus path actually reads focusNodeId/depth.
+  // When a search/MOC filter is active it takes precedence over localFocus
+  // (the filter is an explicit narrowing; local focus adds no further value).
   const visibleGraph = useMemo(() => {
     if (!graph) return null;
+    if (filteredNodes) {
+      const ids = new Set(filteredNodes.map((n) => n.id));
+      return {
+        nodes: filteredNodes,
+        edges: graph.edges.filter((e) => {
+          const s = typeof e.source === 'object' ? e.source.id : e.source;
+          const t = typeof e.target === 'object' ? e.target.id : e.target;
+          return ids.has(s) && ids.has(t);
+        }),
+      };
+    }
     if (!localFocus) return { nodes: graph.nodes, edges: graph.edges };
     return deriveLocalGraph(graph, focusNodeId, focusDepth);
-  }, [graph, localFocus, localFocus ? focusNodeId : null, localFocus ? focusDepth : null]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graph, filteredNodes, localFocus, localFocus ? focusNodeId : null, localFocus ? focusDepth : null]);
 
   // --- Neighbor sets for hover dimming. ---
   const neighbors = useMemo(() => {
@@ -548,10 +639,11 @@ export default function App({ appId, token }) {
       await handle.ready?.catch(() => false);
       if (panelNavRef.current !== handle) return;
     }
+    emitSignal(appId, token, 'note_opened', { node_id: node.id });
     setSelected(node);
     setFocusNodeId(node.id);
     setHoverId(null);
-  }, [selected]);
+  }, [selected, appId, token]);
 
   const discuss = useCallback((node) => {
     const title = node.title || node.id;
@@ -561,6 +653,27 @@ export default function App({ appId, token }) {
       window.location.origin,
     );
   }, []);
+
+  const correct = useCallback((node) => {
+    const title = node.title || node.id;
+    // Build the slug from the path if available, otherwise fall back to the id.
+    const rawPath = node.path || ('notes/' + node.id + '.md');
+    const slug = rawPath.replace(/^notes\//, '').replace(/\.md$/, '');
+    // First ~200 chars of the note body (loaded if the panel is open; otherwise empty).
+    const preview = noteState.status === 'ready'
+      ? noteState.md.slice(0, 200).replace(/\n+/g, ' ').trim()
+      : '';
+    const draft = [
+      `My memory note "${title}" (notes/${slug}.md) says: ${preview}`,
+      '',
+      'That\'s wrong or outdated because: ',
+    ].join('\n');
+    emitSignal(appId, token, 'correction_started', { node_id: node.id });
+    window.parent.postMessage(
+      { type: 'moebius:new-chat', draft },
+      window.location.origin,
+    );
+  }, [appId, token, noteState]);
 
   // Esc closes the panel — keyboard parity with the scrim tap.
   useEffect(() => {
@@ -702,10 +815,19 @@ export default function App({ appId, token }) {
     ctx.fill();
   }, [radiusForNode]);
 
+  // --- Search / MOC-filter: delegate to the exported pure helper. ---
+  // Applies to BOTH the graph view (controls visibleGraph override) and the
+  // list view (controls sortedNodes). The graph filters the node set but keeps
+  // the edges that connect the surviving nodes.
+  const filteredNodes = useMemo(
+    () => graph ? filterNodes(graph.nodes, { query: searchQuery, mocSlug: mocFilter }) : null,
+    [graph, searchQuery, mocFilter],
+  );
+
   // --- List view: sorted rows with normalized usage/size bars. ---
   const sortedNodes = useMemo(() => {
     if (!graph) return [];
-    const rows = [...graph.nodes];
+    const rows = filteredNodes ? [...filteredNodes] : [...graph.nodes];
     rows.sort((a, b) => {
       let av, bv;
       if (sortKey === 'title') { av = (a.title || a.id).toLowerCase(); bv = (b.title || b.id).toLowerCase(); }
@@ -715,7 +837,7 @@ export default function App({ appId, token }) {
       return 0;
     });
     return rows;
-  }, [graph, sortKey, sortDir]);
+  }, [graph, filteredNodes, sortKey, sortDir]);
 
   const ranges = useMemo(() => {
     const r = { size_bytes: [Infinity, -Infinity], access_count: [Infinity, -Infinity], importance: [1, 5] };
@@ -778,6 +900,28 @@ export default function App({ appId, token }) {
         </div>
 
         <div style={S.headerRight}>
+          {status === 'ready' && (
+            <div style={S.searchWrap}>
+              <input
+                ref={searchInputRef}
+                className="mg-search"
+                type="search"
+                placeholder="Search…"
+                value={searchRaw}
+                onChange={(e) => { setSearchRaw(e.target.value); setMocFilter(null); }}
+                aria-label="Search notes"
+                style={S.searchInput}
+              />
+              {searchRaw && (
+                <button
+                  style={S.searchClear}
+                  className="mg-tgl"
+                  onClick={() => { setSearchRaw(''); searchInputRef.current?.focus(); }}
+                  aria-label="Clear search"
+                >×</button>
+              )}
+            </div>
+          )}
           {problems.length > 0 && (
             <button
               style={{ ...S.healthBadge, ...(errCount ? S.healthErr : S.healthWarn) }}
@@ -806,6 +950,21 @@ export default function App({ appId, token }) {
           </div>
         </div>
       </header>
+
+      {/* Active filter banner — shown when a MOC color filter is active */}
+      {mocFilter && (
+        <div style={S.filterBanner}>
+          <span style={S.filterLabel}>
+            Filtered by: <strong>{legendItems.find((it) => it.slug === mocFilter)?.label || mocFilter}</strong>
+          </span>
+          <button
+            style={S.filterClear}
+            className="mg-tgl"
+            onClick={() => setMocFilter(null)}
+            aria-label="Clear MOC filter"
+          >Clear</button>
+        </div>
+      )}
 
       {showHealth && problems.length > 0 && (
         <div style={S.healthPanel} className="mg-scroll">
@@ -968,18 +1127,24 @@ export default function App({ appId, token }) {
                   <span style={S.legendLabel}>Hub (MOC)</span>
                 </div>
                 {/* Render every hub — the container scrolls (maxHeight + mg-scroll),
-                    so we never silently drop hubs past an arbitrary cap. */}
+                    so we never silently drop hubs past an arbitrary cap.
+                    Tapping a legend swatch filters the graph/list by that MOC. */}
                 {legendItems.map((it) => (
                   <button
                     key={it.slug}
-                    style={S.legendRow}
+                    style={{
+                      ...S.legendRow,
+                      ...(mocFilter === it.slug ? S.legendRowActive : {}),
+                    }}
                     className="mg-legend-row"
                     onMouseEnter={() => setHoverId(it.slug)}
                     onMouseLeave={() => setHoverId(null)}
                     onClick={() => {
-                      const n = graph.nodes.find((x) => x.id === it.slug);
-                      if (n) openPanel(n);
+                      // Toggle: tapping the active filter clears it; tapping another sets it.
+                      setMocFilter((prev) => (prev === it.slug ? null : it.slug));
+                      setSearchRaw('');
                     }}
+                    title={mocFilter === it.slug ? 'Clear filter' : `Filter by ${it.label}`}
                   >
                     <span style={{ ...S.legendSwatch, background: it.color }} />
                     <span style={S.legendLabel}>{it.label}</span>
@@ -992,50 +1157,63 @@ export default function App({ appId, token }) {
 
         {status === 'ready' && view === 'list' && (
           <div style={S.listWrap} className="mg-scroll">
-            <table style={S.table}>
-              <thead>
-                <tr>
-                  <Th label="Note" active={sortKey === 'title'} dir={sortDir} onClick={() => toggleSort('title')} align="left" />
-                  <Th label="Type" />
-                  <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onClick={() => toggleSort('importance')} />
-                  <Th label="Used" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
-                  <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
-                </tr>
-              </thead>
-              <tbody>
-                {sortedNodes.map((n) => {
-                  const sN = norm(n.size_bytes || 0, ranges.size_bytes[0], ranges.size_bytes[1]);
-                  const uN = norm(n.access_count || 0, ranges.access_count[0], ranges.access_count[1]);
-                  return (
-                    <tr
-                      key={n.id}
-                      style={S.tr}
-                      onClick={() => openPanel(n)}
-                      className="mg-row"
-                    >
-                      <td style={S.tdTitle}>
-                        <span style={{ ...S.rowDot, background: colorForNode(n) }} />
-                        <span style={S.rowTitleText}>{n.title || n.id}</span>
-                      </td>
-                      <td style={S.td}>
-                        <span style={{ ...S.typeTag, ...(n.type === 'moc' ? S.typeMoc : {}) }}>
-                          {n.type === 'moc' ? 'hub' : 'note'}
-                        </span>
-                      </td>
-                      <td style={{ ...S.td, ...S.tdNum }}>
-                        <ImportanceDots value={n.importance || 1} />
-                      </td>
-                      <td style={S.tdBar}>
-                        <Bar value={uN} label={String(n.access_count || 0)} hue="var(--green, #6ee7b7)" />
-                      </td>
-                      <td style={S.tdBar}>
-                        <Bar value={sN} label={fmtBytes(n.size_bytes)} hue={colorForNode(n)} />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            {sortedNodes.length === 0 ? (
+              <div style={S.center}>
+                <div style={S.centerText}>No notes match your search.</div>
+              </div>
+            ) : (
+              <table style={S.table}>
+                <thead>
+                  <tr>
+                    <Th label="Note" active={sortKey === 'title'} dir={sortDir} onClick={() => toggleSort('title')} align="left" />
+                    <Th label="Type" />
+                    <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onClick={() => toggleSort('importance')} />
+                    <Th label="Used" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
+                    <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedNodes.map((n) => {
+                    const sN = norm(n.size_bytes || 0, ranges.size_bytes[0], ranges.size_bytes[1]);
+                    const uN = norm(n.access_count || 0, ranges.access_count[0], ranges.access_count[1]);
+                    const stale = isStaleNote(n);
+                    return (
+                      <tr
+                        key={n.id}
+                        style={S.tr}
+                        onClick={() => openPanel(n)}
+                        className="mg-row"
+                      >
+                        <td style={S.tdTitle}>
+                          <span style={{ ...S.rowDot, background: colorForNode(n) }} />
+                          <span style={S.rowTitleText}>{n.title || n.id}</span>
+                          {stale && (
+                            <span style={S.staleDot} title="Not accessed in 60+ days — may be outdated">
+                              <span style={S.staleDotCore} />
+                              <span style={S.staleHint}>stale?</span>
+                            </span>
+                          )}
+                        </td>
+                        <td style={S.td}>
+                          <span style={{ ...S.typeTag, ...(n.type === 'moc' ? S.typeMoc : {}) }}>
+                            {n.type === 'moc' ? 'hub' : 'note'}
+                          </span>
+                        </td>
+                        <td style={{ ...S.td, ...S.tdNum }}>
+                          <ImportanceDots value={n.importance || 1} />
+                        </td>
+                        <td style={S.tdBar}>
+                          <Bar value={uN} label={String(n.access_count || 0)} hue="var(--green, #6ee7b7)" />
+                        </td>
+                        <td style={S.tdBar}>
+                          <Bar value={sN} label={fmtBytes(n.size_bytes)} hue={colorForNode(n)} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         )}
       </main>
@@ -1094,10 +1272,21 @@ export default function App({ appId, token }) {
             </div>
 
             <div style={S.panelFoot} className="mg-panel-foot">
-              <button style={S.discussBtn} className="mg-discuss" onClick={() => discuss(selected)}>
-                <ChatGlyph />
-                Discuss in a new chat
-              </button>
+              <div style={S.panelFootRow}>
+                <button style={S.discussBtn} className="mg-discuss" onClick={() => discuss(selected)}>
+                  <ChatGlyph />
+                  Discuss in a new chat
+                </button>
+                <button
+                  style={S.correctBtn}
+                  className="mg-discuss"
+                  onClick={() => correct(selected)}
+                  title="Flag this note as wrong or outdated"
+                >
+                  <FlagGlyph />
+                  This looks wrong
+                </button>
+              </div>
             </div>
           </aside>
         </>
@@ -1200,6 +1389,14 @@ function ChatGlyph() {
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ marginRight: 7 }}>
       <path d="M2.5 4.5a1.5 1.5 0 0 1 1.5-1.5h8a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 11H6l-3 2.5V11H4a1.5 1.5 0 0 1-1.5-1.5v-5Z"
         stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function FlagGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ marginRight: 6 }}>
+      <path d="M3 2v12M3 2h7.5l-2 4 2 4H3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -1527,12 +1724,60 @@ const S = {
   notePlaceholder: { display: 'flex', flexDirection: 'column', gap: 11, paddingTop: 4 },
   pre: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'var(--mono)', fontSize: 12.5 },
   panelFoot: { padding: 14, borderTop: '1px solid var(--border)', background: 'var(--surface)' },
+  panelFootRow: { display: 'flex', flexDirection: 'column', gap: 8 },
   discussBtn: {
     width: '100%', border: 'none', borderRadius: 11, padding: '12px 16px',
     background: 'var(--accent)', color: '#fff', fontSize: 14, fontWeight: 600,
     cursor: 'pointer', fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
     justifyContent: 'center', transition: 'filter 0.15s, transform 0.05s',
     boxShadow: '0 6px 18px var(--accent-dim, rgba(167,139,250,0.35))',
+  },
+  correctBtn: {
+    width: '100%', borderRadius: 11, padding: '10px 16px', fontSize: 13.5, fontWeight: 600,
+    cursor: 'pointer', fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
+    justifyContent: 'center', transition: 'filter 0.15s, transform 0.05s',
+    background: 'var(--surface2)', color: 'var(--muted)',
+    border: '1px solid var(--border)',
+  },
+
+  // Search bar
+  searchWrap: { position: 'relative', display: 'flex', alignItems: 'center' },
+  searchInput: {
+    padding: '7px 30px 7px 10px', border: '1px solid var(--border)', borderRadius: 9,
+    background: 'var(--bg)', color: 'var(--text)', fontSize: 12.5, fontFamily: 'var(--font)',
+    width: 148, outline: 'none', transition: 'border-color 0.15s, width 0.2s',
+  },
+  searchClear: {
+    position: 'absolute', right: 4, border: 'none', background: 'transparent',
+    color: 'var(--muted)', fontSize: 16, lineHeight: 1, cursor: 'pointer',
+    padding: '2px 5px', fontFamily: 'var(--font)',
+  },
+
+  // Active MOC filter banner
+  filterBanner: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    padding: '6px 14px', background: 'var(--accent-dim, rgba(167,139,250,0.1))',
+    borderBottom: '1px solid var(--border)', fontSize: 12, flexShrink: 0,
+  },
+  filterLabel: { color: 'var(--text)' },
+  filterClear: {
+    border: 'none', background: 'transparent', color: 'var(--accent)', fontSize: 12,
+    fontWeight: 700, cursor: 'pointer', padding: '2px 6px', fontFamily: 'var(--font)',
+  },
+
+  // Legend row active state
+  legendRowActive: { background: 'var(--accent-dim, rgba(167,139,250,0.12))' },
+
+  // Stale note indicator in list view
+  staleDot: {
+    display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 5, flexShrink: 0,
+  },
+  staleDotCore: {
+    width: 5, height: 5, borderRadius: '50%', background: 'var(--accent-hover, #f0c674)',
+    flexShrink: 0, display: 'inline-block',
+  },
+  staleHint: {
+    fontSize: 10, color: 'var(--accent-hover, #f0c674)', fontWeight: 600, whiteSpace: 'nowrap',
   },
 };
 
@@ -1647,6 +1892,11 @@ const CSS = `
   .mg-panel-foot { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
 }
 /* /mobius-ui:Sheet */
+
+/* mobius-ui:Search v1 — keep in sync; library candidate. Diverge below the marker only. */
+.mg-search:focus { border-color: var(--accent) !important; }
+.mg-search::-webkit-search-cancel-button { display: none; }
+/* /mobius-ui:Search */
 
 /* mobius-ui:Markdown v1 — keep in sync; library candidate. Diverge below the marker only. */
 .mg-depth {
