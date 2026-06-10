@@ -1459,6 +1459,26 @@ const S = {
 };
 
 const CSS = `
+/* mobius-ui:NativeTouch v1 — keep in sync; library candidate. Diverge below the marker only. */
+* { -webkit-tap-highlight-color: transparent; }
+.mg-tgl, .mg-legend-row, .mg-close, .mg-discuss, .mg-row, .mg-th { touch-action: manipulation; }
+.mg-tgl, .mg-legend-row, .mg-th, .mg-section-head { user-select: none; -webkit-user-select: none; }
+.mg-tgl:active { opacity: 0.72; }
+.mg-row:active { background: var(--surface2); }
+.mg-discuss:active { transform: translateY(1px); }
+.mg-scroll { overscroll-behavior: contain; }
+@media (hover: hover) {
+  .mg-row:hover { background: var(--surface2); }
+  .mg-th:hover { color: var(--text); }
+  .mg-legend-row:hover { background: var(--surface2); }
+  .mg-tgl:hover { color: var(--text); }
+  .mg-close:hover { background: var(--border); color: var(--text); }
+  .mg-discuss:hover { filter: brightness(1.06); }
+  .mg-md a:hover { border-bottom-color: var(--accent); }
+}
+/* /mobius-ui:NativeTouch */
+
+/* mobius-ui:Animations v1 — keep in sync; library candidate. Diverge below the marker only. */
 @keyframes mg-orbit-spin { to { transform: rotate(360deg); } }
 .mg-orbit {
   position: relative; width: 46px; height: 46px;
@@ -1482,21 +1502,33 @@ const CSS = `
 }
 .mg-pulse { transform-origin: 66px 48px; animation: mg-pulse-ring 2.6s ease-out infinite; }
 
-.mg-graph { cursor: grab; }
-.mg-graph:active { cursor: grabbing; }
-
-.mg-row:hover { background: var(--surface2); }
-.mg-th:hover { color: var(--text); }
-.mg-legend-row:hover { background: var(--surface2); }
-.mg-tgl:hover { color: var(--text); }
-.mg-close:hover { background: var(--border); color: var(--text); }
-.mg-discuss:hover { filter: brightness(1.06); }
-.mg-discuss:active { transform: translateY(1px); }
-.mg-depth {
-  width: 100%; margin: 0; accent-color: var(--accent);
+@keyframes mg-panel-in {
+  from { transform: translateX(20px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
-.mg-depth:disabled { cursor: not-allowed; }
+@keyframes mg-scrim-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mg-sheet-in { from { transform: translateY(28px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes mg-skel-pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
 
+@media (prefers-reduced-motion: reduce) {
+  .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub { animation: none !important; }
+}
+/* /mobius-ui:Animations */
+
+/* mobius-ui:GraphCanvas v1 — keep in sync; library candidate. Diverge below the marker only. */
+.mg-graph {
+  cursor: grab;
+  /* touch-action:none closes the gap between mount and react-force-graph
+     setting it on the canvas element, preventing the shell zoom-lock from
+     eating pinch gestures before the canvas registers them. */
+  touch-action: none;
+  /* Prevent pull-to-refresh from firing on the canvas on mobile Chrome. */
+  overscroll-behavior: contain;
+}
+.mg-graph:active { cursor: grabbing; }
+/* /mobius-ui:GraphCanvas */
+
+/* mobius-ui:Scrollskin v1 — keep in sync; library candidate. Diverge below the marker only. */
 .mg-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
 .mg-scroll::-webkit-scrollbar-thumb {
   background: var(--border); border-radius: 999px;
@@ -1504,21 +1536,16 @@ const CSS = `
 }
 .mg-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 .mg-scroll::-webkit-scrollbar-track { background: transparent; }
+/* /mobius-ui:Scrollskin */
 
-@keyframes mg-skel-pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
+/* mobius-ui:Sheet v1 — keep in sync; library candidate. Diverge below the marker only. */
+.mg-panel { inset: 0 0 0 auto; width: min(460px, 92vw); animation: mg-panel-in 0.22s cubic-bezier(0.22,1,0.36,1); }
+.mg-scrim { animation: mg-scrim-in 0.2s ease; }
 .mg-skel {
   height: 13px; border-radius: 5px;
   background: linear-gradient(90deg, var(--surface2), var(--border), var(--surface2));
   animation: mg-skel-pulse 1.4s ease-in-out infinite;
 }
-
-@keyframes mg-panel-in {
-  from { transform: translateX(20px); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
-}
-@keyframes mg-scrim-in { from { opacity: 0; } to { opacity: 1; } }
-.mg-panel { inset: 0 0 0 auto; width: min(460px, 92vw); animation: mg-panel-in 0.22s cubic-bezier(0.22,1,0.36,1); }
-.mg-scrim { animation: mg-scrim-in 0.2s ease; }
 @media (max-width: 640px) {
   .mg-graph-hint { display: none; }
   .mg-graph-tools { top: 8px !important; right: 8px !important; left: 8px !important; width: auto !important; }
@@ -1528,11 +1555,13 @@ const CSS = `
     animation: mg-sheet-in 0.26s cubic-bezier(0.22,1,0.36,1);
   }
 }
-@keyframes mg-sheet-in { from { transform: translateY(28px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+/* /mobius-ui:Sheet */
 
-@media (prefers-reduced-motion: reduce) {
-  .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub { animation: none !important; }
+/* mobius-ui:Markdown v1 — keep in sync; library candidate. Diverge below the marker only. */
+.mg-depth {
+  width: 100%; margin: 0; accent-color: var(--accent);
 }
+.mg-depth:disabled { cursor: not-allowed; }
 
 .mg-md h1, .mg-md h2, .mg-md h3 { margin: 16px 0 7px; line-height: 1.25; font-weight: 700; letter-spacing: -0.01em; }
 .mg-md h1 { font-size: 19px; } .mg-md h2 { font-size: 16px; } .mg-md h3 { font-size: 14px; }
@@ -1542,7 +1571,6 @@ const CSS = `
 .mg-md li { margin: 4px 0; }
 .mg-md li::marker { color: var(--muted); }
 .mg-md a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim, rgba(167,139,250,0.4)); }
-.mg-md a:hover { border-bottom-color: var(--accent); }
 .mg-md strong { color: var(--text); font-weight: 700; }
 .mg-md code { background: var(--surface2); border-radius: 5px; padding: 1px 5px; font-family: var(--mono); font-size: 0.85em; border: 1px solid var(--border-light, var(--border)); }
 .mg-md pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; padding: 13px; overflow-x: auto; margin: 11px 0; }
@@ -1553,4 +1581,5 @@ const CSS = `
 .mg-md th { background: var(--surface2); font-weight: 600; }
 .mg-md img { max-width: 100%; border-radius: 8px; }
 .mg-md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+/* /mobius-ui:Markdown */
 `;
