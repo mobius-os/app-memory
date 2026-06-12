@@ -8,36 +8,26 @@
  *     problem: { severity:'warn'|'error', kind, detail }
  *   GET /api/storage/shared/memory/<node.path>  → raw markdown (frontmatter + body)
  *
- * Everything else here is presentation. Optional graph/markdown libraries load
- * through the runtime import map when the platform vendors them, then from a
- * same-origin /vendor path, then finally from esm.sh as today's warm-cache
- * fallback. All canvas drawing is done in CSS px (divided by globalScale) so it
- * stays crisp on HiDPI; react-force-graph handles the dpr backing store.
+ * Everything else here is presentation. The graph renderer intentionally follows
+ * Quartz's durable shape: d3-force for layout and PixiJS for links, nodes, and
+ * labels in one transformed scene. D3/Pixi load the same way Quartz does:
+ * pinned global scripts — served same-origin from /vendor because the prod
+ * CSP only allows 'self' + esm.sh for scripts. Markdown rendering still
+ * lazy-loads marked + DOMPurify from esm.sh (which the CSP permits).
  */
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
 const GRAPH_URL = '/api/storage/shared/memory/graph.json';
 const NOTE_BASE = '/api/storage/shared/memory/';
-const GRAPH_DEPTH_MIN = 1;
-const GRAPH_DEPTH_MAX = 4;
-
-export const RUNTIME_MODULE_CANDIDATES = {
-  forceGraph2d: [
-    'react-force-graph-2d',
-    '/vendor/react-force-graph-2d@1.27.1/react-force-graph-2d.mjs',
-    'https://esm.sh/react-force-graph-2d@1.27.1?external=react,react-dom',
-  ],
-  marked: [
-    'marked',
-    '/vendor/marked@14.1.4/marked.mjs',
-    'https://esm.sh/marked@14.1.4',
-  ],
-  dompurify: [
-    'dompurify',
-    '/vendor/dompurify@3.1.7/dompurify.mjs',
-    'https://esm.sh/dompurify@3.1.7',
-  ],
-};
+// Self-hosted under /vendor (frontend/public/vendor/, precached by sw.js).
+// Prod CSP (script-src 'self' 'unsafe-inline' https://esm.sh) blocks
+// cdn.jsdelivr.net, which silently degraded the graph to the list view.
+// Same dist files the jsdelivr URLs served; both expose classic-script
+// globals (window.d3 / window.PIXI).
+const D3_URL = '/vendor/d3@7.9.0/d3.min.js';
+const PIXI_URL = '/vendor/pixi.js@8.19.0/pixi.min.js';
+const MAX_LOCAL_DEPTH = 4;
+const WIKILINK_RE = /\[\[\s*([^\]|#]+?)\s*(?:#[^\]|]*)?(?:\|\s*([^\]]+?)\s*)?\]\]/g;
 
 // Stable, theme-agnostic accent palette for primary-MOC color coding.
 // Chosen for distinguishability in both light and dark mode; MOC nodes
@@ -83,60 +73,6 @@ function fmtBytes(n) {
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-// A normalized 0..1 position of v within [min,max], guarded for degenerate ranges.
-function norm(v, min, max) {
-  if (max <= min) return v > min ? 1 : 0;
-  return Math.max(0, Math.min(1, (v - min) / (max - min)));
-}
-
-export async function importFirstAvailable(candidates, importer = (spec) => import(spec)) {
-  let lastErr = null;
-  for (const spec of candidates) {
-    try {
-      return await importer(spec);
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error('No runtime module candidates');
-}
-
-function edgeEndpointId(value) {
-  return typeof value === 'object' && value ? value.id : value;
-}
-
-export function deriveLocalGraph(graph, centerId, depth = 1) {
-  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
-  const edges = Array.isArray(graph?.edges) ? graph.edges : [];
-  if (!centerId || !nodes.some((node) => node.id === centerId)) {
-    return { nodes, edges };
-  }
-
-  const maxDepth = clamp(Number(depth) || 1, GRAPH_DEPTH_MIN, GRAPH_DEPTH_MAX);
-  const seen = new Set([centerId]);
-  let frontier = new Set([centerId]);
-
-  for (let step = 0; step < maxDepth; step++) {
-    const next = new Set();
-    for (const edge of edges) {
-      const source = edgeEndpointId(edge.source);
-      const target = edgeEndpointId(edge.target);
-      const sourceIn = frontier.has(source);
-      const targetIn = frontier.has(target);
-      if (sourceIn && !seen.has(target)) next.add(target);
-      if (targetIn && !seen.has(source)) next.add(source);
-    }
-    if (next.size === 0) break;
-    for (const id of next) seen.add(id);
-    frontier = next;
-  }
-
-  return {
-    nodes: nodes.filter((node) => seen.has(node.id)),
-    edges: edges.filter((edge) => seen.has(edgeEndpointId(edge.source)) && seen.has(edgeEndpointId(edge.target))),
-  };
-}
-
 export function nodeRadius(node = {}) {
   const importance = Number(node.importance);
   const accessCount = Number(node.access_count);
@@ -148,37 +84,88 @@ export function nodeRadius(node = {}) {
 }
 
 export function shouldShowNodeLabel(globalScale, node = {}, hoverId = null) {
-  const scale = Number(globalScale);
-  if (!Number.isFinite(scale)) return false;
   const isHover = hoverId === node.id;
   const hasMocList = Array.isArray(node.mocs) && node.mocs.length > 0;
   const isImportant = (Number(node.importance) || 0) >= 7;
-  return scale >= 1.4
-    || (scale >= 0.8 && (hasMocList || isImportant || isHover))
-    || (scale >= 0.4 && (hasMocList || isHover));
+  const isMoc = node.type === 'moc';
+  const isLocalCenter = node.localDepth === 0;
+  if (isHover || isLocalCenter || isMoc || node.showLabelAlways) return true;
+  const scale = Number(globalScale);
+  if (!Number.isFinite(scale)) return false;
+  return scale >= 0.95
+    || (isImportant && scale >= 0.18)
+    || (hasMocList && scale >= 0.24);
 }
 
-export function safeMemoryPath(path) {
-  if (typeof path !== 'string') return null;
-  const trimmed = path.trim();
-  if (!trimmed || trimmed.startsWith('/') || trimmed.includes('\\')) return null;
-  if (trimmed.includes('?') || trimmed.includes('#')) return null;
-  const parts = trimmed.split('/');
-  if (parts.some((part) => !part || part === '.' || part === '..')) return null;
-  if (!parts[parts.length - 1].endsWith('.md')) return null;
-  return parts.map((part) => encodeURIComponent(part)).join('/');
+export function buildTitleMap(nodes = []) {
+  const map = {};
+  for (const n of nodes || []) {
+    if (!n || !n.id) continue;
+    map[n.id] = n.title || n.id;
+  }
+  return map;
 }
 
-export const MEMORY_SANITIZE_OPTIONS = {
-  USE_PROFILES: { html: true },
-  FORBID_TAGS: ['img', 'picture', 'source', 'video', 'audio', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
-  FORBID_ATTR: ['href', 'src', 'srcset', 'xlink:href', 'formaction'],
-};
+export function renderWikiLinks(md, nodes = []) {
+  if (!md) return '';
+  const titles = buildTitleMap(nodes);
+  return String(md).replace(WIKILINK_RE, (_, rawSlug, rawAlias) => {
+    const slug = String(rawSlug || '').trim();
+    if (!slug) return _;
+    const label = String(rawAlias || '').trim() || titles[slug] || slug;
+    return `[${escapeMarkdownLinkText(label)}](#mind-node-${encodeURIComponent(slug)})`;
+  });
+}
 
-export function neutralizeMemoryMarkdown(md) {
-  return (md || '')
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt) => ` ${alt || 'image'} `)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
+export function buildLocalGraphData(graph, centerId, depth = 1) {
+  if (!graph || !centerId) return { nodes: [], links: [] };
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  if (!byId.has(centerId)) return { nodes: [], links: [] };
+
+  const maxDepth = Math.max(0, Math.min(MAX_LOCAL_DEPTH, Number(depth) || 0));
+  const adj = new Map();
+  const add = (a, b) => {
+    if (!adj.has(a)) adj.set(a, new Set());
+    adj.get(a).add(b);
+  };
+  for (const e of edges) {
+    const s = typeof e.source === 'object' ? e.source.id : e.source;
+    const t = typeof e.target === 'object' ? e.target.id : e.target;
+    if (!byId.has(s) || !byId.has(t)) continue;
+    add(s, t); add(t, s);
+  }
+
+  const seen = new Map([[centerId, 0]]);
+  const q = [centerId];
+  while (q.length) {
+    const cur = q.shift();
+    const d = seen.get(cur) || 0;
+    if (d >= maxDepth) continue;
+    for (const next of adj.get(cur) || []) {
+      if (seen.has(next)) continue;
+      seen.set(next, d + 1);
+      q.push(next);
+    }
+  }
+
+  const keep = new Set(seen.keys());
+  const showLabelAlways = keep.size <= 150;
+  return {
+    nodes: [...keep].map((id) => ({
+      ...byId.get(id),
+      localDepth: seen.get(id) || 0,
+      showLabelAlways,
+    })),
+    links: edges
+      .map((e) => ({
+        source: typeof e.source === 'object' ? e.source.id : e.source,
+        target: typeof e.target === 'object' ? e.target.id : e.target,
+        kind: e.kind,
+      }))
+      .filter((e) => keep.has(e.source) && keep.has(e.target)),
+  };
 }
 
 // A short, human relative-time from an ISO-ish frontmatter date string.
@@ -194,66 +181,6 @@ function relDate(s) {
   return Math.floor(days / 365) + 'y ago';
 }
 
-// filterNodes — pure helper used by both the component and the test suite.
-// Returns the filtered subset of `nodes` that match the given `query` (case-
-// insensitive substring across title/id/tags) and/or `mocSlug` (member of MOC).
-// Returns null when neither filter is active (caller treats null as "show all").
-export function filterNodes(nodes, { query = '', mocSlug = null } = {}) {
-  const q = (query || '').trim().toLowerCase();
-  const hasMoc = Boolean(mocSlug);
-  const hasSearch = Boolean(q);
-  if (!hasMoc && !hasSearch) return null;
-  return nodes.filter((n) => {
-    if (hasMoc) {
-      const inMoc = n.id === mocSlug || (Array.isArray(n.mocs) && n.mocs.includes(mocSlug));
-      if (!inMoc) return false;
-    }
-    if (hasSearch) {
-      const titleHit = (n.title || n.id).toLowerCase().includes(q);
-      const tagHit = Array.isArray(n.tags) && n.tags.some((t) => t.toLowerCase().includes(q));
-      const idHit = n.id.toLowerCase().includes(q);
-      if (!titleHit && !tagHit && !idHit) return false;
-    }
-    return true;
-  });
-}
-
-// Debounce hook — returns the debounced value after `delay` ms of quiet.
-function useDebounce(value, delay) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-}
-
-// Guarded signal emit — silently no-ops when the platform bridge is absent.
-// Each event is a line in signals.jsonl under the app's storage.
-function emitSignal(appId, token, name, data = {}) {
-  try {
-    const payload = { name, ts: new Date().toISOString(), ...data };
-    fetch(`/api/storage/apps/${appId}/signals.jsonl`, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-  } catch {}
-}
-
-// 60-day stale threshold in milliseconds.
-const STALE_AGE_MS = 60 * 24 * 60 * 60 * 1000;
-
-function isStaleNote(node) {
-  // A note is "stale?" when access_count is 0 (effectively unused) AND
-  // the updated frontmatter date is older than 60 days.
-  if ((Number(node.access_count) || 0) !== 0) return false;
-  if (!node.updated) return false;
-  const t = Date.parse(node.updated);
-  if (Number.isNaN(t)) return false;
-  return Date.now() - t > STALE_AGE_MS;
-}
-
 export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ready | empty | error
@@ -265,120 +192,79 @@ export default function App({ appId, token }) {
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
-  const [localFocus, setLocalFocus] = useState(false);
-  const [focusDepth, setFocusDepth] = useState(1);
-  const [focusNodeId, setFocusNodeId] = useState(null);
-  const [FG, setFG] = useState(null); // ForceGraph2D component
+  const [localDepth, setLocalDepth] = useState(1);
+  // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
+  // Defaults to 'text' — the user arrives here from the global graph, so they
+  // already have spatial context; the note body is what they came to read.
+  // Only the active tab's pane mounts, so the Pixi local-graph renderer is
+  // never resized (the old draggable split rebuilt it on every drag tick and
+  // crashed). See the graph/text tab panes below.
+  const [detailTab, setDetailTab] = useState('text');
+  const [graphRuntime, setGraphRuntime] = useState(undefined); // undefined loading | null failed | { d3, PIXI }
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
   const panelNavRef = useRef(null);
-  const [searchRaw, setSearchRaw] = useState('');
-  const [mocFilter, setMocFilter] = useState(null); // string | null — MOC slug to filter by
-  const searchQuery = useDebounce(searchRaw, 180);
-  const searchInputRef = useRef(null);
-  const appReadyFiredRef = useRef(false);
 
   const wrapRef = useRef(null);
-  const fgRef = useRef(null);
+  const localWrapRef = useRef(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
+  const [localDims, setLocalDims] = useState({ w: 0, h: 0 });
 
   const authHeaders = useMemo(
     () => ({ Authorization: 'Bearer ' + token }),
     [token],
   );
 
-  // --- Load the force-graph component (dynamic import, react externalized). ---
+  // --- Load the Quartz-style graph renderer runtime. ---
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const mod = await importFirstAvailable(RUNTIME_MODULE_CANDIDATES.forceGraph2d);
-        if (alive) setFG(() => mod.default);
+        await Promise.all([
+          loadScriptOnce(D3_URL),
+          loadScriptOnce(PIXI_URL),
+        ]);
+        const d3 = window.d3;
+        const PIXI = window.PIXI;
+        if (!d3 || !PIXI) throw new Error('Graph runtime scripts loaded without d3/PIXI globals.');
+        if (alive) setGraphRuntime({ d3, PIXI });
       } catch (e) {
-        // Graph view degrades to the list view if the lib can't load.
-        if (alive) setFG(null);
+        // Graph view degrades to the list view if the runtime can't load.
+        if (alive) setGraphRuntime(null);
       }
     })();
     return () => { alive = false; };
   }, []);
 
-  // autoPauseRedraw is off (the link particles need a per-frame redraw), so the
-  // canvas keeps painting forever. Pause the whole render loop while the page is
-  // backgrounded (phone locked / tab switched away) so an unseen graph doesn't
-  // burn battery; resume on return. The particles still flow while visible.
+  // --- Load the graph index. ---
   useEffect(() => {
-    const onVis = () => {
-      const fg = fgRef.current;
-      if (!fg) return;
-      try { document.hidden ? fg.pauseAnimation() : fg.resumeAnimation(); } catch { /* ref shape */ }
-    };
-    document.addEventListener('visibilitychange', onVis);
-    return () => document.removeEventListener('visibilitychange', onVis);
-  }, []);
-
-  // --- Load the graph index. Reusable so we can re-fetch on return (the graph
-  //     is rebuilt by the nightly Dreaming run while the app is closed, so a
-  //     once-on-mount load would show yesterday's graph forever). `quiet` skips
-  //     the loading state for a background refresh so the visible graph doesn't
-  //     flash a spinner when nothing has changed. ---
-  const loadGraph = useCallback(async (quiet = false) => {
-    if (!quiet) setStatus('loading');
-    try {
-      const res = await fetch(GRAPH_URL, { headers: authHeaders, cache: 'no-store' });
-      if (res.status === 404) {
-        setGraph({ nodes: [], edges: [], problems: [] });
-        setStatus('empty');
-        return;
+    let alive = true;
+    (async () => {
+      setStatus('loading');
+      try {
+        const res = await fetch(GRAPH_URL, { headers: authHeaders });
+        if (res.status === 404) {
+          if (alive) { setGraph({ nodes: [], edges: [], problems: [] }); setStatus('empty'); }
+          return;
+        }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+        if (!alive) return;
+        setGraph({
+          nodes,
+          edges: Array.isArray(data.edges) ? data.edges : [],
+          problems: Array.isArray(data.problems) ? data.problems : [],
+        });
+        setStatus(nodes.length === 0 ? 'empty' : 'ready');
+      } catch (e) {
+        if (alive) { setErrMsg(String(e.message || e)); setStatus('error'); }
       }
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-      const problems = Array.isArray(data.problems) ? data.problems : [];
-      setGraph({ nodes, edges: Array.isArray(data.edges) ? data.edges : [], problems });
-      // No nodes + error-severity problems is a BROKEN build, not a fresh empty
-      // memory — don't reassure the user with the "getting to know you" state.
-      const hasErrors = problems.some((p) => p.severity === 'error');
-      setStatus(nodes.length === 0 ? (hasErrors ? 'broken' : 'empty') : 'ready');
-    } catch (e) {
-      // A failed background refresh must not blow away an already-good graph.
-      if (!quiet) {
-        const msg = String(e.message || e);
-        setErrMsg(msg);
-        setStatus('error');
-        emitSignal(appId, token, 'error', { message: 'graph load failed: ' + msg });
-      }
-    }
-  }, [authHeaders, appId, token]);
+    })();
+    return () => { alive = false; };
+  }, [authHeaders]);
 
-  useEffect(() => { loadGraph(false); }, [loadGraph]);
-
-  // Emit app_ready once with the node count after the first successful load.
-  useEffect(() => {
-    if (status !== 'ready' || appReadyFiredRef.current) return;
-    appReadyFiredRef.current = true;
-    emitSignal(appId, token, 'app_ready', { node_count: graph?.nodes?.length ?? 0 });
-  }, [status, appId, token, graph]);
-
-  // Re-fetch the graph when the user returns to the app (tab visible / window
-  // focused). The nightly rebuild happens while Mind is closed; this is what
-  // picks up the new graph without a manual reload. Guarded by hasLoadedRef so
-  // the very first visibility/focus event doesn't double-fetch the mount load.
-  const hasLoadedRef = useRef(false);
-  useEffect(() => {
-    const onReturn = () => {
-      if (document.hidden) return;
-      if (!hasLoadedRef.current) { hasLoadedRef.current = true; return; }
-      loadGraph(true);
-    };
-    document.addEventListener('visibilitychange', onReturn);
-    window.addEventListener('focus', onReturn);
-    return () => {
-      document.removeEventListener('visibilitychange', onReturn);
-      window.removeEventListener('focus', onReturn);
-    };
-  }, [loadGraph]);
-
-  // --- Measure the canvas container in CSS pixels (force-graph handles dpr). ---
+  // --- Measure graph containers in CSS pixels; Pixi handles the DPR backing store. ---
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -390,6 +276,21 @@ export default function App({ appId, token }) {
     return () => ro.disconnect();
   }, [view, status]);
 
+  // The local-graph host only exists in the DOM while the graph tab is active,
+  // so re-run the measurement when the tab flips — not just when the node
+  // changes. Without the detailTab dep the observer would attach to a stale
+  // (or absent) element and the graph would never get non-zero dimensions.
+  useEffect(() => {
+    const el = localWrapRef.current;
+    if (!el || !selected || detailTab !== 'graph') return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0].contentRect;
+      setLocalDims({ w: Math.round(r.width), h: Math.round(r.height) });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [selected, detailTab]);
+
   // --- Build a color map: stable moc-slug -> palette color. ---
   const mocColors = useMemo(() => {
     const map = {};
@@ -399,15 +300,10 @@ export default function App({ appId, token }) {
       if (n.type === 'moc') mocSlugs.add(n.id);
       if (Array.isArray(n.mocs)) for (const m of n.mocs) mocSlugs.add(m);
     }
-    // Sort for determinism so colors don't reshuffle between loads, then assign
-    // by sequential index — NOT hashStr(slug) % len, which collides freely (two
-    // distinct slugs routinely hash to the same palette index, so two hubs got
-    // indistinguishable colors even with far fewer hubs than palette entries).
-    // Sequential assignment gives the first PALETTE.length hubs all-distinct
-    // colors; only genuine overflow past the palette wraps (and reuses) a color.
+    // Sort for determinism so colors don't reshuffle between loads.
     const sorted = [...mocSlugs].sort();
     sorted.forEach((slug, i) => {
-      map[slug] = PALETTE[i % PALETTE.length];
+      map[slug] = PALETTE[hashStr(slug) % PALETTE.length] || PALETTE[i % PALETTE.length];
     });
     return map;
   }, [graph]);
@@ -422,155 +318,44 @@ export default function App({ appId, token }) {
   // --- Node radius from importance + usage. ---
   const radiusForNode = useCallback((n) => nodeRadius(n), []);
 
-  const focusNode = useMemo(() => {
-    if (!graph || !focusNodeId) return null;
-    return graph.nodes.find((n) => n.id === focusNodeId) || null;
-  }, [graph, focusNodeId]);
-
-  useEffect(() => {
-    if (!graph || !focusNodeId) return;
-    if (!graph.nodes.some((n) => n.id === focusNodeId)) {
-      setFocusNodeId(null);
-      setLocalFocus(false);
-    }
-  }, [graph, focusNodeId]);
-
-  // In All mode the visible set is just the whole graph and must NOT depend on
-  // focusNodeId — selecting a node (which sets focusNodeId) would otherwise
-  // recompute this memo, churn a new object down to fgData, and reheat the
-  // whole layout. Only the local-focus path actually reads focusNodeId/depth.
-  // When a search/MOC filter is active it takes precedence over localFocus
-  // (the filter is an explicit narrowing; local focus adds no further value).
-  const visibleGraph = useMemo(() => {
-    if (!graph) return null;
-    if (filteredNodes) {
-      const ids = new Set(filteredNodes.map((n) => n.id));
-      return {
-        nodes: filteredNodes,
-        edges: graph.edges.filter((e) => {
-          const s = typeof e.source === 'object' ? e.source.id : e.source;
-          const t = typeof e.target === 'object' ? e.target.id : e.target;
-          return ids.has(s) && ids.has(t);
-        }),
-      };
-    }
-    if (!localFocus) return { nodes: graph.nodes, edges: graph.edges };
-    return deriveLocalGraph(graph, focusNodeId, focusDepth);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, filteredNodes, localFocus, localFocus ? focusNodeId : null, localFocus ? focusDepth : null]);
-
-  // --- Neighbor sets for hover dimming. ---
-  const neighbors = useMemo(() => {
-    const map = new Map();
-    if (!visibleGraph) return map;
-    const add = (a, b) => {
-      if (!map.has(a)) map.set(a, new Set());
-      map.get(a).add(b);
-    };
-    for (const e of visibleGraph.edges) {
-      const s = typeof e.source === 'object' ? e.source.id : e.source;
-      const t = typeof e.target === 'object' ? e.target.id : e.target;
-      add(s, t); add(t, s);
-    }
-    return map;
-  }, [visibleGraph]);
-
-  // --- react-force-graph mutates node objects (x/y/vx/vy/fx/fy) in place and
-  //     restarts its simulation whenever it sees a node object it hasn't laid
-  //     out yet. If we minted fresh {...n} objects on every visibleGraph
-  //     recompute, every node tap, depth step, or Local<->All switch would
-  //     scatter the graph from scratch. Instead we keep a persistent
-  //     id->liveNode cache for the whole graph's lifetime: a node reuses the
-  //     SAME object across recomputes (preserving its settled position), with
-  //     its static fields patched in case the graph data changed underneath it.
-  //     The cache is pruned only against the FULL graph (not the visible
-  //     subset) so toggling Local focus doesn't forget hidden nodes' positions.
-  //     Only genuinely new nodes (e.g. after a nightly rebuild) get laid out. ---
-  const nodeCacheRef = useRef(new Map());
+  // --- D3 mutates node objects (x/y/vx/vy) in place, so the renderer gets
+  //     its own object references. Build once per graph. ---
   const fgData = useMemo(() => {
-    if (!visibleGraph) return { nodes: [], links: [] };
-    const cache = nodeCacheRef.current;
-    const nodes = visibleGraph.nodes.map((n) => {
-      const live = cache.get(n.id);
-      if (live) {
-        // Patch static fields in place; keep x/y/vx/vy/fx/fy from the sim.
-        Object.assign(live, n);
-        return live;
-      }
-      const fresh = { ...n };
-      cache.set(n.id, fresh);
-      return fresh;
-    });
-    // Prune cache entries for nodes the (full) graph no longer has, so it can't
-    // grow unbounded across nightly rebuilds.
-    if (graph) {
-      const liveIds = new Set(graph.nodes.map((n) => n.id));
-      for (const id of cache.keys()) {
-        if (!liveIds.has(id)) cache.delete(id);
-      }
-    }
+    if (!graph) return { nodes: [], links: [] };
+    const showLabelAlways = graph.nodes.length <= 120;
     return {
-      nodes,
-      links: visibleGraph.edges.map((e) => ({
+      nodes: graph.nodes.map((n) => ({ ...n, showLabelAlways })),
+      links: graph.edges.map((e) => ({
         source: typeof e.source === 'object' ? e.source.id : e.source,
         target: typeof e.target === 'object' ? e.target.id : e.target,
         kind: e.kind,
       })),
     };
-  }, [visibleGraph, graph]);
+  }, [graph]);
 
-  // --- Smooth hover focus: a 0..1 value per node that eases toward 1 for the
-  //     hovered node + its neighbors and toward 0 for everything else, so the
-  //     dimming fades instead of snapping (the Obsidian feel). Animated via
-  //     rAF; we keep the values on a ref the painter reads each frame and ask
-  //     the canvas to repaint while anything is still in motion. ---
-  const focusRef = useRef(new Map()); // nodeId -> current 0..1
-  const rafRef = useRef(0);
-  useEffect(() => {
-    const targets = (id) => {
-      if (!hoverId) return null; // null => everything fully lit
-      if (id === hoverId) return 1;
-      return neighbors.get(hoverId)?.has(id) ? 1 : 0;
-    };
-    let last = performance.now();
-    const tick = (now) => {
-      const dt = Math.min(48, now - last); last = now;
-      const k = 1 - Math.pow(0.0015, dt / 1000); // ~time-constant ease
-      let moving = false;
-      const cur = focusRef.current;
-      if (visibleGraph) for (const n of visibleGraph.nodes) {
-        const want = targets(n.id);
-        const goal = want == null ? 1 : want;
-        const v0 = cur.has(n.id) ? cur.get(n.id) : 1;
-        const v1 = v0 + (goal - v0) * k;
-        cur.set(n.id, v1);
-        if (Math.abs(goal - v1) > 0.004) moving = true;
-      }
-      const fg = fgRef.current;
-      if (fg && fg.refresh) fg.refresh(); // force a canvas redraw this frame
-      if (moving) rafRef.current = requestAnimationFrame(tick);
-      else rafRef.current = 0;
-    };
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [hoverId, neighbors, visibleGraph]);
+  const nodesById = useMemo(() => {
+    const map = new Map();
+    if (graph) for (const n of graph.nodes) map.set(n.id, n);
+    return map;
+  }, [graph]);
 
-  const focusOf = useCallback((id) => {
-    const v = focusRef.current.get(id);
-    return v == null ? 1 : v;
-  }, []);
+  const localGraphData = useMemo(
+    () => buildLocalGraphData(graph, selected?.id, localDepth),
+    [graph, selected, localDepth],
+  );
 
   // --- Load a note body when a node is selected. ---
   useEffect(() => {
     if (!selected) return;
     let alive = true;
+    // node.path comes from agent-written graph.json — refuse traversal,
+    // absolute paths, and query/fragment smuggling before fetching.
     const path = safeMemoryPath(selected.path || ('notes/' + selected.id + '.md'));
-    setNoteState({ status: 'loading', md: '', fm: {} });
     if (!path) {
-      setNoteState({ status: 'error', md: 'Invalid memory note path.', fm: {} });
-      return () => { alive = false; };
+      setNoteState({ status: 'missing', md: '', fm: {} });
+      return;
     }
+    setNoteState({ status: 'loading', md: '', fm: {} });
     (async () => {
       try {
         const res = await fetch(NOTE_BASE + path, { headers: authHeaders });
@@ -596,8 +381,8 @@ export default function App({ appId, token }) {
     (async () => {
       try {
         const [mk, dp] = await Promise.all([
-          importFirstAvailable(RUNTIME_MODULE_CANDIDATES.marked),
-          importFirstAvailable(RUNTIME_MODULE_CANDIDATES.dompurify),
+          import('https://esm.sh/marked@14.1.4'),
+          import('https://esm.sh/dompurify@3.1.7'),
         ]);
         if (alive) {
           setMarked(() => mk.marked || mk.default);
@@ -612,38 +397,60 @@ export default function App({ appId, token }) {
 
   const noteHtml = useMemo(() => {
     if (noteState.status !== 'ready') return '';
+    // Plain markdown links/images are neutralized BEFORE wikilink expansion:
+    // notes can carry dreaming-agent web-research content, so remote URLs are
+    // dropped (their label text survives). Wikilinks expand after, so the only
+    // live anchors are the #mind-node- fragments this app generates itself.
+    const linkedMd = renderWikiLinks(neutralizeMemoryMarkdown(noteState.md), graph?.nodes || []);
     // Require BOTH the renderer AND the sanitizer before producing HTML — never
     // render un-sanitized markup. Notes can contain dreaming-agent web-research
     // content, so DOMPurify (a real HTML-parser sanitizer) is the right tool;
     // a regex net is routinely bypassed.
     if (marked && purify) {
       try {
-        const raw = marked(neutralizeMemoryMarkdown(noteState.md), { breaks: true, gfm: true });
-        return purify.sanitize(raw, MEMORY_SANITIZE_OPTIONS);
+        const raw = marked(linkedMd, { breaks: true, gfm: true });
+        return restrictNoteHtml(purify.sanitize(raw, MEMORY_SANITIZE_OPTIONS));
       } catch { return escapeHtml(noteState.md); }
     }
     return null; // renderer not ready yet -> fall back to plain text below
-  }, [noteState, marked, purify]);
+  }, [noteState, marked, purify, graph]);
 
-  const closePanel = useCallback(() => setSelected(null), []);
+  const onNoteClick = useCallback((e) => {
+    const a = e.target?.closest?.('a[href^="#mind-node-"]');
+    if (!a) return;
+    e.preventDefault();
+    const slug = decodeURIComponent(a.getAttribute('href').replace('#mind-node-', ''));
+    const node = nodesById.get(slug);
+    if (node) {
+      setSelected(node);
+      setHoverId(slug);
+    }
+  }, [nodesById]);
 
-  const openPanel = useCallback(async (node) => {
+  const closePanel = useCallback(() => {
+    setSelected(null);
+    setHoverId(null);
+  }, []);
+
+  const openPanel = useCallback(async (node, opts = {}) => {
     if (!node) return;
     if (!selected && window.mobius?.nav?.open) {
       try { panelNavRef.current?.close?.(); } catch {}
       const handle = window.mobius.nav.open('mind-note', () => {
         panelNavRef.current = null;
         setSelected(null);
+        setHoverId(null);
       });
       panelNavRef.current = handle;
-      await handle.ready?.catch(() => false);
+      const ready = await handle.ready?.catch(() => false);
       if (panelNavRef.current !== handle) return;
+      if (!ready) panelNavRef.current = null;
     }
-    emitSignal(appId, token, 'note_opened', { node_id: node.id });
     setSelected(node);
-    setFocusNodeId(node.id);
-    setHoverId(null);
-  }, [selected, appId, token]);
+    setHoverId(opts.hoverId ?? null);
+    setDetailTab('text'); // every node opens on its note, not the graph
+    if (opts.resetLocalDepth) setLocalDepth(1);
+  }, [selected]);
 
   const discuss = useCallback((node) => {
     const title = node.title || node.id;
@@ -653,27 +460,6 @@ export default function App({ appId, token }) {
       window.location.origin,
     );
   }, []);
-
-  const correct = useCallback((node) => {
-    const title = node.title || node.id;
-    // Build the slug from the path if available, otherwise fall back to the id.
-    const rawPath = node.path || ('notes/' + node.id + '.md');
-    const slug = rawPath.replace(/^notes\//, '').replace(/\.md$/, '');
-    // First ~200 chars of the note body (loaded if the panel is open; otherwise empty).
-    const preview = noteState.status === 'ready'
-      ? noteState.md.slice(0, 200).replace(/\n+/g, ' ').trim()
-      : '';
-    const draft = [
-      `My memory note "${title}" (notes/${slug}.md) says: ${preview}`,
-      '',
-      'That\'s wrong or outdated because: ',
-    ].join('\n');
-    emitSignal(appId, token, 'correction_started', { node_id: node.id });
-    window.parent.postMessage(
-      { type: 'moebius:new-chat', draft },
-      window.location.origin,
-    );
-  }, [appId, token, noteState]);
 
   // Esc closes the panel — keyboard parity with the scrim tap.
   useEffect(() => {
@@ -693,141 +479,10 @@ export default function App({ appId, token }) {
     try { panelNavRef.current?.close?.(); } catch {}
   }, []);
 
-  // --- Canvas link painter: a soft curve, brighter when it touches the
-  //     hovered focus. Drawn before nodes (react-force-graph paints links
-  //     under nodes by default; we override per-link color for the focus glow). ---
-  const linkColor = useCallback((link) => {
-    const s = typeof link.source === 'object' ? link.source.id : link.source;
-    const t = typeof link.target === 'object' ? link.target.id : link.target;
-    // A link is "in focus" when both endpoints are lit. Use the min of the two
-    // focus values so a link to a dimmed node also dims.
-    const f = Math.min(focusOf(s), focusOf(t));
-    const isMoc = link.kind === 'moc';
-    const baseA = isMoc ? 0.5 : 0.32;
-    const dimA = 0.05;
-    const a = dimA + (baseA - dimA) * f;
-    return isMoc
-      ? cssVarA('--accent', '#a78bfa', a)
-      : cssVarA('--text', '#e5e5e5', a * 0.9);
-  }, [focusOf]);
-
-  const linkWidth = useCallback((link) => {
-    const s = typeof link.source === 'object' ? link.source.id : link.source;
-    const t = typeof link.target === 'object' ? link.target.id : link.target;
-    const f = Math.min(focusOf(s), focusOf(t));
-    const base = link.kind === 'moc' ? 1.3 : 0.7;
-    return base + f * (link.kind === 'moc' ? 1.1 : 0.6);
-  }, [focusOf]);
-
-  // --- Canvas node painter: glow halo + disc + crisp label, all in CSS px. ---
-  const paintNode = useCallback((node, ctx, globalScale) => {
-    const r = radiusForNode(node);
-    const f = focusOf(node.id);        // 0..1, eased
-    const isHover = hoverId === node.id;
-    const isMoc = node.type === 'moc';
-    const col = colorForNode(node);
-    const alpha = 0.16 + 0.84 * f;     // dimmed nodes never vanish entirely
-
-    // Outer glow — the Obsidian halo. Scales with focus so the hovered node
-    // and its neighborhood bloom. Drawn as a radial gradient in CSS px.
-    const glowR = r * (isHover ? 4.2 : 2.6);
-    const glowStrength = (isMoc ? 0.5 : 0.34) * (0.25 + 0.75 * f);
-    const grad = ctx.createRadialGradient(node.x, node.y, r * 0.6, node.x, node.y, glowR);
-    grad.addColorStop(0, withAlpha(col, glowStrength));
-    grad.addColorStop(1, withAlpha(col, 0));
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, glowR, 0, 2 * Math.PI, false);
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    // Core disc.
-    ctx.globalAlpha = alpha;
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-    ctx.fillStyle = col;
-    ctx.fill();
-
-    // A subtle inner sheen so discs read as spheres, not flat dots.
-    const sheen = ctx.createRadialGradient(
-      node.x - r * 0.35, node.y - r * 0.4, r * 0.1,
-      node.x, node.y, r,
-    );
-    sheen.addColorStop(0, 'rgba(255,255,255,0.32)');
-    sheen.addColorStop(0.6, 'rgba(255,255,255,0)');
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-    ctx.fillStyle = sheen;
-    ctx.fill();
-
-    // Ring — every node gets a faint hairline so it sits cleanly on the bg;
-    // MOC nodes + the hovered node get a bright accent ring.
-    ctx.lineWidth = (isHover || isMoc ? 1.6 : 1) / globalScale;
-    ctx.strokeStyle = isHover
-      ? cssVar('--accent', '#a78bfa')
-      : isMoc
-        ? withAlpha(cssVar('--text', '#e5e5e5'), 0.55 * alpha)
-        : withAlpha(col, 0.5 * alpha);
-    ctx.stroke();
-
-    // Label — zoom-based LOD, drawn in CSS px (font size / zoom) with a
-    // rounded pill underlay so text stays legible over links and halos.
-    const showLabel = shouldShowNodeLabel(globalScale, node, hoverId);
-    if (showLabel) {
-      const label = node.title || node.id;
-      const labelPx = clamp((isMoc ? 11.5 : 10.5) * Math.sqrt(globalScale), 9, 15);
-      const fontSize = labelPx / globalScale;
-      const padX = 5.5 / globalScale;
-      const padY = 2.5 / globalScale;
-      const gap = 3 / globalScale;
-      const labelY = node.y + r + gap;
-      const pillAlpha = (isHover ? 0.88 : 0.62) * (0.35 + 0.65 * f);
-
-      ctx.save();
-      ctx.font = `${isMoc ? 600 : 500} ${fontSize}px var(--font, sans-serif)`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.globalAlpha = isHover ? 1 : 0.4 + 0.6 * f;
-
-      const width = ctx.measureText(label).width + padX * 2;
-      const height = fontSize + padY * 2;
-      const x = node.x - width / 2;
-      const y = labelY;
-      ctx.fillStyle = withAlpha(cssVar('--bg', '#0d0d0d'), pillAlpha);
-      roundedRect(ctx, x, y, width, height, 5 / globalScale);
-      ctx.fill();
-      ctx.lineWidth = 0.75 / globalScale;
-      ctx.strokeStyle = withAlpha(cssVar('--text', '#e5e5e5'), 0.12 * (isHover ? 1 : f));
-      ctx.stroke();
-
-      ctx.fillStyle = cssVar('--text', '#e5e5e5');
-      ctx.fillText(label, node.x, y + height / 2);
-      ctx.restore();
-    }
-    ctx.globalAlpha = 1;
-  }, [colorForNode, radiusForNode, hoverId, focusOf]);
-
-  // Larger pointer hit-area than the dot so small nodes are clickable.
-  const paintPointer = useCallback((node, color, ctx) => {
-    const r = radiusForNode(node);
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI, false);
-    ctx.fill();
-  }, [radiusForNode]);
-
-  // --- Search / MOC-filter: delegate to the exported pure helper. ---
-  // Applies to BOTH the graph view (controls visibleGraph override) and the
-  // list view (controls sortedNodes). The graph filters the node set but keeps
-  // the edges that connect the surviving nodes.
-  const filteredNodes = useMemo(
-    () => graph ? filterNodes(graph.nodes, { query: searchQuery, mocSlug: mocFilter }) : null,
-    [graph, searchQuery, mocFilter],
-  );
-
-  // --- List view: sorted rows with normalized usage/size bars. ---
+  // --- List view: sorted rows with plain usage/size metadata. ---
   const sortedNodes = useMemo(() => {
     if (!graph) return [];
-    const rows = filteredNodes ? [...filteredNodes] : [...graph.nodes];
+    const rows = [...graph.nodes];
     rows.sort((a, b) => {
       let av, bv;
       if (sortKey === 'title') { av = (a.title || a.id).toLowerCase(); bv = (b.title || b.id).toLowerCase(); }
@@ -837,22 +492,7 @@ export default function App({ appId, token }) {
       return 0;
     });
     return rows;
-  }, [graph, filteredNodes, sortKey, sortDir]);
-
-  const ranges = useMemo(() => {
-    const r = { size_bytes: [Infinity, -Infinity], access_count: [Infinity, -Infinity], importance: [1, 5] };
-    if (graph) for (const n of graph.nodes) {
-      for (const k of ['size_bytes', 'access_count']) {
-        const v = n[k] || 0;
-        if (v < r[k][0]) r[k][0] = v;
-        if (v > r[k][1]) r[k][1] = v;
-      }
-    }
-    for (const k of ['size_bytes', 'access_count']) {
-      if (r[k][0] === Infinity) r[k] = [0, 0];
-    }
-    return r;
-  }, [graph]);
+  }, [graph, sortKey, sortDir]);
 
   const toggleSort = (key) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -878,8 +518,7 @@ export default function App({ appId, token }) {
     if (graph) for (const n of graph.nodes) c[n.type === 'moc' ? 'moc' : 'note']++;
     return c;
   }, [graph]);
-
-  const visibleCounts = visibleGraph || { nodes: [], edges: [] };
+  const selectedUpdated = relDate(noteState.fm.updated);
 
   // ---------------------------------------------------------------- render ---
   return (
@@ -914,28 +553,6 @@ export default function App({ appId, token }) {
         </div>
 
         <div style={S.headerRight}>
-          {status === 'ready' && (
-            <div style={S.searchWrap}>
-              <input
-                ref={searchInputRef}
-                className="mg-search"
-                type="search"
-                placeholder="Search…"
-                value={searchRaw}
-                onChange={(e) => { setSearchRaw(e.target.value); setMocFilter(null); }}
-                aria-label="Search notes"
-                style={S.searchInput}
-              />
-              {searchRaw && (
-                <button
-                  style={S.searchClear}
-                  className="mg-tgl"
-                  onClick={() => { setSearchRaw(''); searchInputRef.current?.focus(); }}
-                  aria-label="Clear search"
-                >×</button>
-              )}
-            </div>
-          )}
           {problems.length > 0 && (
             <button
               style={{ ...S.healthBadge, ...(errCount ? S.healthErr : S.healthWarn) }}
@@ -965,21 +582,6 @@ export default function App({ appId, token }) {
         </div>
       </header>
 
-      {/* Active filter banner — shown when a MOC color filter is active */}
-      {mocFilter && (
-        <div style={S.filterBanner}>
-          <span style={S.filterLabel}>
-            Filtered by: <strong>{legendItems.find((it) => it.slug === mocFilter)?.label || mocFilter}</strong>
-          </span>
-          <button
-            style={S.filterClear}
-            className="mg-tgl"
-            onClick={() => setMocFilter(null)}
-            aria-label="Clear MOC filter"
-          >Clear</button>
-        </div>
-      )}
-
       {showHealth && problems.length > 0 && (
         <div style={S.healthPanel} className="mg-scroll">
           <div style={S.healthHead}>
@@ -992,7 +594,7 @@ export default function App({ appId, token }) {
               <span style={{ ...S.sevTag, ...(p.severity === 'error' ? S.sevErr : S.sevWarn) }}>
                 {p.severity}
               </span>
-              <span style={S.healthKind}>{p.kind.replace(/_/g, ' ')}</span>
+              <span style={S.healthKind}>{String(p.kind || '').replace(/_/g, ' ')}</span>
               <span style={S.healthDetail}>{p.detail}</span>
             </div>
           ))}
@@ -1026,139 +628,52 @@ export default function App({ appId, token }) {
           </div>
         )}
 
-        {status === 'broken' && (
-          <div style={S.center}>
-            <div style={S.errIcon}>!</div>
-            <div style={S.centerTitle}>The memory graph couldn't be built</div>
-            <div style={S.centerText}>
-              There's memory on disk, but {errCount === 1 ? 'an error' : `${errCount} errors`} stopped
-              the graph from rebuilding. Open the health report above for details.
-            </div>
-          </div>
-        )}
-
         {status === 'ready' && view === 'graph' && (
           <div ref={wrapRef} style={S.graphWrap} className="mg-graph">
-            {FG && dims.w > 0 ? (
-              <FG
-                ref={fgRef}
+            {graphRuntime && dims.w > 0 && dims.h > 0 ? (
+              <MindGraphRenderer
+                runtime={graphRuntime}
                 graphData={fgData}
                 width={dims.w}
                 height={dims.h}
-                backgroundColor="rgba(0,0,0,0)"
-                nodeRelSize={1}
-                nodeVal={(n) => radiusForNode(n)}
-                nodeLabel={() => ''}
-                nodeCanvasObject={paintNode}
-                nodeCanvasObjectMode="replace"
-                nodePointerAreaPaint={paintPointer}
-                linkColor={linkColor}
-                linkWidth={linkWidth}
-                linkCurvature={0.08}
-                linkDirectionalParticles={(link) => (link.kind === 'moc' ? 1 : 0)}
-                linkDirectionalParticleSpeed={0.0025}
-                linkDirectionalParticleWidth={(link) => (link.kind === 'moc' ? 1.35 : 0.9)}
-                linkDirectionalParticleColor={(link) => linkColor(link)}
-                autoPauseRedraw={false}
-                // Obsidian-like motion: the nodes drift and ease to rest over
-                // a longer, gentler settle (lower alpha decay = slower energy
-                // bleed), and the flowing link particles + reheat-on-drag keep
-                // the graph feeling alive after it settles. (react-force-graph
-                // has no public alphaTarget, so true never-ending node drift
-                // isn't exposed; this is the gentle-settle approximation.)
-                cooldownTicks={Infinity}
-                cooldownTime={45000}
-                d3AlphaDecay={0.0145}
-                onNodeClick={openPanel}
+                mode="global"
+                selectedId={selected?.id}
+                hoverId={hoverId}
+                colorForNode={colorForNode}
+                radiusForNode={radiusForNode}
+                onNodeClick={(n) => openPanel(n, { resetLocalDepth: true })}
                 onNodeHover={(n) => setHoverId(n ? n.id : null)}
                 onBackgroundClick={closePanel}
-                d3VelocityDecay={0.26}
-                warmupTicks={28}
               />
             ) : (
               <div style={S.center}>
                 <div className="mg-orbit"><span /><span /><span /></div>
                 <div style={S.centerText}>
-                  {FG === null ? 'Graph view is offline — try List.' : 'Laying out the graph…'}
+                  {graphRuntime === null ? 'Graph view is offline — try List.' : 'Laying out the graph…'}
                 </div>
               </div>
             )}
 
-            <div style={S.graphHint} className="mg-graph-hint">Drag to pan · pinch or scroll to zoom · tap a node to read it</div>
-
-            <div style={S.graphTools} className="mg-graph-tools">
-              <div style={S.focusSwitch}>
-                <button
-                  className="mg-tgl"
-                  style={{ ...S.focusBtn, ...(!localFocus ? S.focusActive : {}) }}
-                  onClick={() => setLocalFocus(false)}
-                >
-                  All
-                </button>
-                <button
-                  className="mg-tgl"
-                  style={{ ...S.focusBtn, ...(localFocus ? S.focusActive : {}), ...(!focusNode ? S.focusDisabled : {}) }}
-                  disabled={!focusNode}
-                  onClick={() => {
-                    if (focusNode) setLocalFocus(true);
-                  }}
-                  title={focusNode ? 'Show nearby notes' : 'Select a node first'}
-                >
-                  Local
-                </button>
-              </div>
-
-              <div style={{ ...S.depthControl, ...(!localFocus ? S.depthMuted : {}) }}>
-                <div style={S.depthTop}>
-                  <span style={S.depthLabel}>{focusNode ? (focusNode.title || focusNode.id) : 'No focus'}</span>
-                  <span style={S.depthValue}>{localFocus ? `${visibleCounts.nodes.length}/${graph.nodes.length}` : graph.nodes.length}</span>
-                </div>
-                <input
-                  className="mg-depth"
-                  type="range"
-                  min={GRAPH_DEPTH_MIN}
-                  max={GRAPH_DEPTH_MAX}
-                  step="1"
-                  value={focusDepth}
-                  disabled={!localFocus || !focusNode}
-                  onChange={(e) => setFocusDepth(Number(e.target.value))}
-                  aria-label="Local graph depth"
-                />
-                <div style={S.depthMarks}>
-                  <span>1</span>
-                  <span>2</span>
-                  <span>3</span>
-                  <span>4</span>
-                </div>
-              </div>
-            </div>
+            <div style={S.graphHint}>Drag to pan · scroll to zoom · tap a node to read it</div>
 
             {legendItems.length > 0 && (
-              <div style={S.legend} className="mg-scroll mg-legend">
+              <div style={S.legend} className="mg-scroll">
                 <div style={S.legendTitle}>Maps of Content</div>
                 <div style={S.legendRow}>
                   <span style={{ ...S.legendSwatch, background: cssVar('--accent', '#a78bfa') }} />
                   <span style={S.legendLabel}>Hub (MOC)</span>
                 </div>
-                {/* Render every hub — the container scrolls (maxHeight + mg-scroll),
-                    so we never silently drop hubs past an arbitrary cap.
-                    Tapping a legend swatch filters the graph/list by that MOC. */}
-                {legendItems.map((it) => (
+                {legendItems.slice(0, 12).map((it) => (
                   <button
                     key={it.slug}
-                    style={{
-                      ...S.legendRow,
-                      ...(mocFilter === it.slug ? S.legendRowActive : {}),
-                    }}
+                    style={S.legendRow}
                     className="mg-legend-row"
                     onMouseEnter={() => setHoverId(it.slug)}
                     onMouseLeave={() => setHoverId(null)}
                     onClick={() => {
-                      // Toggle: tapping the active filter clears it; tapping another sets it.
-                      setMocFilter((prev) => (prev === it.slug ? null : it.slug));
-                      setSearchRaw('');
+                      const n = graph.nodes.find((x) => x.id === it.slug);
+                      if (n) openPanel(n);
                     }}
-                    title={mocFilter === it.slug ? 'Clear filter' : `Filter by ${it.label}`}
                   >
                     <span style={{ ...S.legendSwatch, background: it.color }} />
                     <span style={S.legendLabel}>{it.label}</span>
@@ -1171,63 +686,42 @@ export default function App({ appId, token }) {
 
         {status === 'ready' && view === 'list' && (
           <div style={S.listWrap} className="mg-scroll">
-            {sortedNodes.length === 0 ? (
-              <div style={S.center}>
-                <div style={S.centerText}>No notes match your search.</div>
-              </div>
-            ) : (
-              <table style={S.table}>
-                <thead>
-                  <tr>
-                    <Th label="Note" active={sortKey === 'title'} dir={sortDir} onClick={() => toggleSort('title')} align="left" />
-                    <Th label="Type" />
-                    <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onClick={() => toggleSort('importance')} />
-                    <Th label="Used" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
-                    <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
+            <table style={S.table}>
+              <thead>
+                <tr>
+                  <Th label="Note" active={sortKey === 'title'} dir={sortDir} onClick={() => toggleSort('title')} align="left" />
+                  <Th label="Type" />
+                  <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onClick={() => toggleSort('importance')} />
+                  <Th label="Reads" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
+                  <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
+                </tr>
+              </thead>
+              <tbody>
+                {sortedNodes.map((n) => (
+                  <tr
+                    key={n.id}
+                    style={S.tr}
+                    onClick={() => openPanel(n)}
+                    className="mg-row"
+                  >
+                    <td style={S.tdTitle}>
+                      <span style={{ ...S.rowDot, background: colorForNode(n) }} />
+                      <span style={S.rowTitleText}>{n.title || n.id}</span>
+                    </td>
+                    <td style={S.td}>
+                      <span style={{ ...S.typeTag, ...(n.type === 'moc' ? S.typeMoc : {}) }}>
+                        {n.type === 'moc' ? 'hub' : 'note'}
+                      </span>
+                    </td>
+                    <td style={{ ...S.td, ...S.tdNum }}>
+                      <ImportanceDots value={n.importance || 1} />
+                    </td>
+                    <td style={{ ...S.td, ...S.tdMeta }}>{n.access_count || 0}</td>
+                    <td style={{ ...S.td, ...S.tdMeta }}>{fmtBytes(n.size_bytes)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {sortedNodes.map((n) => {
-                    const sN = norm(n.size_bytes || 0, ranges.size_bytes[0], ranges.size_bytes[1]);
-                    const uN = norm(n.access_count || 0, ranges.access_count[0], ranges.access_count[1]);
-                    const stale = isStaleNote(n);
-                    return (
-                      <tr
-                        key={n.id}
-                        style={S.tr}
-                        onClick={() => openPanel(n)}
-                        className="mg-row"
-                      >
-                        <td style={S.tdTitle}>
-                          <span style={{ ...S.rowDot, background: colorForNode(n) }} />
-                          <span style={S.rowTitleText}>{n.title || n.id}</span>
-                          {stale && (
-                            <span style={S.staleDot} title="Not accessed in 60+ days — may be outdated">
-                              <span style={S.staleDotCore} />
-                              <span style={S.staleHint}>stale?</span>
-                            </span>
-                          )}
-                        </td>
-                        <td style={S.td}>
-                          <span style={{ ...S.typeTag, ...(n.type === 'moc' ? S.typeMoc : {}) }}>
-                            {n.type === 'moc' ? 'hub' : 'note'}
-                          </span>
-                        </td>
-                        <td style={{ ...S.td, ...S.tdNum }}>
-                          <ImportanceDots value={n.importance || 1} />
-                        </td>
-                        <td style={S.tdBar}>
-                          <Bar value={uN} label={String(n.access_count || 0)} hue="var(--green, #6ee7b7)" />
-                        </td>
-                        <td style={S.tdBar}>
-                          <Bar value={sN} label={fmtBytes(n.size_bytes)} hue={colorForNode(n)} />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </main>
@@ -1238,69 +732,137 @@ export default function App({ appId, token }) {
           <div style={S.scrim} className="mg-scrim" onClick={closePanel} />
           <aside style={S.panel} className="mg-panel">
             <div style={{ ...S.panelAccent, background: colorForNode(selected) }} />
-            <div style={S.panelHead}>
+            <div style={S.panelHead} className="mg-panel-head">
               <div style={S.panelHeadMain}>
-                <span style={{ ...S.rowDot, background: colorForNode(selected), width: 12, height: 12, marginTop: 5 }} />
+                <span style={{ ...S.rowDot, background: colorForNode(selected), width: 11, height: 11, marginTop: 5 }} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={S.panelKicker}>
-                    {selected.type === 'moc' ? 'Map of content' : 'Note'}
-                  </div>
                   <div style={S.panelTitle}>{selected.title || selected.id}</div>
+                  <div style={S.panelMetaLine}>
+                    <span>{selected.type === 'moc' ? 'Hub' : 'Note'}</span>
+                    <span>Weight <ImportanceDots value={selected.importance || 1} /></span>
+                    <span>{selected.access_count || 0} reads</span>
+                    <span>{fmtBytes(selected.size_bytes)}</span>
+                    {selectedUpdated && <span>{selectedUpdated}</span>}
+                  </div>
                 </div>
               </div>
               <button style={S.closeBtn} className="mg-close" onClick={closePanel} aria-label="Close">×</button>
             </div>
 
-            {/* Frontmatter chips — importance / usage / size / recency. */}
-            <div style={S.chipRow}>
-              <Chip label="weight"><ImportanceDots value={selected.importance || 1} /></Chip>
-              <Chip label="used">{(selected.access_count || 0)}×</Chip>
-              <Chip label="size">{fmtBytes(selected.size_bytes)}</Chip>
-              {relDate(noteState.fm.updated) && (
-                <Chip label="updated">{relDate(noteState.fm.updated)}</Chip>
-              )}
-            </div>
-
             {Array.isArray(selected.tags) && selected.tags.length > 0 && (
-              <div style={S.tagRow}>
+              <div style={S.tagRow} className="mg-tag-row">
                 {selected.tags.map((t) => <span key={t} style={S.tag}>#{t}</span>)}
               </div>
             )}
 
-            <div style={S.panelBody} className="mg-md mg-scroll">
-              {noteState.status === 'loading' && (
-                <div style={S.notePlaceholder}>
-                  <div className="mg-skel" style={{ width: '70%' }} />
-                  <div className="mg-skel" style={{ width: '95%' }} />
-                  <div className="mg-skel" style={{ width: '88%' }} />
-                  <div className="mg-skel" style={{ width: '60%' }} />
+            {/* Tab toggle replaces the old resizable note/graph split. Only the
+                active tab's pane mounts: keeping the local graph unmounted while
+                reading text means the Pixi renderer is never resized, which was
+                the entire crash class the draggable divider produced. */}
+            <div style={S.detailBar}>
+              <div style={S.detailContext}>
+                {detailTab === 'graph' ? (
+                  <>
+                    <span style={S.paneHead}>Local graph</span>
+                    <span style={S.localCount}>
+                      {localGraphData.nodes.length} nodes · {localGraphData.links.length} links
+                    </span>
+                  </>
+                ) : (
+                  <span style={S.paneHead}>Note</span>
+                )}
+              </div>
+
+              {detailTab === 'graph' && (
+                <div style={S.depthToggle} aria-label="Local graph depth">
+                  {[1, 2, 3, 4].map((d) => (
+                    <button
+                      key={d}
+                      style={{ ...S.depthBtn, ...(localDepth === d ? S.depthBtnActive : {}) }}
+                      onClick={() => setLocalDepth(d)}
+                      title={`${d} hop${d === 1 ? '' : 's'}`}
+                    >
+                      {d}
+                    </button>
+                  ))}
                 </div>
               )}
-              {noteState.status === 'missing' && <div style={S.centerText}>No note body on disk for this entry.</div>}
-              {noteState.status === 'error' && <div style={S.centerText}>Couldn't load: {noteState.md}</div>}
-              {noteState.status === 'ready' && (
-                noteHtml != null
-                  ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
-                  : <pre style={S.pre}>{noteState.md}</pre>
+
+              <div style={S.tabToggle} role="tablist" aria-label="Note or local graph">
+                <button
+                  className="mg-tab"
+                  style={{ ...S.tabBtn, ...(detailTab === 'text' ? S.tabBtnActive : {}) }}
+                  onClick={() => setDetailTab('text')}
+                  role="tab"
+                  aria-selected={detailTab === 'text'}
+                  aria-label="Show note text"
+                  title="Note text"
+                >
+                  <TextGlyph />
+                </button>
+                <button
+                  className="mg-tab"
+                  style={{ ...S.tabBtn, ...(detailTab === 'graph' ? S.tabBtnActive : {}) }}
+                  onClick={() => setDetailTab('graph')}
+                  role="tab"
+                  aria-selected={detailTab === 'graph'}
+                  aria-label="Show local graph"
+                  title="Local graph"
+                >
+                  <NetworkGlyph />
+                </button>
+              </div>
+            </div>
+
+            <div style={S.detailBody}>
+              {detailTab === 'text' ? (
+                <div style={S.panelBody} className="mg-md mg-scroll" onClick={onNoteClick}>
+                  {noteState.status === 'loading' && (
+                    <div style={S.notePlaceholder}>
+                      <div className="mg-skel" style={{ width: '70%' }} />
+                      <div className="mg-skel" style={{ width: '95%' }} />
+                      <div className="mg-skel" style={{ width: '88%' }} />
+                      <div className="mg-skel" style={{ width: '60%' }} />
+                    </div>
+                  )}
+                  {noteState.status === 'missing' && <div style={S.centerText}>No note body on disk for this entry.</div>}
+                  {noteState.status === 'error' && <div style={S.centerText}>Couldn't load: {noteState.md}</div>}
+                  {noteState.status === 'ready' && (
+                    noteHtml != null
+                      ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
+                      : <pre style={S.pre}>{noteState.md}</pre>
+                  )}
+                </div>
+              ) : (
+                <div ref={localWrapRef} style={S.localGraphWrap} className="mg-local-graph">
+                  {graphRuntime && localDims.w > 0 && localDims.h > 0 && localGraphData.nodes.length > 0 ? (
+                    <MindGraphRenderer
+                      runtime={graphRuntime}
+                      graphData={localGraphData}
+                      width={localDims.w}
+                      height={localDims.h}
+                      mode="local"
+                      selectedId={selected?.id}
+                      hoverId={hoverId}
+                      colorForNode={colorForNode}
+                      radiusForNode={radiusForNode}
+                      onNodeClick={(n) => openPanel(nodesById.get(n.id) || n)}
+                      onNodeHover={(n) => setHoverId(n ? n.id : null)}
+                    />
+                  ) : (
+                    <div style={S.localEmpty}>
+                      {graphRuntime === null ? 'Graph view is offline.' : 'Laying out local graph…'}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
 
-            <div style={S.panelFoot} className="mg-panel-foot">
-              <div style={S.panelFootRow}>
-                <button style={S.discussBtn} className="mg-discuss" onClick={() => discuss(selected)}>
-                  <ChatGlyph />
-                  Discuss in a new chat
-                </button>
-                <button
-                  style={S.correctBtn}
-                  className="mg-discuss"
-                  onClick={() => correct(selected)}
-                  title="Flag this note as wrong or outdated"
-                >
-                  <FlagGlyph />
-                  This looks wrong
-                </button>
-              </div>
+            <div style={S.panelFoot}>
+              <button style={S.discussBtn} className="mg-discuss" onClick={() => discuss(selected)}>
+                <ChatGlyph />
+                Discuss in a new chat
+              </button>
             </div>
           </aside>
         </>
@@ -1311,28 +873,563 @@ export default function App({ appId, token }) {
 
 // ------------------------------------------------------------- subcomponents ---
 
-function Th({ label, active, dir, onClick, align }) {
+function Th({ label, subLabel, active, dir, onClick, align }) {
   return (
     <th
       style={{ ...S.th, textAlign: align || 'right', cursor: onClick ? 'pointer' : 'default' }}
       onClick={onClick}
       className={onClick ? 'mg-th' : undefined}
     >
-      {label}
-      {active && <span style={S.sortCaret}>{dir === 'asc' ? '↑' : '↓'}</span>}
+      <span style={S.thMain}>
+        {label}
+        {active && <span style={S.sortCaret}>{dir === 'asc' ? '↑' : '↓'}</span>}
+      </span>
+      {subLabel && <span style={S.thSub}>{subLabel}</span>}
     </th>
   );
 }
 
-function Bar({ value, label, hue }) {
+function MindGraphRenderer({
+  runtime,
+  graphData,
+  width,
+  height,
+  mode,
+  selectedId,
+  hoverId,
+  colorForNode,
+  radiusForNode,
+  onNodeClick,
+  onNodeHover,
+  onBackgroundClick,
+}) {
+  const hostRef = useRef(null);
+  const latestRef = useRef({});
+
+  useEffect(() => {
+    latestRef.current = {
+      selectedId,
+      hoverId,
+      colorForNode,
+      radiusForNode,
+      onNodeClick,
+      onNodeHover,
+      onBackgroundClick,
+    };
+  }, [selectedId, hoverId, colorForNode, radiusForNode, onNodeClick, onNodeHover, onBackgroundClick]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !runtime || width <= 0 || height <= 0) return undefined;
+
+    let disposed = false;
+    let cleanup = () => {};
+    host.replaceChildren();
+
+    createMindGraphScene({
+      host,
+      runtime,
+      graphData,
+      width,
+      height,
+      mode,
+      latestRef,
+      isDisposed: () => disposed,
+    }).then((nextCleanup) => {
+      if (disposed) {
+        try { nextCleanup?.(); } catch {}
+      } else {
+        cleanup = nextCleanup || cleanup;
+      }
+    }).catch((err) => {
+      console.error('[Mind] Graph renderer failed', err);
+      if (!disposed) host.textContent = 'Graph could not render.';
+    });
+
+    return () => {
+      disposed = true;
+      try { cleanup(); } catch {}
+      host.replaceChildren();
+    };
+  }, [runtime, graphData, width, height, mode]);
+
   return (
-    <div style={S.barCell}>
-      <div style={S.barTrack}>
-        <div style={{ ...S.barFill, width: Math.round(value * 100) + '%', background: hue }} />
-      </div>
-      <span style={S.barLabel}>{label}</span>
-    </div>
+    <div
+      ref={hostRef}
+      style={S.pixiGraph}
+      className="mg-pixi-graph"
+      aria-label={mode === 'local' ? 'Local note graph' : 'Mind graph'}
+    />
   );
+}
+
+async function createMindGraphScene({
+  host,
+  runtime,
+  graphData,
+  width,
+  height,
+  mode,
+  latestRef,
+  isDisposed,
+}) {
+  const { d3, PIXI } = runtime;
+  const graph = normalizeRendererGraphData(graphData, width, height);
+  const app = new PIXI.Application();
+  await app.init({
+    width,
+    height,
+    antialias: true,
+    backgroundAlpha: 0,
+    autoDensity: true,
+    resolution: window.devicePixelRatio || 1,
+    // Drive rendering ourselves (below) so each app.render() is wrapped in a
+    // guard — a single bad batcher frame can never take down the whole app.
+    autoStart: false,
+  });
+  if (isDisposed()) {
+    try { app.destroy(true, { children: true, texture: true, textureSource: true }); } catch {}
+    return () => {};
+  }
+
+  const canvas = app.canvas || app.view;
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  canvas.style.display = 'block';
+  canvas.style.touchAction = 'none';
+  host.appendChild(canvas);
+
+  const scene = new PIXI.Container();
+  const linkLayer = new PIXI.Graphics();
+  const nodeLayer = new PIXI.Container();
+  const labelLayer = new PIXI.Container();
+  scene.addChild(linkLayer);
+  scene.addChild(nodeLayer);
+  scene.addChild(labelLayer);
+  app.stage.addChild(scene);
+
+  const neighbors = buildRendererNeighborMap(graph.links);
+  const labelRanks = buildLabelRankMap(graph.nodes);
+  const focus = new Map(graph.nodes.map((node) => [node.id, 1]));
+  let currentTransform = d3.zoomIdentity.translate(width / 2, height / 2).scale(mode === 'local' ? 0.95 : 0.82);
+  let lastFrame = performance.now();
+  let dragStart = null;
+  let activeDragNode = null;
+  let lastNodeClickAt = 0;
+  let lastHoverId = null;
+
+  const linkDistance = mode === 'local' ? 42 : 64;
+  const chargeStrength = mode === 'local' ? -120 : -185;
+  const centerForce = d3.forceCenter(0, 0);
+  if (typeof centerForce.strength === 'function') centerForce.strength(mode === 'local' ? 0.12 : 0.06);
+
+  const simulation = d3.forceSimulation(graph.nodes)
+    .force('charge', d3.forceManyBody().strength((node) => node.type === 'moc' ? chargeStrength * 1.25 : chargeStrength))
+    .force('link', d3.forceLink(graph.links).distance((link) => link.kind === 'moc' ? linkDistance * 0.82 : linkDistance).strength((link) => link.kind === 'moc' ? 0.42 : 0.22))
+    .force('center', centerForce)
+    .force('collide', d3.forceCollide().radius((node) => latestRadius(node) + 8).iterations(2))
+    .velocityDecay(mode === 'local' ? 0.34 : 0.3)
+    .stop();
+
+  simulation.tick(mode === 'local' ? 80 : 130);
+
+  const renderNodes = graph.nodes.map((node) => {
+    const gfx = new PIXI.Graphics();
+    const label = new PIXI.Container();
+    const labelBg = new PIXI.Graphics();
+    const labelText = new PIXI.Text({
+      text: truncateGraphLabel(node.title || node.id),
+      style: {
+        fontFamily: graphFontFamily(),
+        fontSize: node.type === 'moc' ? 12 : 11,
+        fontWeight: node.type === 'moc' ? '700' : '650',
+        fill: colorNumber(cssVar('--text', '#e5e5e5'), '#e5e5e5'),
+      },
+      resolution: (window.devicePixelRatio || 1) * 3,
+    });
+    labelText.anchor.set(0.5, 0);
+    label.addChild(labelBg);
+    label.addChild(labelText);
+    nodeLayer.addChild(gfx);
+    labelLayer.addChild(label);
+    return { node, gfx, label, labelBg, labelText };
+  });
+
+  function latestRadius(node) {
+    return latestRef.current.radiusForNode?.(node) ?? nodeRadius(node);
+  }
+
+  function latestColor(node) {
+    return latestRef.current.colorForNode?.(node) || cssVar('--muted', '#8a8a93');
+  }
+
+  function isFocused(id) {
+    const hovered = latestRef.current.hoverId;
+    if (!hovered) return true;
+    return id === hovered || neighbors.get(hovered)?.has(id);
+  }
+
+  function focusOf(id, dt) {
+    const goal = isFocused(id) ? 1 : 0.18;
+    const current = focus.get(id) ?? 1;
+    const k = 1 - Math.pow(0.002, Math.min(48, dt) / 1000);
+    const next = current + (goal - current) * k;
+    focus.set(id, next);
+    return next;
+  }
+
+  function applyTransform(transform) {
+    currentTransform = transform;
+    scene.position.set(transform.x, transform.y);
+    scene.scale.set(transform.k, transform.k);
+  }
+
+  function hitNode(screenX, screenY) {
+    const k = currentTransform.k || 1;
+    const x = (screenX - currentTransform.x) / k;
+    const y = (screenY - currentTransform.y) / k;
+    let best = null;
+    let bestDist = Infinity;
+    for (const node of graph.nodes) {
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) continue;
+      const dx = x - node.x;
+      const dy = y - node.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const hitR = latestRadius(node) + 10 / k;
+      if (dist <= hitR && dist < bestDist) {
+        best = node;
+        bestDist = dist;
+      }
+    }
+    return best;
+  }
+
+  function draw() {
+    if (isDisposed()) return;
+    const now = performance.now();
+    const dt = now - lastFrame;
+    lastFrame = now;
+    const hover = latestRef.current.hoverId;
+    const selected = latestRef.current.selectedId;
+    const textColor = colorNumber(cssVar('--text', '#e5e5e5'), '#e5e5e5');
+    const bgColor = colorNumber(cssVar('--bg', '#0d0d0d'), '#0d0d0d');
+    const borderColor = colorNumber(cssVar('--text', '#e5e5e5'), '#e5e5e5');
+    const linkColor = colorNumber(cssVar('--text', '#e5e5e5'), '#e5e5e5');
+    const accentColor = colorNumber(cssVar('--accent', '#a78bfa'), '#a78bfa');
+    const scale = currentTransform.k || 1;
+
+    linkLayer.clear();
+    for (const link of graph.links) {
+      const s = link.source;
+      const t = link.target;
+      if (!Number.isFinite(s.x) || !Number.isFinite(s.y) || !Number.isFinite(t.x) || !Number.isFinite(t.y)) continue;
+      const f = Math.min(focus.get(s.id) ?? 1, focus.get(t.id) ?? 1);
+      const isMoc = link.kind === 'moc';
+      linkLayer.moveTo(s.x, s.y);
+      linkLayer.lineTo(t.x, t.y);
+      linkLayer.stroke({
+        width: isMoc ? 1.55 : 0.8,
+        color: isMoc ? accentColor : linkColor,
+        alpha: (isMoc ? 0.48 : 0.28) * (0.18 + 0.82 * f),
+      });
+    }
+
+    for (const item of renderNodes) {
+      const { node, gfx, label, labelBg, labelText } = item;
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) continue;
+      const f = focusOf(node.id, dt);
+      const r = latestRadius(node);
+      const color = colorNumber(latestColor(node), '#8a8a93');
+      const isHover = hover === node.id;
+      const isSelected = selected === node.id;
+      const isHub = node.type === 'moc';
+      const glowR = r * (isHover || isSelected ? 3.8 : 2.45);
+
+      gfx.clear();
+      gfx.position.set(node.x, node.y);
+      gfx.circle(0, 0, glowR);
+      gfx.fill({ color, alpha: (isHub ? 0.18 : 0.12) * (0.35 + 0.65 * f) });
+      gfx.circle(0, 0, r);
+      gfx.fill({ color, alpha: 0.18 + 0.82 * f });
+      gfx.circle(-r * 0.25, -r * 0.3, Math.max(1.5, r * 0.28));
+      gfx.fill({ color: 0xffffff, alpha: 0.18 * f });
+      gfx.circle(0, 0, r);
+      gfx.stroke({
+        width: isHover || isSelected || isHub ? 1.4 / scale : 0.85 / scale,
+        color: isHover || isSelected ? accentColor : borderColor,
+        alpha: isHover || isSelected || isHub ? 0.62 : 0.24 * f,
+      });
+
+      const rank = labelRanks.get(node.id) ?? 9999;
+      const showLabel = shouldShowScreenLabel(node, scale, rank, { mode, hoverId: hover, selectedId: selected });
+      // Hide via alpha rather than .visible — toggling visibility on a label
+      // mid-frame has tripped the Pixi v8 batcher; alpha=0 is the safe mute.
+      if (!showLabel) {
+        label.alpha = 0;
+        continue;
+      }
+
+      const strong = isHub || isHover || isSelected || node.localDepth === 0;
+      label.alpha = strong ? 1 : 0.7 + 0.25 * f;
+      label.scale.set(1 / scale);
+      label.position.set(node.x, node.y + r + 5 / scale);
+      labelText.style.fill = textColor;
+      labelText.style.fontSize = strong ? 12 : 11;
+      labelText.style.fontWeight = strong ? '700' : '650';
+      labelText.position.set(0, 2);
+
+      const w = Math.ceil(labelText.width + 12);
+      const h = Math.ceil(labelText.height + 5);
+      labelBg.clear();
+      labelBg.roundRect(-w / 2, 0, w, h, 7);
+      labelBg.fill({ color: bgColor, alpha: strong ? 0.88 : 0.74 });
+      labelBg.roundRect(-w / 2, 0, w, h, 7);
+      labelBg.stroke({ width: 1, color: borderColor, alpha: strong ? 0.26 : 0.16 });
+    }
+  }
+
+  const selection = d3.select(canvas);
+  const zoom = d3.zoom()
+    .extent([[0, 0], [width, height]])
+    .scaleExtent([0.22, 4.6])
+    .filter((event) => {
+      if (event.type === 'mousedown') return !hitNode(event.offsetX, event.offsetY);
+      if (event.type === 'touchstart') {
+        // Same node-exclusion as mousedown. Without it, zoom and drag both
+        // claim the touch (touch events skip the mousedown branch) and
+        // dragging a node also pans the whole scene. Touch events carry no
+        // offsetX/Y, so map the first touch into canvas coordinates by hand.
+        const touch = event.touches?.[0];
+        if (touch) {
+          const rect = canvas.getBoundingClientRect();
+          return !hitNode(touch.clientX - rect.left, touch.clientY - rect.top);
+        }
+      }
+      return true;
+    })
+    .on('zoom', (event) => {
+      applyTransform(event.transform);
+      draw();
+    });
+
+  selection.call(zoom);
+  const fit = computeRendererFitTransform(graph.nodes, width, height, {
+    padding: mode === 'local' ? 34 : 72,
+    minScale: mode === 'local' ? 0.72 : 0.42,
+    maxScale: mode === 'local' ? 1.45 : 1.08,
+  });
+  selection.call(zoom.transform, d3.zoomIdentity.translate(fit.x, fit.y).scale(fit.k));
+
+  const drag = d3.drag()
+    .container(canvas)
+    .subject((event) => hitNode(event.x, event.y))
+    .on('start', (event) => {
+      if (!event.subject) return;
+      activeDragNode = event.subject;
+      dragStart = { x: event.x, y: event.y, t: Date.now() };
+      event.sourceEvent?.stopPropagation?.();
+      simulation.alphaTarget(0.2).restart();
+      event.subject.fx = event.subject.x;
+      event.subject.fy = event.subject.y;
+      latestRef.current.onNodeHover?.(event.subject);
+    })
+    .on('drag', (event) => {
+      if (!event.subject) return;
+      const k = currentTransform.k || 1;
+      event.subject.fx = (event.x - currentTransform.x) / k;
+      event.subject.fy = (event.y - currentTransform.y) / k;
+    })
+    .on('end', (event) => {
+      if (!event.subject) return;
+      event.sourceEvent?.stopPropagation?.();
+      simulation.alphaTarget(0);
+      event.subject.fx = null;
+      event.subject.fy = null;
+      const moved = dragStart
+        ? Math.hypot(event.x - dragStart.x, event.y - dragStart.y)
+        : Infinity;
+      const quick = dragStart ? Date.now() - dragStart.t < 520 : false;
+      activeDragNode = null;
+      dragStart = null;
+      if (moved < 7 && quick) {
+        lastNodeClickAt = Date.now();
+        latestRef.current.onNodeClick?.(event.subject);
+      }
+    });
+
+  selection.call(drag);
+
+  const onPointerMove = (event) => {
+    if (activeDragNode) return;
+    const node = hitNode(event.offsetX, event.offsetY);
+    const nextId = node?.id || null;
+    if (nextId === lastHoverId) return;
+    lastHoverId = nextId;
+    latestRef.current.onNodeHover?.(node || null);
+  };
+  const onPointerLeave = () => {
+    lastHoverId = null;
+    latestRef.current.onNodeHover?.(null);
+  };
+  const onCanvasClick = (event) => {
+    if (Date.now() - lastNodeClickAt < 160) return;
+    if (hitNode(event.offsetX, event.offsetY)) return;
+    latestRef.current.onBackgroundClick?.();
+  };
+  canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerleave', onPointerLeave);
+  canvas.addEventListener('click', onCanvasClick);
+
+  // Self-driven render loop. app.render() is in a try/catch so a single bad
+  // Pixi batcher frame is skipped (logged once) instead of throwing out of the
+  // ticker and tearing down the whole app.
+  let rafId = 0;
+  let renderErrorLogged = false;
+  const frame = () => {
+    if (isDisposed()) return;
+    draw();
+    try {
+      app.render();
+    } catch (err) {
+      if (!renderErrorLogged) {
+        renderErrorLogged = true;
+        console.warn('[Mind] Skipped a bad render frame', err);
+      }
+    }
+    rafId = requestAnimationFrame(frame);
+  };
+  simulation.alpha(mode === 'local' ? 0.22 : 0.34).restart();
+  rafId = requestAnimationFrame(frame);
+
+  return () => {
+    canvas.removeEventListener('pointermove', onPointerMove);
+    canvas.removeEventListener('pointerleave', onPointerLeave);
+    canvas.removeEventListener('click', onCanvasClick);
+    try { selection.on('.zoom', null).on('.drag', null); } catch {}
+    simulation.stop();
+    if (rafId) cancelAnimationFrame(rafId);
+    // Destroy children + textures explicitly: every label owns a canvas-backed
+    // texture, and resize remounts rebuild the whole scene — without this the
+    // old scene's textures linger until GC gets around to them.
+    try { app.destroy(true, { children: true, texture: true, textureSource: true }); } catch {}
+  };
+}
+
+export function normalizeRendererGraphData(graphData = {}, width = 0, height = 0) {
+  const rawNodes = Array.isArray(graphData.nodes) ? graphData.nodes : [];
+  const rawLinks = Array.isArray(graphData.links) ? graphData.links : [];
+  const spread = Math.max(80, Math.min(Math.max(width, 1), Math.max(height, 1)) * 0.34);
+  const nodes = rawNodes
+    .filter((node) => node && node.id)
+    .map((node, index) => {
+      const seeded = seededGraphPosition(node.id, index, rawNodes.length || 1, spread);
+      return {
+        ...node,
+        x: Number.isFinite(node.x) ? node.x : seeded.x,
+        y: Number.isFinite(node.y) ? node.y : seeded.y,
+      };
+    });
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const links = rawLinks
+    .map((link) => {
+      const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
+      const targetId = typeof link.target === 'object' ? link.target.id : link.target;
+      const source = byId.get(sourceId);
+      const target = byId.get(targetId);
+      if (!source || !target) return null;
+      return { ...link, source, target, sourceId, targetId };
+    })
+    .filter(Boolean);
+  return { nodes, links };
+}
+
+export function computeRendererFitTransform(nodes = [], width = 0, height = 0, opts = {}) {
+  const finiteNodes = (Array.isArray(nodes) ? nodes : [])
+    .filter((node) => Number.isFinite(node.x) && Number.isFinite(node.y));
+  const padding = Number.isFinite(opts.padding) ? opts.padding : 64;
+  const minScale = Number.isFinite(opts.minScale) ? opts.minScale : 0.35;
+  const maxScale = Number.isFinite(opts.maxScale) ? opts.maxScale : 1.15;
+  if (!finiteNodes.length || width <= 0 || height <= 0) {
+    return { x: width / 2, y: height / 2, k: 1 };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const node of finiteNodes) {
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x);
+    maxY = Math.max(maxY, node.y);
+  }
+  const graphW = Math.max(1, maxX - minX);
+  const graphH = Math.max(1, maxY - minY);
+  const scale = clamp(
+    Math.min((width - padding * 2) / graphW, (height - padding * 2) / graphH),
+    minScale,
+    maxScale,
+  );
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  return {
+    x: width / 2 - cx * scale,
+    y: height / 2 - cy * scale,
+    k: scale,
+  };
+}
+
+function buildRendererNeighborMap(links = []) {
+  const map = new Map();
+  const add = (a, b) => {
+    if (!map.has(a)) map.set(a, new Set());
+    map.get(a).add(b);
+  };
+  for (const link of links) {
+    const s = link.source?.id || link.sourceId || link.source;
+    const t = link.target?.id || link.targetId || link.target;
+    if (!s || !t) continue;
+    add(s, t);
+    add(t, s);
+  }
+  return map;
+}
+
+function buildLabelRankMap(nodes = []) {
+  const ranked = [...nodes]
+    .map((node) => ({ node, score: labelScore(node) }))
+    .sort((a, b) => b.score - a.score);
+  return new Map(ranked.map(({ node }, index) => [node.id, index]));
+}
+
+function seededGraphPosition(id, index, total, spread) {
+  const h = hashStr(String(id));
+  const angle = ((h % 3600) / 3600) * Math.PI * 2;
+  const ring = 0.35 + ((hashStr(String(id) + ':r') % 1000) / 1000) * 0.65;
+  const fallbackAngle = total > 0 ? (index / total) * Math.PI * 2 : angle;
+  const a = Number.isFinite(angle) ? angle : fallbackAngle;
+  return {
+    x: Math.cos(a) * spread * ring,
+    y: Math.sin(a) * spread * ring,
+  };
+}
+
+function truncateGraphLabel(label) {
+  const text = String(label || '');
+  if (text.length <= 34) return text;
+  return text.slice(0, 31).trimEnd() + '...';
+}
+
+function graphFontFamily() {
+  try {
+    return cssVar('--font', 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif');
+  } catch {
+    return 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  }
+}
+
+function colorNumber(color, fallback) {
+  const rgb = parseRGB(color) || parseRGB(fallback) || [138, 138, 147];
+  return (rgb[0] << 16) + (rgb[1] << 8) + rgb[2];
 }
 
 // Importance 1..5 rendered as filled/empty pips — calmer than a raw number,
@@ -1345,15 +1442,6 @@ function ImportanceDots({ value }) {
         <span key={i} style={{ ...S.pip, ...(i <= v ? S.pipOn : {}) }} />
       ))}
     </span>
-  );
-}
-
-function Chip({ label, children }) {
-  return (
-    <div style={S.chip}>
-      <span style={S.chipLabel}>{label}</span>
-      <span style={S.chipValue}>{children}</span>
-    </div>
   );
 }
 
@@ -1407,38 +1495,146 @@ function ChatGlyph() {
   );
 }
 
-function FlagGlyph() {
+// Document glyph for the "note text" tab — a page with a few ruled lines.
+function TextGlyph() {
   return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ marginRight: 6 }}>
-      <path d="M3 2v12M3 2h7.5l-2 4 2 4H3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M4 2.5h5l3 3V13a0.5 0.5 0 0 1-0.5 0.5h-7A0.5 0.5 0 0 1 4 13V3a0.5 0.5 0 0 1 0.5-0.5Z"
+        stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M9 2.5V5.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M6 8h4M6 10.5h4" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// Network glyph for the "local graph" tab — three linked nodes.
+function NetworkGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M5.4 5.4 10.3 4M4.8 6.6 7 10.6" stroke="currentColor" strokeWidth="1.1" />
+      <circle cx="4" cy="5" r="2.1" fill="currentColor" />
+      <circle cx="12" cy="3.6" r="2" fill="currentColor" />
+      <circle cx="8" cy="12" r="2.1" fill="currentColor" />
     </svg>
   );
 }
 
 // ----------------------------------------------------------------- helpers ---
 
+function loadScriptOnce(src) {
+  if (typeof document === 'undefined') return Promise.reject(new Error('document is not available'));
+  const existing = document.querySelector(`script[src="${src}"]`);
+  if (existing?.dataset.loaded === 'true') return Promise.resolve();
+  if (existing?.dataset.loading === 'true') {
+    return new Promise((resolve, reject) => {
+      existing.addEventListener('load', resolve, { once: true });
+      existing.addEventListener('error', reject, { once: true });
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.crossOrigin = 'anonymous';
+    script.dataset.loading = 'true';
+    script.onload = () => {
+      script.dataset.loading = 'false';
+      script.dataset.loaded = 'true';
+      resolve();
+    };
+    script.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(script);
+  });
+}
+
 function escapeHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escapeMarkdownLinkText(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/]/g, '\\]');
+}
+
+// Note paths come from agent-written graph.json. Reject traversal, absolute
+// paths, query/fragment smuggling, and non-markdown targets, and encode each
+// segment so the fetch URL can't be reshaped by the path contents.
+export function safeMemoryPath(path) {
+  if (typeof path !== 'string') return null;
+  const trimmed = path.trim();
+  if (!trimmed || trimmed.startsWith('/') || trimmed.includes('\\')) return null;
+  if (trimmed.includes('?') || trimmed.includes('#')) return null;
+  const parts = trimmed.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..')) return null;
+  if (!parts[parts.length - 1].endsWith('.md')) return null;
+  return parts.map((part) => encodeURIComponent(part)).join('/');
+}
+
+// DOMPurify policy for memory notes: on top of the html profile, forbid every
+// network-bearing tag and attribute (the prod CSP blocks remote img/connect,
+// but form-action is NOT covered by default-src and test instances run without
+// the Caddy CSP entirely — so the app forbids these itself). href is the one
+// URL attribute left allowed, because wikilink anchors need it;
+// restrictNoteHtml then drops every href that isn't a #mind-node- fragment.
+export const MEMORY_SANITIZE_OPTIONS = {
+  USE_PROFILES: { html: true },
+  FORBID_TAGS: ['img', 'picture', 'source', 'video', 'audio', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
+  FORBID_ATTR: ['src', 'srcset', 'xlink:href', 'formaction'],
+};
+
+// Markdown-level twin of the sanitize policy: plain links keep their label
+// but lose the URL, images collapse to their alt text. Wikilink syntax
+// ([[slug]] / [[slug|alias]]) never matches either pattern, so running this
+// before renderWikiLinks leaves wikilinks intact.
+export function neutralizeMemoryMarkdown(md) {
+  return (md || '')
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt) => ` ${alt || 'image'} `)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
+}
+
+// Post-sanitize pass over already-DOMPurify-clean HTML: strip every anchor
+// href except the #mind-node- fragments renderWikiLinks generates. Removal
+// only — it cannot introduce markup the sanitizer didn't already allow.
+function restrictNoteHtml(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  for (const a of tpl.content.querySelectorAll('a[href]')) {
+    if (!a.getAttribute('href').startsWith('#mind-node-')) a.removeAttribute('href');
+  }
+  return tpl.innerHTML;
 }
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function roundedRect(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.lineTo(x + w - rr, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-  ctx.lineTo(x + w, y + h - rr);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
-  ctx.lineTo(x + rr, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
-  ctx.lineTo(x, y + rr);
-  ctx.quadraticCurveTo(x, y, x + rr, y);
-  ctx.closePath();
+export function labelScore(node = {}) {
+  const importance = Number(node.importance) || 0;
+  const access = Number(node.access_count) || 0;
+  const mocBonus = node.type === 'moc' ? 1000 : 0;
+  const linkedBonus = Array.isArray(node.mocs) && node.mocs.length > 0 ? 18 : 0;
+  const localBonus = node.localDepth === 0 ? 800 : node.localDepth === 1 ? 120 : 0;
+  return mocBonus + localBonus + importance * 12 + access * 4 + linkedBonus;
+}
+
+export function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts = {}) {
+  const isHover = node.id === opts.hoverId;
+  const isSelected = node.id === opts.selectedId;
+  const isHub = node.type === 'moc';
+  const isLocalCenter = node.localDepth === 0;
+  if (isHover || isSelected || isHub || isLocalCenter) return true;
+
+  if (opts.mode === 'local') {
+    if (node.localDepth === 1 && scale >= 0.72) return true;
+    if (node.localDepth === 2 && scale >= 1.15) return true;
+    return scale >= 1.7 && labelRank < 18;
+  }
+
+  if (scale < 0.9) return false;
+  if (scale < 1.25) return labelRank < 6;
+  if (scale < 1.7) return labelRank < 14;
+  if (scale < 2.2) return labelRank < 26;
+  return labelRank < 60;
 }
 
 // Read a CSS custom property off :root (computed) with a fallback.
@@ -1467,18 +1663,6 @@ function parseRGB(c) {
   m = s.match(/rgba?\(\s*([0-9.]+)[, ]+([0-9.]+)[, ]+([0-9.]+)/);
   if (m) return [+m[1], +m[2], +m[3]];
   return null;
-}
-
-// Apply an alpha to any color string (hex or named/rgb resolved via parse).
-function withAlpha(c, alpha) {
-  const rgb = parseRGB(c);
-  if (!rgb) return c;
-  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
-}
-
-// CSS var resolved to an rgba() with the given alpha (for canvas strokes).
-function cssVarA(name, fallback, alpha) {
-  return withAlpha(cssVar(name, fallback), alpha);
 }
 
 // ------------------------------------------------------------------- styles ---
@@ -1519,11 +1703,9 @@ const S = {
     border: '1px solid var(--border)', gap: 2,
   },
   toggleBtn: {
-    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-    border: 'none', background: 'transparent',
-    color: 'var(--muted)', fontSize: 12.5, fontWeight: 600, padding: '8px 13px',
-    minHeight: 44, borderRadius: 6, cursor: 'pointer', fontFamily: 'var(--font)',
-    transition: 'color 0.15s, background 0.15s',
+    display: 'flex', alignItems: 'center', border: 'none', background: 'transparent',
+    color: 'var(--muted)', fontSize: 12.5, fontWeight: 600, padding: '5px 11px',
+    borderRadius: 6, cursor: 'pointer', fontFamily: 'var(--font)', transition: 'color 0.15s, background 0.15s',
   },
   toggleActive: {
     background: 'var(--bg)', color: 'var(--text)',
@@ -1572,6 +1754,7 @@ const S = {
   },
 
   graphWrap: { position: 'absolute', inset: 0 },
+  pixiGraph: { position: 'absolute', inset: 0, overflow: 'hidden' },
   graphHint: {
     position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
     fontSize: 11, color: 'var(--muted)', background: 'var(--surface)',
@@ -1579,42 +1762,6 @@ const S = {
     pointerEvents: 'none', opacity: 0.92, whiteSpace: 'nowrap', maxWidth: '92%',
     overflow: 'hidden', textOverflow: 'ellipsis',
   },
-  graphTools: {
-    position: 'absolute', top: 12, right: 12, width: 198, padding: 10,
-    background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12,
-    boxShadow: '0 8px 28px rgba(0,0,0,0.28)', backdropFilter: 'blur(4px)',
-    display: 'flex', flexDirection: 'column', gap: 9,
-  },
-  focusSwitch: {
-    display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 3, padding: 3,
-    background: 'var(--surface2)', borderRadius: 9, border: '1px solid var(--border)',
-  },
-  focusBtn: {
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    border: 'none', background: 'transparent', color: 'var(--muted)', borderRadius: 6,
-    padding: '8px 8px', minHeight: 44, fontSize: 12, fontWeight: 700, cursor: 'pointer',
-    fontFamily: 'var(--font)', transition: 'color 0.15s, background 0.15s, opacity 0.15s',
-  },
-  focusActive: {
-    background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
-  },
-  focusDisabled: { opacity: 0.45, cursor: 'not-allowed' },
-  depthControl: { display: 'flex', flexDirection: 'column', gap: 5 },
-  depthMuted: { opacity: 0.72 },
-  depthTop: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  depthLabel: {
-    minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-    color: 'var(--text)', fontSize: 11.5, fontWeight: 600,
-  },
-  depthValue: {
-    color: 'var(--muted)', fontSize: 10.5, fontWeight: 700,
-    fontVariantNumeric: 'tabular-nums', flexShrink: 0,
-  },
-  depthMarks: {
-    display: 'flex', justifyContent: 'space-between', color: 'var(--muted)',
-    fontSize: 9.5, fontWeight: 700, padding: '0 2px',
-  },
-
   legend: {
     position: 'absolute', left: 12, bottom: 12, background: 'var(--surface)',
     border: '1px solid var(--border)', borderRadius: 12, padding: '11px 12px',
@@ -1626,8 +1773,7 @@ const S = {
     color: 'var(--muted)', marginBottom: 8,
   },
   legendRow: {
-    display: 'flex', alignItems: 'center', gap: 9, padding: '7px 6px', minHeight: 44,
-    width: '100%',
+    display: 'flex', alignItems: 'center', gap: 9, padding: '3px 4px', width: '100%',
     background: 'transparent', border: 'none', borderRadius: 6, cursor: 'pointer',
     textAlign: 'left', fontFamily: 'var(--font)', color: 'var(--text)',
   },
@@ -1648,6 +1794,11 @@ const S = {
     letterSpacing: '0.05em', padding: '11px 12px', borderBottom: '1px solid var(--border)',
     whiteSpace: 'nowrap', userSelect: 'none',
   },
+  thMain: { display: 'block', lineHeight: 1.05 },
+  thSub: {
+    display: 'block', marginTop: 3, fontSize: 9, fontWeight: 600, color: 'var(--muted)',
+    textTransform: 'none', letterSpacing: 0, opacity: 0.8,
+  },
   sortCaret: { marginLeft: 5, fontSize: 11, color: 'var(--accent)' },
   tr: { cursor: 'pointer', borderBottom: '1px solid var(--border-light, var(--border))' },
   td: { padding: '10px 12px', verticalAlign: 'middle', color: 'var(--text)' },
@@ -1657,7 +1808,10 @@ const S = {
     maxWidth: 300, minWidth: 150,
   },
   rowTitleText: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  tdBar: { padding: '10px 12px', minWidth: 116 },
+  tdMeta: {
+    textAlign: 'right', color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap',
+  },
   rowDot: {
     width: 9, height: 9, borderRadius: '50%', flexShrink: 0, display: 'inline-block',
     boxShadow: '0 0 0 3px var(--surface)',
@@ -1679,17 +1833,6 @@ const S = {
   },
   pipOn: { background: 'var(--accent)' },
 
-  barCell: { display: 'flex', alignItems: 'center', gap: 9 },
-  barTrack: {
-    flex: 1, height: 6, background: 'var(--surface2)', borderRadius: 999,
-    overflow: 'hidden', minWidth: 40, boxShadow: 'inset 0 0 0 1px var(--border-light, var(--border))',
-  },
-  barFill: { height: '100%', borderRadius: 999, transition: 'width 0.25s ease', minWidth: 2 },
-  barLabel: {
-    fontSize: 11.5, color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
-    minWidth: 52, textAlign: 'right', whiteSpace: 'nowrap',
-  },
-
   scrim: { position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 20 },
   panel: {
     position: 'absolute', zIndex: 21, background: 'var(--surface)',
@@ -1699,133 +1842,96 @@ const S = {
   panelAccent: { position: 'absolute', top: 0, left: 0, right: 0, height: 3, zIndex: 1 },
   panelHead: {
     display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
-    padding: '18px 16px 12px', gap: 10,
+    padding: '15px 16px 10px', gap: 10,
   },
   panelHeadMain: { display: 'flex', gap: 11, minWidth: 0, alignItems: 'flex-start' },
-  panelKicker: {
-    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
-    color: 'var(--muted)', marginBottom: 3,
+  panelTitle: { fontSize: 18, fontWeight: 700, lineHeight: 1.18, letterSpacing: '-0.01em' },
+  panelMetaLine: {
+    display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+    marginTop: 5, color: 'var(--muted)', fontSize: 11.5,
+    fontVariantNumeric: 'tabular-nums',
   },
-  panelTitle: { fontSize: 19, fontWeight: 700, lineHeight: 1.22, letterSpacing: '-0.015em' },
   closeBtn: {
     border: 'none', background: 'var(--surface2)', color: 'var(--muted)',
-    width: 40, height: 40, minWidth: 44, minHeight: 44, borderRadius: 10, fontSize: 20,
-    lineHeight: 1, cursor: 'pointer',
+    width: 30, height: 30, borderRadius: 8, fontSize: 20, lineHeight: 1, cursor: 'pointer',
     flexShrink: 0, fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
     justifyContent: 'center', transition: 'background 0.15s, color 0.15s',
   },
 
-  chipRow: { display: 'flex', flexWrap: 'wrap', gap: 7, padding: '0 16px 4px' },
-  chip: {
-    display: 'flex', flexDirection: 'column', gap: 2, background: 'var(--surface2)',
-    border: '1px solid var(--border)', borderRadius: 9, padding: '6px 10px', minWidth: 0,
-  },
-  chipLabel: {
-    fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em',
-    color: 'var(--muted)',
-  },
-  chipValue: {
-    fontSize: 13, fontWeight: 600, color: 'var(--text)', fontVariantNumeric: 'tabular-nums',
-    display: 'flex', alignItems: 'center', minHeight: 16,
-  },
-
-  tagRow: { display: 'flex', flexWrap: 'wrap', gap: 6, padding: '10px 16px 4px' },
+  tagRow: { display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 16px 8px' },
   tag: {
     fontSize: 11.5, color: 'var(--accent)', background: 'var(--accent-dim, rgba(167,139,250,0.12))',
     borderRadius: 999, padding: '2px 9px', fontWeight: 500,
   },
+  // Thin tab strip: context label (left) + depth control (graph tab only) +
+  // the icon toggle (right). Minimal chrome — one row, no full-width tab bar.
+  detailBar: {
+    display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px 8px',
+    borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)',
+    flexShrink: 0,
+  },
+  detailContext: {
+    display: 'flex', alignItems: 'baseline', gap: 8, flex: 1, minWidth: 0,
+    overflow: 'hidden',
+  },
+  paneHead: {
+    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0,
+    color: 'var(--muted)', whiteSpace: 'nowrap',
+  },
+  localCount: {
+    fontSize: 11, color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+  depthToggle: {
+    display: 'flex', alignItems: 'center', gap: 3, padding: 3, borderRadius: 8,
+    background: 'var(--surface2)', border: '1px solid var(--border)', flexShrink: 0,
+  },
+  depthBtn: {
+    minWidth: 28, height: 26, border: 'none', borderRadius: 6, background: 'transparent',
+    color: 'var(--muted)', fontSize: 12, fontWeight: 700, fontFamily: 'var(--font)',
+    cursor: 'pointer',
+  },
+  depthBtnActive: {
+    background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
+  },
+  tabToggle: {
+    display: 'flex', gap: 2, padding: 3, borderRadius: 8,
+    background: 'var(--surface2)', border: '1px solid var(--border)', flexShrink: 0,
+  },
+  tabBtn: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: 32, height: 26, border: 'none', borderRadius: 6, background: 'transparent',
+    color: 'var(--muted)', cursor: 'pointer', fontFamily: 'var(--font)',
+    transition: 'color 0.15s, background 0.15s',
+  },
+  tabBtnActive: {
+    background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
+  },
+  // The active tab's pane fills all remaining panel height. The local graph
+  // mounts absolutely-positioned inside it so Pixi always gets the full box.
+  detailBody: { flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' },
+  localGraphWrap: { position: 'absolute', inset: 0, overflow: 'hidden' },
+  localEmpty: {
+    position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    color: 'var(--muted)', fontSize: 13, padding: 18, textAlign: 'center',
+  },
   panelBody: {
-    flex: 1, overflowY: 'auto', padding: '14px 16px 20px', fontSize: 14, lineHeight: 1.62,
-    borderTop: '1px solid var(--border)', marginTop: 10,
+    flex: 1, overflowY: 'auto', padding: '10px 16px 20px', fontSize: 14, lineHeight: 1.62,
+    minHeight: 0,
   },
   notePlaceholder: { display: 'flex', flexDirection: 'column', gap: 11, paddingTop: 4 },
   pre: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'var(--mono)', fontSize: 12.5 },
-  panelFoot: { padding: 14, borderTop: '1px solid var(--border)', background: 'var(--surface)' },
-  panelFootRow: { display: 'flex', flexDirection: 'column', gap: 8 },
+  panelFoot: { padding: 12, borderTop: '1px solid var(--border)', background: 'var(--surface)' },
   discussBtn: {
-    width: '100%', border: 'none', borderRadius: 11, padding: '12px 16px',
+    width: '100%', border: 'none', borderRadius: 10, padding: '10px 14px',
     background: 'var(--accent)', color: '#fff', fontSize: 14, fontWeight: 600,
     cursor: 'pointer', fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
     justifyContent: 'center', transition: 'filter 0.15s, transform 0.05s',
     boxShadow: '0 6px 18px var(--accent-dim, rgba(167,139,250,0.35))',
   },
-  correctBtn: {
-    width: '100%', borderRadius: 11, padding: '10px 16px', fontSize: 13.5, fontWeight: 600,
-    cursor: 'pointer', fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
-    justifyContent: 'center', transition: 'filter 0.15s, transform 0.05s',
-    background: 'var(--surface2)', color: 'var(--muted)',
-    border: '1px solid var(--border)',
-  },
-
-  // Search bar
-  searchWrap: { position: 'relative', display: 'flex', alignItems: 'center' },
-  searchInput: {
-    padding: '7px 30px 7px 10px', border: '1px solid var(--border)', borderRadius: 9,
-    background: 'var(--bg)', color: 'var(--text)', fontSize: 12.5, fontFamily: 'var(--font)',
-    width: 148, outline: 'none', transition: 'border-color 0.15s, width 0.2s',
-  },
-  searchClear: {
-    position: 'absolute', right: 4, border: 'none', background: 'transparent',
-    color: 'var(--muted)', fontSize: 16, lineHeight: 1, cursor: 'pointer',
-    padding: '2px 5px', fontFamily: 'var(--font)',
-  },
-
-  // Active MOC filter banner
-  filterBanner: {
-    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '6px 14px', background: 'var(--accent-dim, rgba(167,139,250,0.1))',
-    borderBottom: '1px solid var(--border)', fontSize: 12, flexShrink: 0,
-  },
-  filterLabel: { color: 'var(--text)' },
-  filterClear: {
-    border: 'none', background: 'transparent', color: 'var(--accent)', fontSize: 12,
-    fontWeight: 700, cursor: 'pointer', padding: '2px 6px', fontFamily: 'var(--font)',
-  },
-
-  // Legend row active state
-  legendRowActive: { background: 'var(--accent-dim, rgba(167,139,250,0.12))' },
-
-  // Stale note indicator in list view
-  staleDot: {
-    display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 5, flexShrink: 0,
-  },
-  staleDotCore: {
-    width: 5, height: 5, borderRadius: '50%', background: 'var(--accent-hover, #f0c674)',
-    flexShrink: 0, display: 'inline-block',
-  },
-  staleHint: {
-    fontSize: 10, color: 'var(--accent-hover, #f0c674)', fontWeight: 600, whiteSpace: 'nowrap',
-  },
 };
 
 const CSS = `
-/* mobius-ui:Focus v1 -- shared keyboard focus ring (WCAG 2.4.7); never bare outline:none */
-:where(button,a,input,textarea,select,summary,[role="button"],[tabindex]:not([tabindex="-1"])):focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-/* /mobius-ui:Focus */
-
-/* mobius-ui:NativeTouch v1 — keep in sync; library candidate. Diverge below the marker only. */
-* { -webkit-tap-highlight-color: transparent; }
-.mg-tgl, .mg-legend-row, .mg-close, .mg-discuss, .mg-row, .mg-th { touch-action: manipulation; }
-.mg-tgl, .mg-legend-row, .mg-th, .mg-section-head { user-select: none; -webkit-user-select: none; }
-.mg-tgl:active { opacity: 0.72; }
-.mg-row:active { background: var(--surface2); }
-.mg-discuss:active { transform: translateY(1px); }
-.mg-scroll { overscroll-behavior: contain; }
-@media (hover: hover) {
-  .mg-row:hover { background: var(--surface2); }
-  .mg-th:hover { color: var(--text); }
-  .mg-legend-row:hover { background: var(--surface2); }
-  .mg-tgl:hover { color: var(--text); }
-  .mg-close:hover { background: var(--border); color: var(--text); }
-  .mg-discuss:hover { filter: brightness(1.06); }
-  .mg-md a:hover { border-bottom-color: var(--accent); }
-}
-/* /mobius-ui:NativeTouch */
-
-/* mobius-ui:Animations v1 — keep in sync; library candidate. Diverge below the marker only. */
 @keyframes mg-orbit-spin { to { transform: rotate(360deg); } }
 .mg-orbit {
   position: relative; width: 46px; height: 46px;
@@ -1849,33 +1955,18 @@ const CSS = `
 }
 .mg-pulse { transform-origin: 66px 48px; animation: mg-pulse-ring 2.6s ease-out infinite; }
 
-@keyframes mg-panel-in {
-  from { transform: translateX(20px); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
-}
-@keyframes mg-scrim-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes mg-sheet-in { from { transform: translateY(28px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-@keyframes mg-skel-pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
-
-@media (prefers-reduced-motion: reduce) {
-  .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub { animation: none !important; }
-}
-/* /mobius-ui:Animations */
-
-/* mobius-ui:GraphCanvas v1 — keep in sync; library candidate. Diverge below the marker only. */
-.mg-graph {
-  cursor: grab;
-  /* touch-action:none closes the gap between mount and react-force-graph
-     setting it on the canvas element, preventing the shell zoom-lock from
-     eating pinch gestures before the canvas registers them. */
-  touch-action: none;
-  /* Prevent pull-to-refresh from firing on the canvas on mobile Chrome. */
-  overscroll-behavior: contain;
-}
+.mg-graph { cursor: grab; }
 .mg-graph:active { cursor: grabbing; }
-/* /mobius-ui:GraphCanvas */
 
-/* mobius-ui:Scrollskin v1 — keep in sync; library candidate. Diverge below the marker only. */
+.mg-row:hover { background: var(--surface2); }
+.mg-th:hover { color: var(--text); }
+.mg-legend-row:hover { background: var(--surface2); }
+.mg-tgl:hover { color: var(--text); }
+.mg-tab:hover { color: var(--text); }
+.mg-close:hover { background: var(--border); color: var(--text); }
+.mg-discuss:hover { filter: brightness(1.06); }
+.mg-discuss:active { transform: translateY(1px); }
+
 .mg-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
 .mg-scroll::-webkit-scrollbar-thumb {
   background: var(--border); border-radius: 999px;
@@ -1883,43 +1974,62 @@ const CSS = `
 }
 .mg-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 .mg-scroll::-webkit-scrollbar-track { background: transparent; }
-/* /mobius-ui:Scrollskin */
 
-/* mobius-ui:Sheet v1 — keep in sync; library candidate. Diverge below the marker only. */
-.mg-panel { inset: 0 0 0 auto; width: min(460px, 92vw); animation: mg-panel-in 0.22s cubic-bezier(0.22,1,0.36,1); }
-.mg-scrim { animation: mg-scrim-in 0.2s ease; }
+@keyframes mg-skel-pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
 .mg-skel {
   height: 13px; border-radius: 5px;
   background: linear-gradient(90deg, var(--surface2), var(--border), var(--surface2));
   animation: mg-skel-pulse 1.4s ease-in-out infinite;
 }
+
+@keyframes mg-panel-in {
+  from { transform: translateX(20px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes mg-scrim-in { from { opacity: 0; } to { opacity: 1; } }
+.mg-panel { inset: 0 0 0 auto; width: min(980px, 96vw); animation: mg-panel-in 0.22s cubic-bezier(0.22,1,0.36,1); }
+.mg-scrim { animation: mg-scrim-in 0.2s ease; }
+.mg-local-graph { cursor: grab; background: var(--bg); }
+.mg-local-graph:active { cursor: grabbing; }
+.mg-md a[href^="#mind-node-"] {
+  border: 1px solid var(--accent-dim, rgba(167,139,250,0.35));
+  background: var(--accent-dim, rgba(167,139,250,0.12));
+  border-radius: 6px;
+  padding: 0 5px;
+  font-weight: 600;
+}
 @media (max-width: 640px) {
-  .mg-graph-tools { top: 8px !important; right: 8px !important; left: 8px !important; width: auto !important; }
-  /* Keep the discovery hint for touch users (who most benefit from learning
-     pinch-zoom / tap-to-open), but move it clear of the full-width top tools.
-     The legend lifts above it so the two bottom affordances never overlap. */
-  .mg-graph-hint { top: auto !important; bottom: max(12px, env(safe-area-inset-bottom)) !important; }
-  .mg-legend { bottom: calc(40px + max(12px, env(safe-area-inset-bottom))) !important; }
+  .mg-scrim { display: none; }
   .mg-panel {
-    inset: auto 0 0 0; width: 100%; height: 82%; border-left: none;
-    border-top: 1px solid var(--border); border-radius: 18px 18px 0 0;
-    animation: mg-sheet-in 0.26s cubic-bezier(0.22,1,0.36,1);
+    inset: 0; width: 100%; height: 100%; border-left: none;
+    border-top: none; border-radius: 0; box-shadow: none;
+    animation: mg-panel-in 0.18s cubic-bezier(0.22,1,0.36,1);
   }
-  /* Bottom-sheet footer sits above the iOS home indicator / gesture bar. */
-  .mg-panel-foot { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+  .mg-panel-head { padding: 11px 12px 8px !important; }
+  .mg-panel .mg-close {
+    width: 34px !important; height: 34px !important; border-radius: 10px !important;
+  }
+  .mg-panel .mg-tag-row {
+    flex-wrap: nowrap !important; overflow-x: auto; padding: 0 12px 7px !important;
+    scrollbar-width: none;
+  }
+  .mg-panel .mg-tag-row::-webkit-scrollbar { display: none; }
+  .mg-md {
+    padding: 10px 14px 18px !important;
+    font-size: 13px !important;
+    line-height: 1.54 !important;
+  }
+  .mg-md h1 { font-size: 17px !important; }
+  .mg-md h2 { font-size: 15px !important; }
+  .mg-md h3 { font-size: 13px !important; }
+  .mg-md p { margin: 8px 0 !important; }
+  .mg-md ul, .mg-md ol { margin: 8px 0 !important; }
+  .mg-md code { font-size: 0.82em !important; }
+  .mg-panel .mg-discuss { padding: 9px 12px !important; }
 }
-/* /mobius-ui:Sheet */
-
-/* mobius-ui:Search v1 — keep in sync; library candidate. Diverge below the marker only. */
-.mg-search:focus { border-color: var(--accent) !important; }
-.mg-search::-webkit-search-cancel-button { display: none; }
-/* /mobius-ui:Search */
-
-/* mobius-ui:Markdown v1 — keep in sync; library candidate. Diverge below the marker only. */
-.mg-depth {
-  width: 100%; margin: 0; accent-color: var(--accent);
+@media (prefers-reduced-motion: reduce) {
+  .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub { animation: none !important; }
 }
-.mg-depth:disabled { cursor: not-allowed; }
 
 .mg-md h1, .mg-md h2, .mg-md h3 { margin: 16px 0 7px; line-height: 1.25; font-weight: 700; letter-spacing: -0.01em; }
 .mg-md h1 { font-size: 19px; } .mg-md h2 { font-size: 16px; } .mg-md h3 { font-size: 14px; }
@@ -1929,6 +2039,7 @@ const CSS = `
 .mg-md li { margin: 4px 0; }
 .mg-md li::marker { color: var(--muted); }
 .mg-md a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim, rgba(167,139,250,0.4)); }
+.mg-md a:hover { border-bottom-color: var(--accent); }
 .mg-md strong { color: var(--text); font-weight: 700; }
 .mg-md code { background: var(--surface2); border-radius: 5px; padding: 1px 5px; font-family: var(--mono); font-size: 0.85em; border: 1px solid var(--border-light, var(--border)); }
 .mg-md pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; padding: 13px; overflow-x: auto; margin: 11px 0; }
@@ -1939,5 +2050,4 @@ const CSS = `
 .mg-md th { background: var(--surface2); font-weight: 600; }
 .mg-md img { max-width: 100%; border-radius: 8px; }
 .mg-md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
-/* /mobius-ui:Markdown */
 `;

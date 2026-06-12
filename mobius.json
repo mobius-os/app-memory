@@ -1,8 +1,8 @@
 {
   "id": "mind",
   "name": "Mind",
-  "version": "1.3.8",
-  "description": "A browsable graph of what M\u00f6bius has learned over time, the agent\u2019s own memory.",
+  "version": "1.4.0",
+  "description": "A browsable graph of what Möbius has learned over time, the agent’s own memory.",
   "author": "mobius-os",
   "license": "MIT",
   "homepage": "https://github.com/mobius-os/app-mind",
@@ -24,7 +24,8 @@
       "react-dom"
     ],
     "esm_deps": [
-      "react-force-graph-2d",
+      "d3",
+      "pixi.js",
       "marked",
       "dompurify"
     ]
