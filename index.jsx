@@ -530,10 +530,10 @@ export default function App({ appId, token }) {
           {/* The app's own glossy icon as the brand mark; falls back to the
               accent dot if this install has no custom icon (the route 404s). */}
           <img
-            src={`/api/apps/${appId}/icon`}
+            src={`/api/apps/${appId}/icon?size=64`}
             alt=""
-            width={28}
-            height={28}
+            width={26}
+            height={26}
             style={S.brandIcon}
             onError={(e) => {
               e.currentTarget.style.display = 'none'
@@ -543,7 +543,6 @@ export default function App({ appId, token }) {
           />
           <span style={{ ...S.brandDot, display: 'none' }}><span style={S.brandDotCore} /></span>
           <div style={{ minWidth: 0 }}>
-            <div style={S.title}>Mind</div>
             <div style={S.subtitle}>
               {status === 'ready'
                 ? `${counts.note + counts.moc} notes · ${graph.edges.length} links`
@@ -1677,7 +1676,7 @@ const S = {
   },
   brand: { display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 },
   brandDot: {
-    width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+    width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     background: 'radial-gradient(circle at 32% 28%, var(--accent-hover, #c4b5fd), var(--accent))',
     boxShadow: '0 0 0 1px var(--accent-dim, rgba(167,139,250,0.18)), 0 4px 14px var(--accent-dim, rgba(167,139,250,0.3))',
@@ -1687,9 +1686,9 @@ const S = {
     boxShadow: '0 0 6px rgba(255,255,255,0.7)',
   },
   brandIcon: {
-    width: 28, height: 28, borderRadius: 7, flexShrink: 0, display: 'block',
+    width: 26, height: 26, borderRadius: 6, flexShrink: 0, display: 'block',
+    objectFit: 'cover',
   },
-  title: { fontSize: 16, fontWeight: 700, lineHeight: 1.05, letterSpacing: '-0.015em' },
   subtitle: {
     fontSize: 11.5, color: 'var(--muted)', marginTop: 2, whiteSpace: 'nowrap',
     overflow: 'hidden', textOverflow: 'ellipsis', fontVariantNumeric: 'tabular-nums',
