@@ -1143,16 +1143,14 @@ async function createMindGraphScene({
       const isHover = hover === node.id;
       const isSelected = selected === node.id;
       const isHub = node.type === 'moc';
-      const glowR = r * (isHover || isSelected ? 3.8 : 2.45);
 
+      // A node is a flat colored disc with a thin ring — no glow halo, no
+      // specular highlight dot (owner asked to simplify: the color carries the
+      // identity, the ring carries hover/selected emphasis).
       gfx.clear();
       gfx.position.set(node.x, node.y);
-      gfx.circle(0, 0, glowR);
-      gfx.fill({ color, alpha: (isHub ? 0.18 : 0.12) * (0.35 + 0.65 * f) });
       gfx.circle(0, 0, r);
       gfx.fill({ color, alpha: 0.18 + 0.82 * f });
-      gfx.circle(-r * 0.25, -r * 0.3, Math.max(1.5, r * 0.28));
-      gfx.fill({ color: 0xffffff, alpha: 0.18 * f });
       gfx.circle(0, 0, r);
       gfx.stroke({
         width: isHover || isSelected || isHub ? 1.4 / scale : 0.85 / scale,
