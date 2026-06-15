@@ -532,8 +532,8 @@ export default function App({ appId, token }) {
           <img
             src={`/api/apps/${appId}/icon?size=64`}
             alt=""
-            width={26}
-            height={26}
+            width={34}
+            height={34}
             style={S.brandIcon}
             onError={(e) => {
               e.currentTarget.style.display = 'none'
@@ -1676,7 +1676,7 @@ const S = {
   },
   brand: { display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 },
   brandDot: {
-    width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
+    width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     background: 'radial-gradient(circle at 32% 28%, var(--accent-hover, #c4b5fd), var(--accent))',
     boxShadow: '0 0 0 1px var(--accent-dim, rgba(167,139,250,0.18)), 0 4px 14px var(--accent-dim, rgba(167,139,250,0.3))',
@@ -1686,7 +1686,7 @@ const S = {
     boxShadow: '0 0 6px rgba(255,255,255,0.7)',
   },
   brandIcon: {
-    width: 26, height: 26, borderRadius: 6, flexShrink: 0, display: 'block',
+    width: 34, height: 34, borderRadius: 7, flexShrink: 0, display: 'block',
     objectFit: 'cover',
   },
   subtitle: {
