@@ -1,6 +1,6 @@
-# Platform support for Mind
+# Platform support for Memory
 
-Mind now tries runtime libraries in this order:
+Memory now tries runtime libraries in this order:
 
 1. Import-map bare specifier.
 2. Same-origin `/vendor` module.
@@ -33,8 +33,8 @@ CodeMirror vendor pattern in Notes.
   `backend/app/routes/standalone.py`.
 - Add the same bare specifiers to the runtime library allowlist/schema before
   moving them from `mobius.json.runtime.esm_deps` to `runtime.imports`.
-- Keep `esm.sh` CSP/runtime-cache support until all installed Mind versions have
+- Keep `esm.sh` CSP/runtime-cache support until all installed Memory versions have
   the fallback removed.
 
-Until that lands, Mind intentionally keeps the three libraries in
+Until that lands, Memory intentionally keeps the three libraries in
 `runtime.esm_deps` so the App Store still discloses the network fallback.
