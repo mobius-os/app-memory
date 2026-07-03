@@ -117,7 +117,7 @@ export default function App({ appId, token }) {
   }, []);
 
   // --- Subscribe to the graph index. ---
-  // graph.json is rewritten by the chat + dreaming agents while this app sits
+  // graph.json is rewritten by the chat + reflection agents while this app sits
   // open, so it MUST subscribe, not load-once (a mount-only read leaves the
   // owner on a stale graph after an agent write). The store serves the cached
   // graph instantly (offline-capable) and repaints on every agent rewrite.
@@ -233,7 +233,7 @@ export default function App({ appId, token }) {
 
   // --- Subscribe to the selected note body. ---
   // The open note is exactly the kind of view an agent can rewrite underneath
-  // the owner (the chat appends to a note, dreaming reorganizes it), so it
+  // the owner (the chat appends to a note, reflection reorganizes it), so it
   // subscribes too: cached body paints instantly (offline), and an external
   // write to this path repaints it. The `revalidating` flag drives the
   // "merging…" indicator, which clears once the fresh body has landed.

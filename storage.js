@@ -9,7 +9,7 @@ import { NOTE_BASE } from './constants.js'
 // twin of window.mobius.storage.get/getText/subscribe: read-through cache
 // (last-known value served instantly, offline-capable), background revalidate,
 // and a visibility-aware poller so subscribed views repaint when the chat or
-// dreaming agent rewrites the file. Pure factory (deps injected) so the offline
+// reflection agent rewrites the file. Pure factory (deps injected) so the offline
 // harness can drive it with a mocked cache + fetch and no network.
 export function makeSharedMemoryStore({
   baseUrl = NOTE_BASE,
