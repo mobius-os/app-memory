@@ -117,10 +117,10 @@ export default function App({ appId, token }) {
   }, []);
 
   // --- Subscribe to the graph index. ---
-  // graph.json is rewritten by the chat + reflection agents while this app sits
-  // open, so it MUST subscribe, not load-once (a mount-only read leaves the
-  // owner on a stale graph after an agent write). The store serves the cached
-  // graph instantly (offline-capable) and repaints on every agent rewrite.
+  // graph.json can be rebuilt by Memory's scheduled maintenance while this app
+  // sits open, so it MUST subscribe, not load-once (a mount-only read leaves
+  // the owner on a stale graph). The store serves the cached graph instantly
+  // (offline-capable) and repaints after maintenance writes.
   useEffect(() => {
     setStatus('loading');
     const unsub = store.subscribe('graph.json', ({ body, present, error }) => {
@@ -233,9 +233,9 @@ export default function App({ appId, token }) {
 
   // --- Subscribe to the selected note body. ---
   // The open note is exactly the kind of view an agent can rewrite underneath
-  // the owner (the chat appends to a note, reflection reorganizes it), so it
-  // subscribes too: cached body paints instantly (offline), and an external
-  // write to this path repaints it. The `revalidating` flag drives the
+  // the owner (daytime memory capture can append, scheduled maintenance can
+  // reorganize), so it subscribes too: cached body paints instantly (offline),
+  // and an external write to this path repaints it. The `revalidating` flag drives the
   // "merging…" indicator, which clears once the fresh body has landed.
   useEffect(() => {
     if (!selected) return;
@@ -294,12 +294,12 @@ export default function App({ appId, token }) {
   const noteHtml = useMemo(() => {
     if (noteState.status !== 'ready') return '';
     // Plain markdown links/images are neutralized BEFORE wikilink expansion:
-    // notes can carry reflection-agent web-research content, so remote URLs are
+    // notes can carry agent-researched content, so remote URLs are
     // dropped (their label text survives). Wikilinks expand after, so the only
     // live anchors are the #memory-node- fragments this app generates itself.
     const linkedMd = renderWikiLinks(neutralizeMemoryMarkdown(noteState.md), graph?.nodes || []);
     // Require BOTH the renderer AND the sanitizer before producing HTML — never
-    // render un-sanitized markup. Notes can contain reflection-agent web-research
+    // render un-sanitized markup. Notes can contain agent-researched
     // content, so DOMPurify (a real HTML-parser sanitizer) is the right tool;
     // a regex net is routinely bypassed.
     if (marked && purify) {

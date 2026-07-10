@@ -8,8 +8,8 @@ import { NOTE_BASE } from './constants.js'
 // load-once (stale after an agent rewrite). This factory is the shared-scope
 // twin of window.mobius.storage.get/getText/subscribe: read-through cache
 // (last-known value served instantly, offline-capable), background revalidate,
-// and a visibility-aware poller so subscribed views repaint when the chat or
-// reflection agent rewrites the file. Pure factory (deps injected) so the offline
+// and a visibility-aware poller so subscribed views repaint when Memory's
+// maintenance job rewrites the file. Pure factory (deps injected) so the offline
 // harness can drive it with a mocked cache + fetch and no network.
 export function makeSharedMemoryStore({
   baseUrl = NOTE_BASE,
