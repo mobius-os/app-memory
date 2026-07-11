@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { buildEnv, esbuildPath } from './test-deps.mjs'
 
 mkdirSync(new URL('./.build/', import.meta.url), { recursive: true })
@@ -28,6 +28,8 @@ const {
   shouldShowNodeLabel,
   safeMemoryPath,
   neutralizeMemoryMarkdown,
+  parseDailyCronTime,
+  timeToDailyCron,
   MEMORY_SANITIZE_OPTIONS,
   makeSharedMemoryStore,
 } = await import('./.build/index.mjs')
@@ -86,6 +88,66 @@ test('nodeRadius guards sparse and malformed node data', () => {
   assert.equal(nodeRadius(), 4.55)
   assert.equal(nodeRadius({ importance: -5, access_count: -2 }), 4.55)
   assert.equal(nodeRadius({ importance: Number.NaN, access_count: Infinity }), 4.55)
+})
+
+test('daily cron helpers round-trip Memory schedule times', () => {
+  assert.equal(parseDailyCronTime('30 5 * * *'), '05:30')
+  assert.equal(parseDailyCronTime('0 23 * * *'), '23:00')
+  assert.equal(timeToDailyCron('05:30'), '30 5 * * *')
+  assert.equal(timeToDailyCron('23:00'), '0 23 * * *')
+})
+
+test('daily cron helpers reject custom or malformed schedules', () => {
+  assert.equal(parseDailyCronTime('*/15 * * * *'), null)
+  assert.equal(parseDailyCronTime('30 5 * * 1'), null)
+  assert.equal(parseDailyCronTime('60 5 * * *'), null)
+  assert.equal(timeToDailyCron('5:30'), null)
+  assert.equal(timeToDailyCron('25:00'), null)
+})
+
+test('fetch wrapper passes app id into the Memory runner gate', () => {
+  const wrapper = readFileSync(new URL('../fetch.sh', import.meta.url), 'utf8')
+  assert.match(wrapper, /MEMORY_APP_ID="\$APP_ID"/)
+  assert.match(wrapper, /python3 "\$RUNNER" "\$APP_ID"/)
+})
+
+test('manifest activates Memory only through a system prompt contribution', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../mobius.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.system_prompt, 'memory-core.md')
+  assert.deepEqual(manifest.skills, ['memory.md'])
+  assert.equal('extensions' in manifest, false)
+  for (const file of ['memory-core.md', 'memory.md', 'memory_search.py']) {
+    assert.ok(manifest.source_files.includes(file), file)
+  }
+})
+
+test('reader returns verified graph-relative file pointers', () => {
+  const reader = readFileSync(new URL('../memory_search.py', import.meta.url), 'utf8')
+  assert.match(reader, /FILES:/)
+  assert.match(reader, /chats\/\{token\[5:\]\}\/index\.md/)
+  assert.match(reader, /\(ROOT \/ token\)\.is_file\(\)/)
+  assert.match(reader, /no verifiable file pointers/)
+  const prompt = readFileSync(new URL('../memory-core.md', import.meta.url), 'utf8')
+  assert.match(prompt, /focused retrieval prompt/)
+  assert.match(prompt, /never\s+injected/i)
+})
+
+test('runner liveness is tied to the live app row, not a generic extension', () => {
+  const runner = readFileSync(new URL('../memory_runner.py', import.meta.url), 'utf8')
+  assert.match(runner, /\/api\/apps\/\{app_id\}/)
+  assert.doesNotMatch(runner, /app_extensions|extensions\.memory_graph/)
+})
+
+test('settings expose app-level background agent overrides', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const runner = readFileSync(new URL('../memory_runner.py', import.meta.url), 'utf8')
+  assert.match(source, /Background primary/)
+  assert.match(source, /Background secondary/)
+  assert.match(source, /primary_agent_mode/)
+  assert.match(source, /secondary_agent_mode/)
+  assert.match(runner, /def load_app_settings/)
+  assert.match(runner, /resolve_background_agents/)
+  assert.match(runner, /load_app_settings\(\)/)
 })
 
 test('renderWikiLinks replaces slugs with note titles and keeps aliases', () => {

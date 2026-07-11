@@ -52,6 +52,69 @@ export const S = {
     overflow: 'hidden', textOverflow: 'ellipsis', fontVariantNumeric: 'tabular-nums',
   },
   headerRight: { display: 'flex', alignItems: 'center', gap: 8 },
+  settingsBtn: {
+    minHeight: 34, border: '1px solid var(--border)', borderRadius: 8,
+    background: 'var(--surface2)', color: 'var(--muted)', cursor: 'pointer',
+    fontFamily: 'var(--font)', fontSize: 12.5, fontWeight: 650,
+    padding: '0 11px', transition: 'color 0.15s, background 0.15s',
+  },
+  settingsBtnActive: {
+    background: 'var(--bg)', color: 'var(--text)',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
+  },
+  settingsPanel: {
+    display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap',
+    padding: '10px 14px', background: 'var(--surface2)',
+    borderBottom: '1px solid var(--border)', flexShrink: 0,
+    position: 'relative', zIndex: 4,
+  },
+  settingsCopy: {
+    display: 'flex', flexDirection: 'column', gap: 2, minWidth: 168,
+    marginRight: 'auto',
+  },
+  settingsTitle: {
+    fontSize: 12.5, fontWeight: 700, color: 'var(--text)', letterSpacing: 0,
+  },
+  settingsSub: {
+    fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.3,
+  },
+  settingsField: {
+    display: 'flex', alignItems: 'center', gap: 8, minHeight: 38,
+  },
+  settingsLabel: {
+    fontSize: 11.5, fontWeight: 650, color: 'var(--muted)', whiteSpace: 'nowrap',
+  },
+  timeInput: {
+    height: 36, minWidth: 116, borderRadius: 8, border: '1px solid var(--border)',
+    background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font)',
+    fontSize: 13, fontWeight: 650, padding: '0 9px',
+  },
+  settingsMeta: {
+    fontSize: 11.5, color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
+  },
+  settingsActions: {
+    display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto',
+  },
+  settingsGhostBtn: {
+    height: 36, borderRadius: 8, border: '1px solid var(--border)',
+    background: 'transparent', color: 'var(--muted)', cursor: 'pointer',
+    fontFamily: 'var(--font)', fontSize: 12.5, fontWeight: 650,
+    padding: '0 12px',
+  },
+  settingsSaveBtn: {
+    height: 36, borderRadius: 8, border: 'none', background: 'var(--accent)',
+    color: 'var(--accent-fg, #fff)', cursor: 'pointer', fontFamily: 'var(--font)',
+    fontSize: 12.5, fontWeight: 700, padding: '0 14px',
+  },
+  settingsSaveBtnDisabled: {
+    opacity: 0.65, cursor: 'default',
+  },
+  settingsError: {
+    fontSize: 11.5, color: 'var(--danger)', fontWeight: 600,
+  },
+  settingsOk: {
+    fontSize: 11.5, color: 'var(--green)', fontWeight: 700,
+  },
 
   toggle: {
     display: 'flex', background: 'var(--surface2)', borderRadius: 9, padding: 3,

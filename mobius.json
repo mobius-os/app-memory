@@ -1,12 +1,14 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "1.7.3",
-  "description": "Browse and maintain the graph of what M\u00f6bius has learned over time.",
+  "version": "1.8.0",
+  "description": "Browse and maintain the graph of what Möbius has learned over time.",
   "author": "mobius-os",
   "license": "MIT",
   "homepage": "https://github.com/mobius-os/app-memory",
   "entry": "index.jsx",
+  "system_prompt": "memory-core.md",
+  "skills": ["memory.md"],
   "icon": "icon.png",
   "offline_capable": true,
   "offline": {
@@ -19,9 +21,19 @@
     "share_with_apps": "none",
     "chat_log_access": "summary"
   },
+  "storage_seeds": {
+    "settings.json": {
+      "primary_agent_mode": "system",
+      "provider": null,
+      "model": null,
+      "secondary_agent_mode": "system",
+      "fallback_provider": null,
+      "fallback_model": null
+    }
+  },
   "schedule": {
     "default": "30 5 * * *",
-    "user_configurable": false,
+    "user_configurable": true,
     "job": "fetch.sh"
   },
   "runtime": {
@@ -38,6 +50,9 @@
   },
   "embeds_agent": true,
   "source_files": [
+    "memory-core.md",
+    "memory.md",
+    "memory_search.py",
     "memory_runner.py",
     "constants.js",
     "theme.js",
@@ -51,6 +66,15 @@
     "ui/ListGlyph.jsx",
     "ui/ChatGlyph.jsx",
     "ui/TextGlyph.jsx",
-    "ui/NetworkGlyph.jsx"
+    "ui/NetworkGlyph.jsx",
+    "seed-memory/index.md",
+    "seed-memory/mocs/about-the-user.md",
+    "seed-memory/mocs/building-mobius-apps.md",
+    "seed-memory/mocs/maintaining-memory.md",
+    "seed-memory/mocs/mobius-platform.md",
+    "seed-memory/notes/a-nightly-reflection-pass-exists.md",
+    "seed-memory/notes/how-the-memory-graph-works.md",
+    "seed-memory/notes/memory-is-visible-to-the-partner.md",
+    "seed-memory/notes/this-instance-is-fresh.md"
   ]
 }
