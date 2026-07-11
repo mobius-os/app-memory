@@ -80,6 +80,11 @@ export default function App({ appId, token }) {
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
   const panelNavRef = useRef(null);
+  // One-shot guards for the open-outcome analytics signals: the graph.json
+  // subscribe callback re-fires on every revalidation and maintenance rebuild,
+  // so without these the open/empty signals would inflate on a single session.
+  const openedSignaledRef = useRef(false);
+  const emptySignaledRef = useRef(false);
 
   const wrapRef = useRef(null);
   const localWrapRef = useRef(null);
@@ -123,6 +128,19 @@ export default function App({ appId, token }) {
   // (offline-capable) and repaints after maintenance writes.
   useEffect(() => {
     setStatus('loading');
+    // Fire-and-forget open-outcome signals, each once per session (see the refs
+    // above). memory_opened tells Reflection the app is being opened on a real
+    // graph; memory_empty_shown flags cold-start installs that never got data.
+    const signalReady = (nodeCount, linkCount) => {
+      if (openedSignaledRef.current) return;
+      openedSignaledRef.current = true;
+      window.mobius.signal('memory_opened', { node_count: nodeCount, link_count: linkCount });
+    };
+    const signalEmpty = () => {
+      if (emptySignaledRef.current) return;
+      emptySignaledRef.current = true;
+      window.mobius.signal('memory_empty_shown');
+    };
     const unsub = store.subscribe('graph.json', ({ body, present, error }) => {
       if (error && body == null) {
         setErrMsg(String(error.message || error));
@@ -132,6 +150,7 @@ export default function App({ appId, token }) {
       if (!present || body == null) {
         setGraph({ nodes: [], edges: [], problems: [] });
         setStatus('empty');
+        signalEmpty();
         return;
       }
       let data;
@@ -141,12 +160,19 @@ export default function App({ appId, token }) {
         return;
       }
       const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+      const edges = Array.isArray(data.edges) ? data.edges : [];
       setGraph({
         nodes,
-        edges: Array.isArray(data.edges) ? data.edges : [],
+        edges,
         problems: Array.isArray(data.problems) ? data.problems : [],
       });
-      setStatus(nodes.length === 0 ? 'empty' : 'ready');
+      if (nodes.length === 0) {
+        setStatus('empty');
+        signalEmpty();
+      } else {
+        setStatus('ready');
+        signalReady(nodes.length, edges.length);
+      }
     });
     return unsub;
   }, [store]);
@@ -329,6 +355,7 @@ export default function App({ appId, token }) {
     if (node) {
       setSelected(node);
       setHoverId(slug);
+      window.mobius.signal('memory_node_opened', { node_type: node.type === 'moc' ? 'moc' : 'note' });
     }
   }, [nodesById]);
 
@@ -355,6 +382,10 @@ export default function App({ appId, token }) {
     setHoverId(opts.hoverId ?? null);
     setDetailTab('text'); // every node opens on its note, not the graph
     if (opts.resetLocalDepth) setLocalDepth(1);
+    // Core-engagement signal, fired here (after the panel commits to opening,
+    // past the superseded-open early return above) so every open from the
+    // graph, list, or legend is counted with the node's kind.
+    window.mobius.signal('memory_node_opened', { node_type: node.type === 'moc' ? 'moc' : 'note' });
   }, [selected]);
 
   const discuss = useCallback((node) => {
@@ -364,6 +395,8 @@ export default function App({ appId, token }) {
       { type: 'moebius:new-chat', draft },
       window.location.origin,
     );
+    // Funnel exit: the owner is moving from browsing memory into acting on it.
+    window.mobius.signal('memory_discuss_started', { node_type: node.type === 'moc' ? 'moc' : 'note' });
   }, []);
 
   // Esc closes the panel — keyboard parity with the scrim tap.
@@ -403,6 +436,14 @@ export default function App({ appId, token }) {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     else { setSortKey(key); setSortDir(key === 'title' ? 'asc' : 'desc'); }
   };
+
+  // Switch the Graph/List segmented control, signalling only a real change so
+  // Reflection sees which view the owner actually uses (not idempotent re-taps).
+  const selectView = useCallback((next) => {
+    const changed = next !== view;
+    setView(next);
+    if (changed) window.mobius.signal('memory_view_toggled', { view: next });
+  }, [view]);
 
   const legendItems = useMemo(() => {
     if (!graph) return [];
@@ -471,14 +512,14 @@ export default function App({ appId, token }) {
             <button
               className="mg-tgl"
               style={{ ...S.toggleBtn, ...(view === 'graph' ? S.toggleActive : {}) }}
-              onClick={() => setView('graph')}
+              onClick={() => selectView('graph')}
             >
               <GraphGlyph /> Graph
             </button>
             <button
               className="mg-tgl"
               style={{ ...S.toggleBtn, ...(view === 'list' ? S.toggleActive : {}) }}
-              onClick={() => setView('list')}
+              onClick={() => selectView('list')}
             >
               <ListGlyph /> List
             </button>
@@ -718,7 +759,12 @@ export default function App({ appId, token }) {
                 <button
                   className="mg-tab"
                   style={{ ...S.tabBtn, ...(detailTab === 'graph' ? S.tabBtnActive : {}) }}
-                  onClick={() => setDetailTab('graph')}
+                  onClick={() => {
+                    const was = detailTab;
+                    setDetailTab('graph');
+                    // Only on a real switch INTO the local graph — is it used or dead weight?
+                    if (was !== 'graph') window.mobius.signal('memory_local_graph_viewed');
+                  }}
                   role="tab"
                   aria-selected={detailTab === 'graph'}
                   aria-label="Show local graph"
