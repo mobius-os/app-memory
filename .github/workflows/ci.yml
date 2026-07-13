@@ -1,0 +1,50 @@
+name: CI
+
+# Validates the app on every push to main and every PR. Möbius mini-app tests
+# bundle index.jsx with esbuild and import the shell's frontend deps (react,
+# marked, dompurify, …), so CI checks out mobius-os/mobius (public) and installs
+# its frontend once, then points MOBIUS_FRONTEND_NODE_MODULES at it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v4
+
+      - name: Checkout mobius frontend (test dependencies)
+        uses: actions/checkout@v4
+        with:
+          repository: mobius-os/mobius
+          path: .mobius
+          sparse-checkout: frontend
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .mobius/frontend/package-lock.json
+
+      - name: Install mobius frontend deps
+        run: cd .mobius/frontend && npm ci
+
+      - name: Install app deps (if declared)
+        run: |
+          if [ -f package-lock.json ]; then npm ci
+          else npm install --no-audit --no-fund
+          fi
+
+      - name: Test
+        env:
+          MOBIUS_FRONTEND_NODE_MODULES: ${{ github.workspace }}/.mobius/frontend/node_modules
+        run: npm test --if-present
+
+      - name: Verify mobius package
+        run: npm run verify:mobius --if-present
