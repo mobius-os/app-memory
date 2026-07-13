@@ -1,8 +1,8 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "1.7.2",
-  "description": "Browse and maintain the graph of what Möbius has learned over time.",
+  "version": "1.7.3",
+  "description": "Browse and maintain the graph of what M\u00f6bius has learned over time.",
   "author": "mobius-os",
   "license": "MIT",
   "homepage": "https://github.com/mobius-os/app-memory",
