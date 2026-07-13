@@ -20,6 +20,22 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+# The Codex path does `from app.codex_sdk_runner import ...` and resolve_agents
+# imports the canonical resolver from `app.background_agents`. Cron runs with a
+# near-empty environment and no PYTHONPATH, and this runner installs as a
+# catalog-app copy under /data/apps/memory/ (whose parent.parent is /data/apps —
+# no `app` package), so a bare `parent.parent` would raise ModuleNotFoundError.
+# Search the known backend roots and put the FIRST that holds the `app` package
+# on sys.path — the import then resolves wherever the runner runs.
+for _pkg_root in (
+    Path(__file__).resolve().parent.parent,  # <backend>/scripts/ layout (platform + baked)
+    Path("/data/platform/backend"),           # served platform clone
+    Path("/app"),                             # baked image floor
+):
+    if (_pkg_root / "app" / "__init__.py").is_file():
+        sys.path.insert(0, str(_pkg_root))
+        break
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILL_PATH = DATA_DIR / "shared" / "skills" / "memory.md"
 LOG_PATH = DATA_DIR / "cron-logs" / "memory.log"
@@ -32,19 +48,6 @@ PM_COMMIT = "/app/scripts/pm-commit"
 BUILD_GRAPH = "/app/scripts/build_memory_graph.py"
 DEFAULT_MAX_TURNS = 32
 DEFAULT_PROVIDER = "claude"
-KNOWN_MODELS_BY_PROVIDER = {
-  "claude": (
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-opus-4-6",
-    "claude-opus-4-5-20251001",
-    "claude-sonnet-4-7-20251215",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-5-20251001",
-    "claude-haiku-4-5-20251001",
-  ),
-  "codex": ("gpt-5.5", "gpt-5.4"),
-}
 
 
 def _log(message: str) -> None:
@@ -129,85 +132,20 @@ def build_env() -> dict[str, str]:
   return env
 
 
-def load_global_agent_settings() -> dict:
-  path = DATA_DIR / "shared" / "agent-settings.json"
-  if not path.is_file():
-    return {}
-  try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-  except (json.JSONDecodeError, OSError):
-    return {}
-  return data if isinstance(data, dict) else {}
-
-
-def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
-  for known_provider, models in KNOWN_MODELS_BY_PROVIDER.items():
-    if known_provider != provider and model in models:
-      return True
-  return False
-
-
-def _clean_agent_choice(
-  raw: dict | None,
-  *,
-  fallback_provider: str | None = None,
-  label: str = "settings",
-) -> dict | None:
-  if not isinstance(raw, dict):
-    return None
-  provider = raw.get("provider")
-  if provider not in ("claude", "codex"):
-    provider = fallback_provider if fallback_provider in ("claude", "codex") else None
-  if provider not in ("claude", "codex"):
-    return None
-  model = raw.get("model")
-  model = model.strip() if isinstance(model, str) and model.strip() else None
-  if model and _model_belongs_to_other_provider(model, provider):
-    _log(f"{label} model {model!r} mismatches provider {provider!r}; dropping")
-    model = None
-  effort = raw.get("effort")
-  effort = effort.strip() if isinstance(effort, str) and effort.strip() else None
-  return {"provider": provider, "model": model, "effort": effort}
-
-
-def _same_agent_choice(a: dict | None, b: dict | None) -> bool:
-  if not a or not b:
-    return False
-  return (
-    a.get("provider") == b.get("provider")
-    and (a.get("model") or None) == (b.get("model") or None)
-    and (a.get("effort") or None) == (b.get("effort") or None)
-  )
-
-
 def resolve_agents() -> dict:
-  global_settings = load_global_agent_settings()
-  raw_background = global_settings.get("background_agents")
-  background = raw_background if isinstance(raw_background, dict) else {}
-  primary = _clean_agent_choice(
-    background.get("primary"),
-    fallback_provider=DEFAULT_PROVIDER,
-    label="global background primary",
-  )
-  if primary is None:
-    primary = _clean_agent_choice(
-      {
-        "provider": DEFAULT_PROVIDER,
-        "model": global_settings.get("model"),
-        "effort": global_settings.get("effort"),
-      },
-      fallback_provider=DEFAULT_PROVIDER,
-      label="global primary",
-    )
-  if primary is None:
-    primary = {"provider": DEFAULT_PROVIDER, "model": None, "effort": None}
-  fallback = _clean_agent_choice(
-    background.get("fallback"),
-    label="global background fallback",
-  )
-  if _same_agent_choice(primary, fallback):
-    fallback = None
-  return {"primary": primary, "fallback": fallback}
+  """Resolve primary/fallback provider choices via the platform's ONE canonical
+  resolver — see ``app.background_agents.resolve_background_agents``. Single-
+  sourced across every background agent; the sys.path bootstrap above makes
+  ``app`` importable and the import is deferred so this stays importable under a
+  bare cron env. ``app_settings`` is None here: Memory has no per-app agent
+  override on origin/main — that lands with the owner's unpushed overrides
+  feature, which passes its own settings through instead.
+
+  Deploy order: reconcile the platform to a version carrying
+  ``app.background_agents`` (mobius 61cd1283+) BEFORE store-updating this app.
+  """
+  from app.background_agents import resolve_background_agents
+  return resolve_background_agents(str(DATA_DIR), None)
 
 
 def _drain_message(sdk_msg, log_fh) -> tuple[bool, bool]:

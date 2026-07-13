@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "description": "Browse and maintain the graph of what Möbius has learned over time.",
   "author": "mobius-os",
   "license": "MIT",
