@@ -1,2 +1,4 @@
 tests/.build/
 .claude/worktrees/
+__pycache__/
+*.py[cod]
