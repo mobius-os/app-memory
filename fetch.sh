@@ -62,7 +62,7 @@ if [[ ! -r "$TOKEN_FILE" ]]; then
   exit 3
 fi
 SERVICE_TOKEN="$(cat "$TOKEN_FILE")"
-export SERVICE_TOKEN AGENT_TOKEN="$SERVICE_TOKEN"
+export SERVICE_TOKEN AGENT_TOKEN="$SERVICE_TOKEN" MEMORY_APP_ID="$APP_ID"
 
 if [[ -z "$APP_ID" ]]; then
   log "ERROR no app id passed as \$1"
@@ -93,7 +93,7 @@ HB_PID=$!
 trap 'kill "$HB_PID" 2>/dev/null || true' EXIT
 
 timeout --signal=TERM --kill-after=60 "$RUN_TIMEOUT" \
-  python3 "$RUNNER" >>"$LOG" 2>&1
+  python3 "$RUNNER" "$APP_ID" >>"$LOG" 2>&1
 RC=$?
 
 kill "$HB_PID" 2>/dev/null || true

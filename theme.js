@@ -56,6 +56,7 @@ export const CSS = `
   .mg-th:hover { color: var(--text); }
   .mg-legend-row:hover { background: var(--surface2); }
   .mg-tgl:hover { color: var(--text); }
+  .mg-settings-btn:hover { color: var(--text); }
   .mg-tab:hover { color: var(--text); }
   .mg-close:hover { background: var(--border); color: var(--text); }
   .mg-discuss:hover { filter: brightness(1.06); }
@@ -104,7 +105,124 @@ export const CSS = `
   padding: 0 5px;
   font-weight: 600;
 }
+.mg-agent-settings {
+  flex: 1 1 100%;
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.mg-agent-settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.mg-agent-settings-title {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.mg-agent-settings-sub {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+.mg-agent-stack {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 10px;
+}
+.mg-agent-slot {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 70%, var(--bg));
+}
+.mg-agent-slot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.mg-agent-slot-title {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.mg-agent-mode {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.mg-agent-mode-btn {
+  min-height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+}
+.mg-agent-mode-btn.is-active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.mg-agent-inherit {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.mg-agent-select {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 650;
+  padding: 0 9px;
+}
+.mg-agent-meta {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.mg-agent-meta span {
+  font-family: var(--mono);
+}
+@media (hover: hover) {
+  .mg-agent-mode-btn:not(.is-active):hover { color: var(--text); }
+}
 @media (max-width: 640px) {
+  .mg-agent-stack { grid-template-columns: 1fr; }
+  .mg-agent-settings-head { flex-direction: column; }
   .mg-scrim { display: none; }
   .mg-panel {
     inset: 0; width: 100%; height: 100%; border-left: none;

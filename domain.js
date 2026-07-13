@@ -35,6 +35,31 @@ export function fmtBytes(n) {
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+export function parseDailyCronTime(cron) {
+  if (typeof cron !== 'string') return null;
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length < 5) return null;
+  const [minuteRaw, hourRaw, day, month, weekday] = parts;
+  if (day !== '*' || month !== '*' || weekday !== '*') return null;
+  if (!/^\d{1,2}$/.test(minuteRaw) || !/^\d{1,2}$/.test(hourRaw)) return null;
+  const minute = Number(minuteRaw);
+  const hour = Number(hourRaw);
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+export function timeToDailyCron(value) {
+  if (typeof value !== 'string') return null;
+  const m = value.match(/^(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  return `${minute} ${hour} * * *`;
+}
+
 export function nodeRadius(node = {}) {
   const importance = Number(node.importance);
   const accessCount = Number(node.access_count);

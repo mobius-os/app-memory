@@ -24,12 +24,14 @@ import {
   hashStr,
   neutralizeMemoryMarkdown,
   nodeRadius,
+  parseDailyCronTime,
   parseFrontmatter,
   relDate,
   renderWikiLinks,
   restrictNoteHtml,
   safeMemoryPath,
   stripFrontmatter,
+  timeToDailyCron,
 } from './domain.js'
 import { MemoryGraphRenderer, loadScriptOnce } from './graph/render.jsx'
 import { Th } from './ui/Th.jsx'
@@ -47,15 +49,79 @@ export {
   buildLocalGraphData,
   neutralizeMemoryMarkdown,
   nodeRadius,
+  parseDailyCronTime,
   renderWikiLinks,
   safeMemoryPath,
   shouldShowScreenLabel,
   shouldShowNodeLabel,
+  timeToDailyCron,
 } from './domain.js'
 export {
   computeRendererFitTransform,
   normalizeRendererGraphData,
 } from './graph/render.jsx'
+
+const AGENT_PROVIDER_META = [
+  { key: 'codex', label: 'OpenAI Codex' },
+  { key: 'claude', label: 'Claude Code' },
+];
+
+const FALLBACK_AGENT_GROUPS = [
+  {
+    key: 'codex',
+    label: 'OpenAI Codex',
+    models: [
+      { id: 'gpt-5.5', name: 'gpt-5.5' },
+      { id: 'gpt-5.4', name: 'gpt-5.4' },
+    ],
+  },
+  {
+    key: 'claude',
+    label: 'Claude Code',
+    models: [
+      { id: 'claude-opus-4-8', name: 'Opus 4.8' },
+      { id: 'claude-opus-4-7', name: 'Opus 4.7' },
+      { id: 'claude-opus-4-6', name: 'Opus 4.6' },
+      { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
+      { id: 'claude-sonnet-4-5-20251001', name: 'Sonnet 4.5' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5' },
+    ],
+  },
+];
+
+function buildAgentGroups(payload) {
+  if (!payload || typeof payload !== 'object') return FALLBACK_AGENT_GROUPS;
+  const groups = [];
+  for (const meta of AGENT_PROVIDER_META) {
+    const rows = Array.isArray(payload[meta.key]) ? payload[meta.key] : null;
+    if (!rows || rows.length === 0) continue;
+    groups.push({
+      key: meta.key,
+      label: meta.label,
+      models: rows
+        .filter((row) => row && typeof row.id === 'string')
+        .map((row) => ({ id: row.id, name: row.name || row.id })),
+    });
+  }
+  return groups.length ? groups : FALLBACK_AGENT_GROUPS;
+}
+
+function isKnownAgentProvider(provider) {
+  return AGENT_PROVIDER_META.some((meta) => meta.key === provider);
+}
+
+function choiceValue(provider, model) {
+  return provider ? `${provider}\t${model || ''}` : '';
+}
+
+function splitChoiceValue(value) {
+  const idx = String(value || '').indexOf('\t');
+  if (idx < 0) return { provider: '', model: '' };
+  return {
+    provider: value.slice(0, idx),
+    model: value.slice(idx + 1),
+  };
+}
 
 export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
@@ -68,6 +134,25 @@ export default function App({ appId, token }) {
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [scheduleStatus, setScheduleStatus] = useState('idle'); // idle | loading | ready | error
+  const [scheduleCron, setScheduleCron] = useState('30 5 * * *');
+  const [scheduleTime, setScheduleTime] = useState('05:30');
+  const [scheduleCustom, setScheduleCustom] = useState(false);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleMessage, setScheduleMessage] = useState('');
+  const [agentStatus, setAgentStatus] = useState('idle'); // idle | loading | ready | error
+  const [agentGroups, setAgentGroups] = useState(null);
+  const [connectedProviders, setConnectedProviders] = useState(null);
+  const [agentSettingsExtra, setAgentSettingsExtra] = useState({});
+  const [primaryAgentMode, setPrimaryAgentMode] = useState('system');
+  const [agentProvider, setAgentProvider] = useState('claude');
+  const [agentModel, setAgentModel] = useState('');
+  const [secondaryAgentMode, setSecondaryAgentMode] = useState('system');
+  const [secondaryAgentProvider, setSecondaryAgentProvider] = useState('');
+  const [secondaryAgentModel, setSecondaryAgentModel] = useState('');
+  const [agentSaving, setAgentSaving] = useState(false);
+  const [agentMessage, setAgentMessage] = useState('');
   const [localDepth, setLocalDepth] = useState(1);
   // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
   // Defaults to 'text' — the user arrives here from the global graph, so they
@@ -399,6 +484,252 @@ export default function App({ appId, token }) {
     window.mobius.signal('memory_discuss_started', { node_type: node.type === 'moc' ? 'moc' : 'note' });
   }, []);
 
+  const authHeaders = useMemo(() => (
+    token ? { Authorization: `Bearer ${token}` } : {}
+  ), [token]);
+
+  const chooseAgentGroup = useCallback((avoidProvider = '') => {
+    const groups = agentGroups || FALLBACK_AGENT_GROUPS;
+    const connected = (group) => !connectedProviders || connectedProviders.has(group.key);
+    return (
+      groups.find((group) => group.key !== avoidProvider && connected(group) && group.models?.length) ||
+      groups.find((group) => connected(group) && group.models?.length) ||
+      groups.find((group) => group.models?.length) ||
+      null
+    );
+  }, [agentGroups, connectedProviders]);
+
+  const loadAgentSettings = useCallback(async () => {
+    setAgentStatus('loading');
+    setAgentMessage('');
+    try {
+      const headers = authHeaders;
+      const [settingsRes, statusRes, modelsRes] = await Promise.all([
+        fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, { headers }),
+        fetch('/api/auth/providers/status', { headers }).catch(() => null),
+        fetch('/api/auth/providers/models', { headers }).catch(() => null),
+      ]);
+      if (!settingsRes.ok && settingsRes.status !== 404) {
+        throw new Error('Could not load agent settings.');
+      }
+      const settings = settingsRes.ok ? await settingsRes.json() : {};
+      const safeSettings = settings && typeof settings === 'object' && !Array.isArray(settings)
+        ? settings
+        : {};
+      setAgentSettingsExtra(safeSettings);
+
+      let connected = null;
+      if (statusRes?.ok) {
+        const data = await statusRes.json();
+        connected = new Set(
+          Object.entries(data || {})
+            .filter(([, value]) => value && value.authenticated)
+            .map(([key]) => key),
+        );
+        setConnectedProviders(connected);
+      }
+
+      const groups = modelsRes?.ok
+        ? buildAgentGroups(await modelsRes.json())
+        : FALLBACK_AGENT_GROUPS;
+      setAgentGroups(groups);
+
+      const providerValue = typeof safeSettings.provider === 'string'
+        ? safeSettings.provider.trim()
+        : '';
+      const modelValue = typeof safeSettings.model === 'string'
+        ? safeSettings.model.trim()
+        : '';
+      const fallbackProviderValue = typeof safeSettings.fallback_provider === 'string'
+        ? safeSettings.fallback_provider.trim()
+        : '';
+      const fallbackModelValue = typeof safeSettings.fallback_model === 'string'
+        ? safeSettings.fallback_model.trim()
+        : '';
+
+      const primaryMode = safeSettings.primary_agent_mode === 'app'
+        || (safeSettings.primary_agent_mode !== 'system' && Boolean(providerValue || modelValue))
+        ? 'app'
+        : 'system';
+      const secondaryMode = safeSettings.secondary_agent_mode === 'app'
+        || (safeSettings.secondary_agent_mode !== 'system' && Boolean(fallbackProviderValue || fallbackModelValue))
+        ? 'app'
+        : 'system';
+      setPrimaryAgentMode(primaryMode);
+      setSecondaryAgentMode(secondaryMode);
+
+      if (isKnownAgentProvider(providerValue)) {
+        setAgentProvider(providerValue);
+        setAgentModel(modelValue);
+      } else {
+        const chosen = groups.find((group) => (!connected || connected.has(group.key)) && group.models?.length)
+          || groups.find((group) => group.models?.length)
+          || null;
+        if (chosen) {
+          setAgentProvider(chosen.key);
+          setAgentModel(chosen.models?.[0]?.id || '');
+        }
+      }
+      if (isKnownAgentProvider(fallbackProviderValue)) {
+        setSecondaryAgentProvider(fallbackProviderValue);
+        setSecondaryAgentModel(fallbackModelValue);
+      }
+      setAgentStatus('ready');
+    } catch (err) {
+      setAgentStatus('error');
+      setAgentMessage(err.message || 'Could not load agent settings.');
+    }
+  }, [appId, authHeaders]);
+
+  const loadSchedule = useCallback(async () => {
+    setScheduleStatus('loading');
+    setScheduleMessage('');
+    try {
+      const res = await fetch('/api/apps/schedules', {
+        headers: authHeaders,
+      });
+      if (!res.ok) throw new Error('Could not load schedule.');
+      const rows = await res.json();
+      const row = Array.isArray(rows)
+        ? rows.find((item) => Number(item.id) === Number(appId))
+        : null;
+      const cron = typeof row?.cron === 'string' && row.cron.trim()
+        ? row.cron.trim()
+        : '30 5 * * *';
+      const parsed = parseDailyCronTime(cron);
+      setScheduleCron(cron);
+      setScheduleCustom(!parsed);
+      if (parsed) setScheduleTime(parsed);
+      setScheduleStatus('ready');
+    } catch (err) {
+      setScheduleStatus('error');
+      setScheduleMessage(err.message || 'Could not load schedule.');
+    }
+  }, [appId, authHeaders]);
+
+  useEffect(() => {
+    if (!settingsOpen || scheduleStatus !== 'idle') return;
+    loadSchedule();
+  }, [settingsOpen, scheduleStatus, loadSchedule]);
+
+  useEffect(() => {
+    if (!settingsOpen || agentStatus !== 'idle') return;
+    loadAgentSettings();
+  }, [settingsOpen, agentStatus, loadAgentSettings]);
+
+  const saveSchedule = useCallback(async () => {
+    if (scheduleSaving) return;
+    const cron = timeToDailyCron(scheduleTime);
+    if (!cron) {
+      setScheduleMessage('Pick a valid time.');
+      return;
+    }
+    setScheduleSaving(true);
+    setScheduleMessage('');
+    try {
+      const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/schedule`, {
+        method: 'POST',
+        headers: {
+          ...authHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cron, job: 'fetch.sh' }),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try { detail = (await res.json())?.detail || ''; } catch {}
+        throw new Error(detail || 'Could not save schedule.');
+      }
+      setScheduleCron(cron);
+      setScheduleCustom(false);
+      setScheduleStatus('ready');
+      setScheduleMessage('Saved');
+      setTimeout(() => setScheduleMessage(''), 2200);
+    } catch (err) {
+      setScheduleMessage(err.message || 'Could not save schedule.');
+    } finally {
+      setScheduleSaving(false);
+    }
+  }, [appId, authHeaders, scheduleSaving, scheduleTime]);
+
+  const setPrimaryAgentModeChoice = useCallback((mode) => {
+    setPrimaryAgentMode(mode);
+    setAgentMessage('');
+    if (mode !== 'app') return;
+    if (isKnownAgentProvider(agentProvider)) return;
+    const chosen = chooseAgentGroup();
+    if (chosen) {
+      setAgentProvider(chosen.key);
+      setAgentModel(chosen.models?.[0]?.id || '');
+    }
+  }, [agentProvider, chooseAgentGroup]);
+
+  const setSecondaryAgentModeChoice = useCallback((mode) => {
+    setSecondaryAgentMode(mode);
+    setAgentMessage('');
+    if (mode !== 'app') return;
+    if (isKnownAgentProvider(secondaryAgentProvider)) return;
+    const chosen = chooseAgentGroup(agentProvider);
+    if (chosen) {
+      setSecondaryAgentProvider(chosen.key);
+      setSecondaryAgentModel(chosen.models?.[0]?.id || '');
+    }
+  }, [agentProvider, secondaryAgentProvider, chooseAgentGroup]);
+
+  const saveAgentSettings = useCallback(async () => {
+    if (agentSaving) return;
+    setAgentSaving(true);
+    setAgentMessage('');
+    const payload = {
+      ...agentSettingsExtra,
+      primary_agent_mode: primaryAgentMode,
+      provider: primaryAgentMode === 'app' ? (agentProvider || 'claude') : null,
+      model: primaryAgentMode === 'app' ? (agentModel || null) : null,
+      effort: primaryAgentMode === 'app' ? (agentSettingsExtra.effort ?? null) : null,
+      secondary_agent_mode: secondaryAgentMode,
+      fallback_provider: secondaryAgentMode === 'app' ? (secondaryAgentProvider || null) : null,
+      fallback_model: secondaryAgentMode === 'app' && secondaryAgentProvider
+        ? (secondaryAgentModel || null)
+        : null,
+      fallback_effort: secondaryAgentMode === 'app' && secondaryAgentProvider
+        ? (agentSettingsExtra.fallback_effort ?? null)
+        : null,
+    };
+    try {
+      const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, {
+        method: 'PUT',
+        headers: {
+          ...authHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try { detail = (await res.json())?.detail || ''; } catch {}
+        throw new Error(detail || 'Could not save agent settings.');
+      }
+      setAgentSettingsExtra(payload);
+      setAgentMessage('Agents saved');
+      setTimeout(() => setAgentMessage(''), 2200);
+    } catch (err) {
+      setAgentMessage(err.message || 'Could not save agent settings.');
+    } finally {
+      setAgentSaving(false);
+    }
+  }, [
+    appId,
+    authHeaders,
+    agentSaving,
+    agentSettingsExtra,
+    primaryAgentMode,
+    agentProvider,
+    agentModel,
+    secondaryAgentMode,
+    secondaryAgentProvider,
+    secondaryAgentModel,
+  ]);
+
   // Esc closes the panel — keyboard parity with the scrim tap.
   useEffect(() => {
     if (!selected) return;
@@ -465,6 +796,7 @@ export default function App({ appId, token }) {
     return c;
   }, [graph]);
   const selectedUpdated = relDate(noteState.fm.updated);
+  const visibleAgentGroups = agentGroups || FALLBACK_AGENT_GROUPS;
 
   // ---------------------------------------------------------------- render ---
   return (
@@ -498,6 +830,18 @@ export default function App({ appId, token }) {
         </div>
 
         <div style={S.headerRight}>
+          <button
+            style={{
+              ...S.settingsBtn,
+              ...(settingsOpen ? S.settingsBtnActive : {}),
+            }}
+            className="mg-settings-btn"
+            type="button"
+            onClick={() => setSettingsOpen((v) => !v)}
+            aria-expanded={settingsOpen}
+          >
+            Settings
+          </button>
           {problems.length > 0 && (
             <button
               style={{ ...S.healthBadge, ...(errCount ? S.healthErr : S.healthWarn) }}
@@ -526,6 +870,278 @@ export default function App({ appId, token }) {
           </div>
         </div>
       </header>
+
+      {settingsOpen && (
+        <section style={S.settingsPanel}>
+          <div style={S.settingsCopy}>
+            <div style={S.settingsTitle}>Maintenance</div>
+            <div style={S.settingsSub}>Schedule and Background agents</div>
+          </div>
+
+          {scheduleStatus === 'idle' || scheduleStatus === 'loading' ? (
+            <div style={S.settingsMeta}>Loading schedule...</div>
+          ) : scheduleStatus === 'error' ? (
+            <div style={S.settingsActions}>
+              <span style={S.settingsError}>{scheduleMessage}</span>
+              <button
+                style={S.settingsGhostBtn}
+                type="button"
+                onClick={loadSchedule}
+              >
+                Retry
+              </button>
+            </div>
+          ) : (
+            <>
+              <label style={S.settingsField}>
+                <span style={S.settingsLabel}>Run time</span>
+                <input
+                  style={S.timeInput}
+                  type="time"
+                  step="60"
+                  value={scheduleTime}
+                  onChange={(e) => {
+                    setScheduleTime(e.target.value);
+                    setScheduleCustom(false);
+                    setScheduleMessage('');
+                  }}
+                />
+              </label>
+              {scheduleCustom && (
+                <div style={S.settingsMeta}>Current cron: {scheduleCron}</div>
+              )}
+              {scheduleMessage && (
+                <div
+                  style={
+                    scheduleMessage === 'Saved'
+                      ? S.settingsOk
+                      : S.settingsError
+                  }
+                >
+                  {scheduleMessage}
+                </div>
+              )}
+              <div style={S.settingsActions}>
+                <button
+                  style={S.settingsGhostBtn}
+                  type="button"
+                  onClick={() => setSettingsOpen(false)}
+                >
+                  Close
+                </button>
+                <button
+                  style={{
+                    ...S.settingsSaveBtn,
+                    ...(scheduleSaving ? S.settingsSaveBtnDisabled : {}),
+                  }}
+                  type="button"
+                  onClick={saveSchedule}
+                  disabled={scheduleSaving}
+                >
+                  {scheduleSaving ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+            </>
+          )}
+          <div className="mg-agent-settings">
+            <div className="mg-agent-settings-head">
+              <div>
+                <div className="mg-agent-settings-title">Background agents</div>
+                <div className="mg-agent-settings-sub">
+                  System inherits the global primary and secondary; Override is only for Memory.
+                </div>
+              </div>
+              {agentStatus === 'error' && (
+                <button
+                  style={S.settingsGhostBtn}
+                  type="button"
+                  onClick={loadAgentSettings}
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+            {agentStatus === 'idle' || agentStatus === 'loading' ? (
+              <div style={S.settingsMeta}>Loading agent settings...</div>
+            ) : agentStatus === 'error' ? (
+              <div style={S.settingsError}>{agentMessage}</div>
+            ) : (
+              <>
+                <div className="mg-agent-stack">
+                  <div className="mg-agent-slot">
+                    <div className="mg-agent-slot-head">
+                      <span className="mg-agent-slot-title">Background primary</span>
+                      <span className="mg-agent-mode" role="radiogroup" aria-label="Memory primary agent mode">
+                        <button
+                          type="button"
+                          className={`mg-agent-mode-btn${primaryAgentMode === 'system' ? ' is-active' : ''}`}
+                          aria-pressed={primaryAgentMode === 'system'}
+                          onClick={() => setPrimaryAgentModeChoice('system')}
+                        >
+                          System
+                        </button>
+                        <button
+                          type="button"
+                          className={`mg-agent-mode-btn${primaryAgentMode === 'app' ? ' is-active' : ''}`}
+                          aria-pressed={primaryAgentMode === 'app'}
+                          onClick={() => setPrimaryAgentModeChoice('app')}
+                        >
+                          Override
+                        </button>
+                      </span>
+                    </div>
+                    {primaryAgentMode === 'system' ? (
+                      <div className="mg-agent-inherit">Using system Background primary</div>
+                    ) : (
+                      <>
+                        <select
+                          className="mg-agent-select"
+                          value={choiceValue(agentProvider, agentModel)}
+                          onChange={(event) => {
+                            const next = splitChoiceValue(event.target.value);
+                            setAgentProvider(next.provider);
+                            setAgentModel(next.model);
+                            setAgentMessage('');
+                          }}
+                          aria-label="Memory primary model"
+                        >
+                          {visibleAgentGroups.map((group) => {
+                            const isConnected = !connectedProviders || connectedProviders.has(group.key);
+                            const onProviderDefault = agentProvider === group.key && !agentModel;
+                            return (
+                              <optgroup
+                                key={group.key}
+                                label={`${group.label}${isConnected ? '' : ' (not connected)'}`}
+                              >
+                                <option
+                                  value={choiceValue(group.key, '')}
+                                  disabled={!isConnected && !onProviderDefault}
+                                >
+                                  {group.label} default
+                                </option>
+                                {group.models.map((m) => {
+                                  const on = agentProvider === group.key && agentModel === m.id;
+                                  return (
+                                    <option
+                                      key={`${group.key}-${m.id}`}
+                                      value={choiceValue(group.key, m.id)}
+                                      disabled={!isConnected && !on}
+                                    >
+                                      {m.name}
+                                    </option>
+                                  );
+                                })}
+                              </optgroup>
+                            );
+                          })}
+                        </select>
+                        <div className="mg-agent-meta">
+                          {visibleAgentGroups.find((group) => group.key === agentProvider)?.label || agentProvider}
+                          {' · '}
+                          <span>{agentModel || 'provider default'}</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div className="mg-agent-slot">
+                    <div className="mg-agent-slot-head">
+                      <span className="mg-agent-slot-title">Background secondary</span>
+                      <span className="mg-agent-mode" role="radiogroup" aria-label="Memory secondary agent mode">
+                        <button
+                          type="button"
+                          className={`mg-agent-mode-btn${secondaryAgentMode === 'system' ? ' is-active' : ''}`}
+                          aria-pressed={secondaryAgentMode === 'system'}
+                          onClick={() => setSecondaryAgentModeChoice('system')}
+                        >
+                          System
+                        </button>
+                        <button
+                          type="button"
+                          className={`mg-agent-mode-btn${secondaryAgentMode === 'app' ? ' is-active' : ''}`}
+                          aria-pressed={secondaryAgentMode === 'app'}
+                          onClick={() => setSecondaryAgentModeChoice('app')}
+                        >
+                          Override
+                        </button>
+                      </span>
+                    </div>
+                    {secondaryAgentMode === 'system' ? (
+                      <div className="mg-agent-inherit">Using system Background secondary</div>
+                    ) : (
+                      <>
+                        <select
+                          className="mg-agent-select"
+                          value={choiceValue(secondaryAgentProvider, secondaryAgentModel)}
+                          onChange={(event) => {
+                            const next = splitChoiceValue(event.target.value);
+                            setSecondaryAgentProvider(next.provider);
+                            setSecondaryAgentModel(next.model);
+                            setAgentMessage('');
+                          }}
+                          aria-label="Memory secondary model"
+                        >
+                          {visibleAgentGroups.map((group) => {
+                            const isConnected = !connectedProviders || connectedProviders.has(group.key);
+                            const onProviderDefault = secondaryAgentProvider === group.key && !secondaryAgentModel;
+                            return (
+                              <optgroup
+                                key={group.key}
+                                label={`${group.label}${isConnected ? '' : ' (not connected)'}`}
+                              >
+                                <option
+                                  value={choiceValue(group.key, '')}
+                                  disabled={!isConnected && !onProviderDefault}
+                                >
+                                  {group.label} default
+                                </option>
+                                {group.models.map((m) => {
+                                  const on = secondaryAgentProvider === group.key && secondaryAgentModel === m.id;
+                                  return (
+                                    <option
+                                      key={`${group.key}-${m.id}`}
+                                      value={choiceValue(group.key, m.id)}
+                                      disabled={!isConnected && !on}
+                                    >
+                                      {m.name}
+                                    </option>
+                                  );
+                                })}
+                              </optgroup>
+                            );
+                          })}
+                        </select>
+                        <div className="mg-agent-meta">
+                          {visibleAgentGroups.find((group) => group.key === secondaryAgentProvider)?.label || secondaryAgentProvider}
+                          {' · '}
+                          <span>{secondaryAgentModel || 'provider default'}</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div style={S.settingsActions}>
+                  {agentMessage && (
+                    <span style={agentMessage === 'Agents saved' ? S.settingsOk : S.settingsError}>
+                      {agentMessage}
+                    </span>
+                  )}
+                  <button
+                    style={{
+                      ...S.settingsSaveBtn,
+                      ...(agentSaving ? S.settingsSaveBtnDisabled : {}),
+                    }}
+                    type="button"
+                    onClick={saveAgentSettings}
+                    disabled={agentSaving}
+                  >
+                    {agentSaving ? 'Saving...' : 'Save agents'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+      )}
 
       {showHealth && problems.length > 0 && (
         <div style={S.healthPanel} className="mg-scroll">

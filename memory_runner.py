@@ -15,8 +15,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -41,13 +45,21 @@ SKILL_PATH = DATA_DIR / "shared" / "skills" / "memory.md"
 LOG_PATH = DATA_DIR / "cron-logs" / "memory.log"
 MEMORY_DIR = DATA_DIR / "shared" / "memory"
 UPDATE_LOG_DIR = MEMORY_DIR / "update-log"
+READY = MEMORY_DIR / ".ready"
+VERSION_FILE = MEMORY_DIR / ".seed-version"
 CLAUDE_CONFIG_DIR = DATA_DIR / "cli-auth" / "claude"
 CODEX_HOME = DATA_DIR / "cli-auth" / "codex"
 CLI_PATH = "/usr/local/bin/claude"
 PM_COMMIT = "/app/scripts/pm-commit"
 BUILD_GRAPH = "/app/scripts/build_memory_graph.py"
+SEED_VERSION = "4"
+TRACE_RETENTION_DAYS = 14
 DEFAULT_MAX_TURNS = 32
 DEFAULT_PROVIDER = "claude"
+_SEED_CANDIDATES = (
+  Path(__file__).resolve().parent / "seed-memory",
+  Path("/app/scripts/seed-memory"),
+)
 
 
 def _log(message: str) -> None:
@@ -70,8 +82,7 @@ def load_skill() -> str:
     except OSError:
       pass
   for fallback in (
-    Path("/app/scripts/seed-skills/memory.md"),
-    Path(__file__).resolve().parent / "seed-skills" / "memory.md",
+    Path(__file__).resolve().parent / "memory.md",
   ):
     if fallback.is_file():
       try:
@@ -103,7 +114,7 @@ def build_goal() -> str:
     "   dangling links, add missing map descriptions, split overgrown notes or",
     "   maps when the Memory skill says to, and leave ambiguous contradictions",
     "   marked for a future user decision rather than guessing.",
-    "4. Rebuild the viewer index with python3 /app/scripts/build_memory_graph.py",
+    f"4. Rebuild the viewer index with python3 {BUILD_GRAPH}",
     "   and fix any errors it reports.",
     "5. Append one JSONL line to",
     f"   {UPDATE_LOG_DIR}/{today}.jsonl with at least timestamp, summary,",
@@ -132,20 +143,193 @@ def build_env() -> dict[str, str]:
   return env
 
 
-def resolve_agents() -> dict:
-  """Resolve primary/fallback provider choices via the platform's ONE canonical
-  resolver — see ``app.background_agents.resolve_background_agents``. Single-
-  sourced across every background agent; the sys.path bootstrap above makes
-  ``app`` importable and the import is deferred so this stays importable under a
-  bare cron env. ``app_settings`` is None here: Memory has no per-app agent
-  override on origin/main — that lands with the owner's unpushed overrides
-  feature, which passes its own settings through instead.
+def _memory_app_id() -> str | None:
+  raw = os.environ.get("MEMORY_APP_ID")
+  if raw is None and len(sys.argv) > 1:
+    raw = sys.argv[1]
+  app_id = (raw or "").strip()
+  return app_id if app_id.isdigit() else None
 
-  Deploy order: reconcile the platform to a version carrying
-  ``app.background_agents`` (mobius 61cd1283+) BEFORE store-updating this app.
+
+def _service_token() -> str | None:
+  for key in ("SERVICE_TOKEN", "AGENT_TOKEN"):
+    token = (os.environ.get(key) or "").strip()
+    if token:
+      return token
+  try:
+    return (DATA_DIR / "service-token.txt").read_text(encoding="utf-8").strip()
+  except OSError:
+    return None
+
+
+def _memory_app_active() -> bool:
+  """Verifies this scheduled run is still owned by the live Memory app."""
+  app_id = _memory_app_id()
+  if not app_id:
+    _log("ERROR MEMORY_APP_ID missing; refusing scheduled Memory run")
+    return False
+  token = _service_token()
+  if not token:
+    _log("ERROR service token missing; cannot verify Memory app liveness")
+    return False
+  api_base = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
+  request = urllib.request.Request(
+    f"{api_base}/api/apps/{app_id}",
+    headers={
+      "Authorization": f"Bearer {token}",
+      "Accept": "application/json",
+    },
+  )
+  try:
+    with urllib.request.urlopen(request, timeout=15) as response:
+      payload = json.load(response)
+  except urllib.error.HTTPError as exc:
+    _log(f"ERROR Memory app liveness check failed status={exc.code}")
+    return False
+  except (OSError, TimeoutError, ValueError, urllib.error.URLError) as exc:
+    _log(f"ERROR Memory app liveness check failed: {exc!r}")
+    return False
+  if not isinstance(payload, dict):
+    _log("ERROR Memory app liveness check returned a non-object payload")
+    return False
+  try:
+    returned_id = int(payload.get("id"))
+  except (TypeError, ValueError):
+    returned_id = -1
+  if returned_id != int(app_id):
+    _log(f"ERROR Memory app liveness check returned id={returned_id}, wanted {app_id}")
+    return False
+  if payload.get("slug") not in (None, "memory"):
+    _log(f"ERROR live app slug is {payload.get('slug')!r}, wanted 'memory'")
+    return False
+  return True
+
+
+def _seed_dir() -> Path | None:
+  return next((p for p in _SEED_CANDIDATES if p.is_dir()), None)
+
+
+def _has_graph_source() -> bool:
+  return (MEMORY_DIR / "index.md").is_file()
+
+
+def _copy_missing_tree(src: Path, dest: Path) -> int:
+  if src.is_dir():
+    dest.mkdir(parents=True, exist_ok=True)
+    return sum(
+      _copy_missing_tree(child, dest / child.name)
+      for child in sorted(src.iterdir())
+    )
+  if dest.exists():
+    return 0
+  dest.parent.mkdir(parents=True, exist_ok=True)
+  shutil.copy2(src, dest)
+  return 1
+
+
+def _copy_seed_contents(seed: Path) -> int:
+  copied = 0
+  MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+  for src in sorted(seed.iterdir()):
+    copied += _copy_missing_tree(src, MEMORY_DIR / src.name)
+  return copied
+
+
+def _mark_graph_ready(*, seeded: bool = False) -> bool:
+  try:
+    if seeded:
+      VERSION_FILE.write_text(SEED_VERSION + "\n", encoding="utf-8")
+    READY.write_text("", encoding="utf-8")
+    return True
+  except OSError as exc:
+    _log(f"ERROR could not write graph .ready sentinel: {exc!r}")
+    return False
+
+
+def _clear_graph_ready() -> None:
+  try:
+    READY.unlink(missing_ok=True)
+  except OSError:
+    pass
+
+
+def _prune_stale_traces() -> int:
+  removed = 0
+  trace_dir = MEMORY_DIR / "read-trace"
+  try:
+    cutoff = time.time() - TRACE_RETENTION_DAYS * 86400
+    for fp in trace_dir.glob("*.json"):
+      try:
+        if fp.stat().st_mtime < cutoff:
+          fp.unlink()
+          removed += 1
+      except OSError:
+        continue
+  except OSError:
+    pass
+  if removed:
+    _log(f"pruned {removed} stale read-trace file(s)")
+  return removed
+
+
+def ensure_graph_ready() -> bool:
+  """Initializes and arms graph memory for the installed Memory app.
+
+  Container boot only creates the `chats/` directory. The Memory app owns the
+  graph, so its scheduled runner is the first component allowed to
+  seed `index.md`/`mocs`/`notes`, rebuild `graph.json`, and write `.ready`.
+  """
+  try:
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    (MEMORY_DIR / "chats").mkdir(parents=True, exist_ok=True)
+  except OSError as exc:
+    _log(f"ERROR could not create memory directory: {exc!r}")
+    return False
+
+  if READY.is_file():
+    _prune_stale_traces()
+    return True
+
+  seeded = False
+  if not _has_graph_source():
+    seed = _seed_dir()
+    if seed is None:
+      _log("ERROR seed-memory directory missing; graph memory stays inactive")
+      return False
+    copied = _copy_seed_contents(seed)
+    seeded = True
+    _log(f"seeded graph memory from {seed} ({copied} file(s))")
+  else:
+    _log("graph source exists without .ready; rebuilding before arming")
+
+  rc = _rebuild_graph(required=True)
+  if rc != 0:
+    _clear_graph_ready()
+    _log(f"ERROR initial graph rebuild failed rc={rc}; .ready left absent")
+    return False
+  _prune_stale_traces()
+  return _mark_graph_ready(seeded=seeded)
+
+
+def load_app_settings() -> dict:
+  path = DATA_DIR / "apps" / "memory" / "settings.json"
+  if not path.is_file():
+    return {}
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except (json.JSONDecodeError, OSError):
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def resolve_agents() -> dict:
+  """Use the platform's canonical background-agent resolver.
+
+  Memory contributes only its optional per-app overrides; global provider
+  ordering, validation, and fallback behavior stay single-sourced in Mobius.
   """
   from app.background_agents import resolve_background_agents
-  return resolve_background_agents(str(DATA_DIR), None)
+  return resolve_background_agents(str(DATA_DIR), load_app_settings())
 
 
 def _drain_message(sdk_msg, log_fh) -> tuple[bool, bool]:
@@ -222,14 +406,18 @@ def _safety_snapshot(label: str) -> None:
     _log(f"WARN pre-run snapshot failed: {exc!r}")
 
 
-def _rebuild_graph() -> int:
+def _rebuild_graph(*, required: bool = False) -> int:
   if not Path(BUILD_GRAPH).exists():
-    _log("WARN graph builder missing; skipping final rebuild")
-    return 0
+    level = "ERROR" if required else "WARN"
+    _log(f"{level} graph builder missing: {BUILD_GRAPH}")
+    return 1 if required else 0
   try:
+    env = dict(os.environ)
+    env["DATA_DIR"] = str(DATA_DIR)
     proc = subprocess.run(
       ["python3", BUILD_GRAPH],
       cwd=str(DATA_DIR),
+      env=env,
       capture_output=True,
       text=True,
       timeout=300,
@@ -361,6 +549,10 @@ async def _run_agent_choice(
 
 
 async def run() -> int:
+  if not _memory_app_active():
+    return 1
+  if not ensure_graph_ready():
+    return 1
   skill_text = load_skill()
   goal = build_goal()
   env = build_env()
@@ -388,14 +580,25 @@ async def run() -> int:
       rc = await _run_agent_choice(
         fallback, goal=goal, skill_text=skill_text, env=env,
         max_turns=max_turns, log_fh=log_fh,
-      )
+    )
     if rc != 0:
       return rc
 
-  graph_rc = _rebuild_graph()
+  if not _memory_app_active():
+    _clear_graph_ready()
+    _log("ERROR Memory app became inactive; graph publish aborted")
+    return 1
+  graph_rc = _rebuild_graph(required=True)
   if graph_rc != 0:
+    _clear_graph_ready()
     _log(f"ERROR graph rebuild failed rc={graph_rc}")
     return graph_rc
+  if not _memory_app_active():
+    _clear_graph_ready()
+    _log("ERROR Memory app became inactive before .ready mark; graph publish aborted")
+    return 1
+  if not _mark_graph_ready():
+    return 1
   _log("done")
   return 0
 
