@@ -18,6 +18,14 @@ export function makeSharedMemoryStore({
   cacheStore,
   cacheName = 'mobius-memory-shared-v1',
   pollMs = 4000,
+  // How long a background revalidation must stay in flight before the
+  // "merging…" indicator is surfaced. A read against local shared storage
+  // normally resolves in a few ms, so raising the indicator for that split
+  // second — every pollMs, while the owner is just reading a note — is pure
+  // visual noise (a pill blinks on and off). We only raise it if the pull is
+  // still running after this delay: a fast routine poll never shows it; a
+  // genuinely slow pull (the case actually worth signalling) still does.
+  indicatorDelayMs = 500,
   isVisible = () => (typeof document === 'undefined'
     ? true
     : document.visibilityState !== 'hidden'),
@@ -119,9 +127,12 @@ export function makeSharedMemoryStore({
   // every poll where the raw body changed (an agent write). The poller only
   // ticks while the tab is visible, so a backgrounded app costs nothing. `cb`
   // receives { body, present, error } so callers parse for their own kind.
-  // `opts.onRevalidate(bool)` brackets each background revalidation so a view
-  // can show a "merging…" indicator while fresh shared data is being pulled in
-  // and clear it once the new content (or a no-change verdict) has landed.
+  // `opts.onRevalidate(bool)` brackets a background revalidation so a view can
+  // show a "merging…" indicator while fresh shared data is being pulled in and
+  // clear it once the new content (or a no-change verdict) has landed. The
+  // bracket fires ONLY for revalidations that outlast indicatorDelayMs — fast
+  // routine polls resolve first and never flip it, so the indicator doesn't
+  // flash on and off every pollMs while the owner is just reading a note.
   function subscribe(path, cb, opts = {}) {
     const onRevalidate = typeof opts.onRevalidate === 'function' ? opts.onRevalidate : () => {};
     let alive = true;
@@ -135,12 +146,25 @@ export function makeSharedMemoryStore({
     }
 
     async function revalidate() {
-      onRevalidate(true);
+      // Only raise the "merging…" indicator if this revalidation is STILL in
+      // flight after indicatorDelayMs — a fast poll (the common case) resolves
+      // first and never flashes the pill; `raised` guards the paired clear so a
+      // skipped raise leaves no stray onRevalidate(false).
+      let settled = false;
+      let raised = false;
+      const raise = () => { if (!raised && alive) { raised = true; onRevalidate(true); } };
+      const timer = indicatorDelayMs > 0
+        ? setTimeout(() => { if (!settled) raise(); }, indicatorDelayMs)
+        : (raise(), null);
       try {
         const e = await fetchThrough(path);
         if (alive && e.body !== last) deliver(e.body, e.present, null);
       } catch { /* transient: keep the last value, just clear the indicator */ }
-      finally { if (alive) onRevalidate(false); }
+      finally {
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (alive && raised) onRevalidate(false);
+      }
     }
 
     async function init() {
