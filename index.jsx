@@ -89,6 +89,8 @@ const FALLBACK_AGENT_GROUPS = [
   },
 ];
 
+const GENERATION_RE = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$/;
+
 function buildAgentGroups(payload) {
   if (!payload || typeof payload !== 'object') return FALLBACK_AGENT_GROUPS;
   const groups = [];
@@ -125,7 +127,8 @@ function splitChoiceValue(value) {
 
 export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
-  const [status, setStatus] = useState('loading'); // loading | ready | empty | error
+  const [generation, setGeneration] = useState(null);
+  const [status, setStatus] = useState('loading'); // loading | initializing | ready | empty | error
   const [errMsg, setErrMsg] = useState('');
   const [view, setView] = useState('graph'); // graph | list
   const [selected, setSelected] = useState(null); // node object
@@ -206,12 +209,44 @@ export default function App({ appId, token }) {
     return () => { alive = false; };
   }, []);
 
-  // --- Subscribe to the graph index. ---
-  // graph.json can be rebuilt by Memory's scheduled maintenance while this app
-  // sits open, so it MUST subscribe, not load-once (a mount-only read leaves
-  // the owner on a stale graph). The store serves the cached graph instantly
-  // (offline-capable) and repaints after maintenance writes.
+  // Pin every render to the immutable generation selected by the atomic
+  // pointer. A missing pointer means first-install initialization is still in
+  // progress; malformed pointer data is never interpolated into a path.
   useEffect(() => {
+    const unsub = store.subscribe('.ready', ({ body, present, error }) => {
+      if (error && body == null) {
+        setErrMsg(String(error.message || error));
+        setStatus('error');
+        return;
+      }
+      if (!present || body == null) {
+        setGeneration(null);
+        setGraph(null);
+        setStatus('initializing');
+        return;
+      }
+      let pointer;
+      try { pointer = JSON.parse(body); } catch {
+        setErrMsg('The Memory generation pointer is not valid JSON.');
+        setStatus('error');
+        return;
+      }
+      const next = pointer?.schema === 1 ? pointer.generation : null;
+      if (!GENERATION_RE.test(String(next || ''))) {
+        setErrMsg('The Memory generation pointer is invalid.');
+        setStatus('error');
+        return;
+      }
+      setGeneration(next);
+    });
+    return unsub;
+  }, [store]);
+
+  // Subscribe to graph.json inside the pinned generation. Maintenance never
+  // rewrites this file; publication changes .ready and switches the whole view
+  // to the next complete tree at once.
+  useEffect(() => {
+    if (!generation) return undefined;
     setStatus('loading');
     // Fire-and-forget open-outcome signals, each once per session (see the refs
     // above). memory_opened tells Reflection the app is being opened on a real
@@ -226,7 +261,8 @@ export default function App({ appId, token }) {
       emptySignaledRef.current = true;
       window.mobius.signal('memory_empty_shown');
     };
-    const unsub = store.subscribe('graph.json', ({ body, present, error }) => {
+    const graphPath = `generations/${generation}/graph.json`;
+    const unsub = store.subscribe(graphPath, ({ body, present, error }) => {
       if (error && body == null) {
         setErrMsg(String(error.message || error));
         setStatus('error');
@@ -234,13 +270,14 @@ export default function App({ appId, token }) {
       }
       if (!present || body == null) {
         setGraph({ nodes: [], edges: [], problems: [] });
+        setSelected(null);
         setStatus('empty');
         signalEmpty();
         return;
       }
       let data;
       try { data = JSON.parse(body); } catch {
-        setErrMsg('graph.json is not valid JSON');
+        setErrMsg('The published graph is not valid JSON.');
         setStatus('error');
         return;
       }
@@ -251,6 +288,9 @@ export default function App({ appId, token }) {
         edges,
         problems: Array.isArray(data.problems) ? data.problems : [],
       });
+      setSelected((current) => current
+        ? (nodes.find((node) => node.id === current.id) || null)
+        : null);
       if (nodes.length === 0) {
         setStatus('empty');
         signalEmpty();
@@ -260,7 +300,7 @@ export default function App({ appId, token }) {
       }
     });
     return unsub;
-  }, [store]);
+  }, [generation, store]);
 
   // --- Measure graph containers in CSS pixels; Pixi handles the DPR backing store. ---
   useEffect(() => {
@@ -343,20 +383,18 @@ export default function App({ appId, token }) {
   );
 
   // --- Subscribe to the selected note body. ---
-  // The open note is exactly the kind of view an agent can rewrite underneath
-  // the owner (daytime memory capture can append, scheduled maintenance can
-  // reorganize), so it subscribes too: cached body paints instantly (offline),
-  // and an external write to this path repaints it. The `revalidating` flag drives the
-  // "merging…" indicator, which clears once the fresh body has landed.
+  // Notes are immutable within a generation. Subscribe so the offline cache can
+  // paint instantly and a generation switch can replace the entire view.
   useEffect(() => {
     if (!selected) return;
     // node.path comes from agent-written graph.json — refuse traversal,
     // absolute paths, and query/fragment smuggling before fetching.
-    const path = safeMemoryPath(selected.path || ('notes/' + selected.id + '.md'));
-    if (!path) {
+    const rel = safeMemoryPath(selected.path || ('notes/' + selected.id + '.md'));
+    if (!rel || !generation) {
       setNoteState({ status: 'missing', md: '', fm: {}, revalidating: false });
       return;
     }
+    const path = `generations/${generation}/${rel}`;
     setNoteState({ status: 'loading', md: '', fm: {}, revalidating: false });
     const unsub = store.subscribe(
       path,
@@ -379,7 +417,7 @@ export default function App({ appId, token }) {
       { onRevalidate: (busy) => setNoteState((s) => ({ ...s, revalidating: busy })) },
     );
     return unsub;
-  }, [selected, store]);
+  }, [generation, selected, store]);
 
   // --- Lazy-load the markdown renderer the first time we need it. ---
   useEffect(() => {
@@ -1166,7 +1204,18 @@ export default function App({ appId, token }) {
         {status === 'loading' && (
           <div style={S.center}>
             <div className="mg-orbit"><span /><span /><span /></div>
-            <div style={S.centerText}>Reading the agent's memory…</div>
+            <div style={S.centerText}>Opening Memory…</div>
+          </div>
+        )}
+
+        {status === 'initializing' && (
+          <div style={S.center}>
+            <div className="mg-orbit"><span /><span /><span /></div>
+            <div style={S.centerTitle}>Preparing your first memory graph</div>
+            <div style={S.centerText}>
+              Memory is reviewing the available chat summaries. This view will
+              appear when the first complete generation is published.
+            </div>
           </div>
         )}
 
@@ -1183,8 +1232,8 @@ export default function App({ appId, token }) {
             <EmptyConstellation />
             <div style={S.centerTitle}>Memory is just getting to know you</div>
             <div style={S.centerText}>
-              It fills in as you use Möbius — every chat, app, and habit leaves a
-              trace here. Come back once you've given it something to remember.
+              Its scheduled review promotes durable facts from your chats only
+              when they are useful enough to keep. Come back after more conversation.
             </div>
           </div>
         )}

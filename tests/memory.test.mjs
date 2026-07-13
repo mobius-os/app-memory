@@ -109,14 +109,25 @@ test('fetch wrapper passes app id into the Memory runner gate', () => {
   const wrapper = readFileSync(new URL('../fetch.sh', import.meta.url), 'utf8')
   assert.match(wrapper, /MEMORY_APP_ID="\$APP_ID"/)
   assert.match(wrapper, /python3 "\$RUNNER" "\$APP_ID"/)
+  assert.match(wrapper, /APP_TOKEN/)
+  assert.doesNotMatch(wrapper, /service-token|SERVICE_TOKEN|AGENT_TOKEN/)
 })
 
 test('manifest activates Memory only through a system prompt contribution', () => {
   const manifest = JSON.parse(readFileSync(new URL('../mobius.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.system_app, true)
   assert.equal(manifest.system_prompt, 'memory-core.md')
   assert.deepEqual(manifest.skills, ['memory.md'])
   assert.equal('extensions' in manifest, false)
-  for (const file of ['memory-core.md', 'memory.md', 'memory_search.py']) {
+  assert.equal(manifest.permissions.shared_memory, 'write')
+  assert.equal(manifest.permissions.chat_log_access, 'summary')
+  assert.equal(manifest.permissions.background_agent, true)
+  assert.equal(manifest.schedule.initialize_on_install, true)
+  assert.equal(manifest.embeds_agent, false)
+  for (const file of [
+    'memory-core.md', 'memory.md', 'memory_search.py', 'memory_runner.py',
+    'memory_store.py', 'memory_graph.py',
+  ]) {
     assert.ok(manifest.source_files.includes(file), file)
   }
 })
@@ -124,18 +135,37 @@ test('manifest activates Memory only through a system prompt contribution', () =
 test('reader returns verified graph-relative file pointers', () => {
   const reader = readFileSync(new URL('../memory_search.py', import.meta.url), 'utf8')
   assert.match(reader, /FILES:/)
-  assert.match(reader, /chats\/\{token\[5:\]\}\/index\.md/)
-  assert.match(reader, /\(ROOT \/ token\)\.is_file\(\)/)
-  assert.match(reader, /no verifiable file pointers/)
+  assert.match(reader, /ready_pointer\(\)/)
+  assert.match(reader, /read_generation_file\(generation, rel\)/)
+  assert.match(reader, /retrieval subagent/)
+  assert.match(reader, /"--tools", ""/)
+  assert.match(reader, /path in allowed/)
+  assert.doesNotMatch(reader, /codex|Glob|Grep/)
   const prompt = readFileSync(new URL('../memory-core.md', import.meta.url), 'utf8')
   assert.match(prompt, /focused retrieval prompt/)
+  assert.match(prompt, /source_dir/)
+  assert.doesNotMatch(prompt, /\/data\/apps\/memory\/memory_search/)
   assert.match(prompt, /never\s+injected/i)
+})
+
+test('viewer pins graph and notes to the validated ready generation', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.match(source, /store\.subscribe\('\.ready'/)
+  assert.match(source, /GENERATION_RE\.test/)
+  assert.match(source, /generations\/\$\{generation\}\/graph\.json/)
+  assert.match(source, /generations\/\$\{generation\}\/\$\{rel\}/)
+  assert.match(source, /status === 'initializing'/)
+  assert.doesNotMatch(source, /store\.subscribe\('graph\.json'/)
 })
 
 test('runner liveness is tied to the live app row, not a generic extension', () => {
   const runner = readFileSync(new URL('../memory_runner.py', import.meta.url), 'utf8')
   assert.match(runner, /\/api\/apps\/\{app_id\}/)
+  assert.match(runner, /\/api\/apps\/\{app_id\}\/job-context/)
+  assert.match(runner, /\/api\/chat-logs/)
   assert.doesNotMatch(runner, /app_extensions|extensions\.memory_graph/)
+  assert.doesNotMatch(runner, /app\.background_agents|codex_sdk_runner|service-token|SERVICE_TOKEN|AGENT_TOKEN/)
+  assert.match(runner, /"--tools", ""/)
 })
 
 test('settings expose app-level background agent overrides', () => {
@@ -145,9 +175,9 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(source, /Background secondary/)
   assert.match(source, /primary_agent_mode/)
   assert.match(source, /secondary_agent_mode/)
-  assert.match(runner, /def load_app_settings/)
-  assert.match(runner, /resolve_background_agents/)
-  assert.match(runner, /load_app_settings\(\)/)
+  assert.match(runner, /def _settings/)
+  assert.match(runner, /def _agent_choices/)
+  assert.match(runner, /job-context/)
 })
 
 test('renderWikiLinks replaces slugs with note titles and keeps aliases', () => {
