@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Memory's scheduled consolidator with immutable generation publication.
+"""Memory's scheduled consolidator with commit-addressed publication.
 
 The model never receives filesystem, shell, network, or owner-token authority.
 Python fetches structurally-redacted chat logs with a short-lived app token,
 passes bounded data to a tool-free text process, validates its proposed note
-upserts, and publishes a complete generation atomically.
+upserts, and atomically advances a pointer after committing a complete graph.
 """
 
 from __future__ import annotations
@@ -440,8 +440,8 @@ Return ONLY one JSON object with this shape:
 At most {_MAX_UPDATES} updates and {_MAX_DELETES} deletes. Update paths may be
 index.md, notes/<slug>.md, or mocs/<slug>.md. Delete paths may be notes/<slug>.md
 or mocs/<slug>.md; never index.md. Deletion is appropriate only after a fact was
-merged, superseded, or is demonstrably stale. Published generations are
-immutable, so the prior generation remains a rollback source.
+merged, superseded, or is demonstrably stale. Published commits are immutable,
+so earlier graph states remain rollback sources in Git history.
 An empty updates array is correct when nothing clears the inclusion bar.
 
 DATA:\n{payload}
@@ -492,7 +492,7 @@ def _proposal(app_id: int, staging: Path, chats: list[dict]) -> dict:
 
 
 def _known_chat_sources(staging: Path) -> set[str]:
-  """Return provenance ids already present in the pinned source generation."""
+  """Return provenance ids already present in the pinned source commit."""
   known: set[str] = set()
   notes = staging / "notes"
   if not notes.is_dir() or notes.is_symlink():
@@ -588,7 +588,7 @@ def _append_update_log(
   path.parent.mkdir(parents=True, exist_ok=True)
   record = {
     "timestamp": datetime.now(UTC).isoformat(),
-    "generation": pointer["generation"],
+    "commit": pointer["commit"],
     "summary": str(proposal.get("summary") or "")[:1000],
     "changed_paths": changed,
     "deleted_paths": deleted,
@@ -646,17 +646,18 @@ async def run() -> int:
     try:
       _append_update_log(pointer, proposal, changed, deleted, graph)
     except OSError as exc:
-      # The immutable graph is already durably published. App-owned telemetry
+      # The graph commit is already durably published. App-owned telemetry
       # is useful but cannot retroactively make that successful commit a
       # failure or truthfully claim the pointer did not advance.
       _log(f"WARN graph published but update log failed: {exc!r}")
     _log(
-      f"published {pointer['generation']} nodes={len(graph['nodes'])} "
-      f"changed={len(changed)} deleted={len(deleted)}"
+      f"published {pointer['commit']} nodes={len(graph['nodes'])} "
+      f"changed={len(changed)} deleted={len(deleted)} "
+      f"new_commit={pointer['changed']}"
     )
     return 0
   except Exception as exc:
-    _log(f"ERROR run failed without advancing pointer: {exc!r}")
+    _log(f"ERROR run failed without publishing proposed graph changes: {exc!r}")
     return 1
   finally:
     discard_staging(staging)

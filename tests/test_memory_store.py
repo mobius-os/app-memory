@@ -1,4 +1,5 @@
 import importlib
+import fcntl
 import json
 import os
 import sys
@@ -27,122 +28,201 @@ def _seed(root: Path):
   (root / "index.md").write_text("# Memory\n", encoding="utf-8")
 
 
+def _publish(store, seed: Path, value: int = 0):
+  _, worktree = store.start_staging(seed)
+  (worktree / "graph.json").write_text(
+    json.dumps({"run": value, "nodes": [], "edges": [], "problems": []}),
+    encoding="utf-8",
+  )
+  return store.publish(worktree)
+
+
 class MemoryStoreTests(unittest.TestCase):
-  def test_failed_or_discarded_stage_leaves_old_pointer_readable(self):
+  def test_failed_or_discarded_worktree_leaves_pinned_commit_readable(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))
       seed = Path(raw) / "seed"
       _seed(seed)
-      _, first = store.start_staging(seed)
-      (first / "graph.json").write_text('{"nodes":[]}', encoding="utf-8")
-      pointer = store.publish(first)
-      _, second = store.start_staging(seed)
-      (second / "notes" / "partial.md").write_text("partial", encoding="utf-8")
+      pointer = _publish(store, seed)
+      _, worktree = store.start_staging(seed)
+      (worktree / "graph.json").write_text('{"unpublished":true}', encoding="utf-8")
+      (worktree / "notes" / "partial.md").write_text("partial", encoding="utf-8")
 
-      store.discard_staging(second)
+      self.assertNotIn(
+        "unpublished", store.read_revision_file(pointer["commit"], "graph.json"),
+      )
+      store.discard_staging(worktree)
 
-      self.assertEqual(store.ready_pointer()["generation"], pointer["generation"])
-      self.assertEqual(store.read_generation_file(pointer["generation"], "graph.json"), '{"nodes":[]}')
+      self.assertEqual(store.ready_pointer()["commit"], pointer["commit"])
+      self.assertEqual(
+        json.loads(store.read_revision_file(pointer["commit"], "graph.json"))["run"],
+        0,
+      )
+      self.assertFalse((store.REPOSITORY / "notes" / "partial.md").exists())
 
-  def test_publish_is_complete_before_pointer_advances(self):
+  def test_commit_is_complete_before_pointer_advances(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))
       seed = Path(raw) / "seed"
       _seed(seed)
-      _, staging = store.start_staging(seed)
-      (staging / "notes" / "fact.md").write_text("durable fact", encoding="utf-8")
-      (staging / "graph.json").write_text('{"nodes":[]}', encoding="utf-8")
+      _, worktree = store.start_staging(seed)
+      (worktree / "notes" / "fact.md").write_text("durable fact", encoding="utf-8")
+      (worktree / "graph.json").write_text(
+        '{"nodes":[],"edges":[],"problems":[]}', encoding="utf-8",
+      )
 
-      pointer = store.publish(staging)
+      pointer = store.publish(worktree)
 
       self.assertEqual(json.loads(store.READY.read_text()), pointer)
+      self.assertEqual(pointer["schema"], 2)
+      self.assertEqual(pointer["repository"], "repository")
       self.assertEqual(
-        store.read_generation_file(pointer["generation"], "notes/fact.md"),
+        store.read_revision_file(pointer["commit"], "notes/fact.md"),
         "durable fact",
       )
-      self.assertFalse(any(store.GENERATIONS.glob(".staging-*")))
 
   def test_publish_rejects_symlink_without_advancing_pointer(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))
       seed = Path(raw) / "seed"
       _seed(seed)
-      _, first = store.start_staging(seed)
-      (first / "graph.json").write_text('{"nodes":[]}', encoding="utf-8")
-      pointer = store.publish(first)
-      _, unsafe = store.start_staging(seed)
+      pointer = _publish(store, seed)
+      _, worktree = store.start_staging(seed)
       outside = Path(raw) / "outside"
       outside.write_text("secret", encoding="utf-8")
-      (unsafe / "notes" / "escape.md").symlink_to(outside)
+      (worktree / "notes" / "escape.md").symlink_to(outside)
 
       with self.assertRaises(ValueError):
-        store.publish(unsafe)
+        store.publish(worktree)
 
-      self.assertEqual(store.ready_pointer()["generation"], pointer["generation"])
-      store.discard_staging(unsafe)
+      self.assertEqual(store.ready_pointer()["commit"], pointer["commit"])
+      store.discard_staging(worktree)
+      self.assertEqual(outside.read_text(), "secret")
 
-  def test_next_stage_rejects_symlink_added_to_published_generation(self):
+  def test_unchanged_run_does_not_create_a_commit(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))
       seed = Path(raw) / "seed"
       _seed(seed)
-      _, staging = store.start_staging(seed)
-      (staging / "graph.json").write_text('{"nodes":[]}', encoding="utf-8")
-      pointer = store.publish(staging)
-      outside = Path(raw) / "owner-secret.txt"
-      outside.write_text("must not be copied", encoding="utf-8")
-      generation = store.generation_path(pointer["generation"])
-      (generation / "notes" / "escape.md").symlink_to(outside)
+      first = _publish(store, seed)
+      _, worktree = store.start_staging(seed)
 
-      with self.assertRaises(ValueError):
-        store.start_staging(seed)
+      second = store.publish(worktree)
 
-      self.assertFalse(any(store.GENERATIONS.glob(".staging-*")))
+      self.assertFalse(second["changed"])
+      self.assertEqual(second["commit"], first["commit"])
+      self.assertEqual(store._git("rev-list", "--count", "main", text=True).stdout.strip(), "1")
 
-  def test_stage_does_not_follow_symlink_raced_in_after_validation(self):
+  def test_all_published_commits_remain_readable_without_tree_copies(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))
       seed = Path(raw) / "seed"
       _seed(seed)
-      _, staging = store.start_staging(seed)
-      (staging / "graph.json").write_text('{"nodes":[]}', encoding="utf-8")
-      pointer = store.publish(staging)
-      generation = store.generation_path(pointer["generation"])
-      outside = Path(raw) / "owner-secret.txt"
-      outside.write_text("must never be dereferenced", encoding="utf-8")
-      original_reject = store._reject_unsafe_entries
-      calls = 0
+      commits = [_publish(store, seed, i)["commit"] for i in range(7)]
 
-      def race_after_validation(root):
-        nonlocal calls
-        calls += 1
-        original_reject(root)
-        if calls == 1:
-          (generation / "notes" / "raced.md").symlink_to(outside)
+      for i, commit in enumerate(commits):
+        self.assertEqual(json.loads(store.read_revision_file(commit, "graph.json"))["run"], i)
+      self.assertFalse(store.LEGACY_GENERATIONS.exists())
+      self.assertFalse(any(path.name.startswith(".staging-") for path in store.ROOT.iterdir()))
 
-      with mock.patch.object(store, "_reject_unsafe_entries", race_after_validation):
-        with self.assertRaises(ValueError):
+  def test_all_schema_one_generations_move_into_git_then_copies_are_removed(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      old_generation = "20260712T120000Z-bbbbbbbbbbbb"
+      generation = "20260713T120000Z-aaaaaaaaaaaa"
+      old_legacy = store.LEGACY_GENERATIONS / old_generation
+      current_legacy = store.LEGACY_GENERATIONS / generation
+      _seed(old_legacy)
+      _seed(current_legacy)
+      (old_legacy / "graph.json").write_text(
+        '{"run":0,"nodes":[],"edges":[],"problems":[]}', encoding="utf-8",
+      )
+      (current_legacy / "notes" / "old.md").write_text(
+        "legacy fact", encoding="utf-8",
+      )
+      (current_legacy / "graph.json").write_text(
+        '{"run":1,"nodes":[],"edges":[],"problems":[]}', encoding="utf-8",
+      )
+      store.ROOT.mkdir(parents=True, exist_ok=True)
+      store._atomic_text(
+        store.READY, json.dumps({"schema": 1, "generation": generation}),
+      )
+
+      _, worktree = store.start_staging(seed)
+      first = store.publish(worktree)
+      imported = store._git("rev-list", "--reverse", "main", text=True).stdout.splitlines()
+      second = _publish(store, seed, 2)
+
+      self.assertEqual(len(imported), 2)
+      self.assertEqual(
+        json.loads(store.read_revision_file(imported[0], "graph.json"))["run"], 0,
+      )
+      self.assertEqual(
+        store.read_revision_file(first["commit"], "notes/old.md"), "legacy fact",
+      )
+      self.assertNotEqual(first["commit"], second["commit"])
+      self.assertFalse(store.LEGACY_GENERATIONS.exists())
+      self.assertEqual(first["legacy_generations_imported"], 2)
+
+  def test_rollback_creates_a_new_commit_with_the_old_tree(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      first = _publish(store, seed, 1)
+      second = _publish(store, seed, 2)
+
+      rolled = store.rollback(first["commit"])
+
+      self.assertNotEqual(rolled["commit"], first["commit"])
+      self.assertNotEqual(rolled["commit"], second["commit"])
+      self.assertEqual(rolled["rollback_of"], first["commit"])
+      self.assertEqual(
+        json.loads(store.read_revision_file(rolled["commit"], "graph.json"))["run"], 1,
+      )
+      self.assertEqual(store._git("rev-list", "--count", "main", text=True).stdout.strip(), "3")
+
+  def test_rollback_refuses_to_race_scheduled_maintenance(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      pointer = _publish(store, seed, 1)
+      store.OPERATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
+
+      with store.OPERATION_LOCK.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with self.assertRaisesRegex(RuntimeError, "currently running"):
+          store.rollback(pointer["commit"])
+
+  def test_interrupted_legacy_pointer_swap_finishes_on_retry(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      generation = "20260713T120000Z-aaaaaaaaaaaa"
+      legacy = store.LEGACY_GENERATIONS / generation
+      _seed(legacy)
+      (legacy / "graph.json").write_text(
+        '{"nodes":[],"edges":[],"problems":[]}', encoding="utf-8",
+      )
+      store.ROOT.mkdir(parents=True, exist_ok=True)
+      store._atomic_text(
+        store.READY, json.dumps({"schema": 1, "generation": generation}),
+      )
+
+      with mock.patch.object(store, "_atomic_text", side_effect=OSError("crash")):
+        with self.assertRaises(OSError):
           store.start_staging(seed)
 
-      self.assertFalse(any(store.GENERATIONS.glob(".staging-*")))
-      self.assertEqual(outside.read_text(), "must never be dereferenced")
+      _, worktree = store.start_staging(seed)
+      pointer = store.publish(worktree)
 
-  def test_published_generations_are_not_pruned_while_readers_can_pin_them(self):
-    with tempfile.TemporaryDirectory() as raw:
-      store = _load(Path(raw))
-      seed = Path(raw) / "seed"
-      _seed(seed)
-      names = []
-      for i in range(7):
-        _, staging = store.start_staging(seed)
-        (staging / "graph.json").write_text(json.dumps({"run": i}), encoding="utf-8")
-        names.append(store.publish(staging)["generation"])
-
-      for i, generation in enumerate(names):
-        self.assertEqual(
-          json.loads(store.read_generation_file(generation, "graph.json")),
-          {"run": i},
-        )
+      self.assertEqual(pointer["schema"], 2)
+      self.assertEqual(pointer["legacy_generations_imported"], 1)
+      self.assertFalse(store.LEGACY_GENERATIONS.exists())
 
 
 if __name__ == "__main__":

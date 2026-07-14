@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Confined, read-only recall over one pinned immutable generation."""
+"""Confined, read-only recall over one pinned Memory commit."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from memory_store import read_generation_file, ready_pointer, record_read
+from memory_store import read_revision_file, ready_pointer, record_read
 
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
@@ -172,15 +172,15 @@ def _excerpt(markdown: str) -> str:
 
 
 def retrieve(question: str) -> tuple[str, list[str], str | None]:
-  """Return cited relevant text, verified paths, and pinned generation."""
+  """Return cited relevant text, verified paths, and the pinned commit."""
   pointer = ready_pointer()
   if pointer is None:
     return "No relevant memories.", [], None
-  generation = pointer["generation"]
+  commit = pointer["commit"]
   try:
-    graph = json.loads(read_generation_file(generation, "graph.json"))
+    graph = json.loads(read_revision_file(commit, "graph.json"))
   except (OSError, ValueError, json.JSONDecodeError):
-    return "No relevant memories.", [], generation
+    return "No relevant memories.", [], commit
   nodes = graph.get("nodes") if isinstance(graph, dict) else []
   nodes = nodes if isinstance(nodes, list) else []
   terms = _terms(question)
@@ -208,14 +208,14 @@ def retrieve(question: str) -> tuple[str, list[str], str | None]:
     # selector is deliberately a fallback, not a second automatic context load.
     selected = [node for score, node in ranked if score > 0][:MAX_FILES]
   if not selected:
-    return "No relevant memories.", [], generation
+    return "No relevant memories.", [], commit
 
   sections = []
   files = []
   for node in selected:
     rel = str(node.get("path") or "")
     try:
-      text = read_generation_file(generation, rel)
+      text = read_revision_file(commit, rel)
     except (OSError, UnicodeError, ValueError):
       continue
     excerpt = _excerpt(text)
@@ -226,9 +226,9 @@ def retrieve(question: str) -> tuple[str, list[str], str | None]:
       f"- {node.get('title') or node.get('id')}: {excerpt} [{rel}]"
     )
   if not files:
-    return "No relevant memories.", [], generation
+    return "No relevant memories.", [], commit
   answer = "Relevant memories:\n" + "\n".join(sections)
-  return answer, files, generation
+  return answer, files, commit
 
 
 def run() -> int:
@@ -238,13 +238,13 @@ def run() -> int:
     return 2
   question = args[0]
   chat_id = args[1] if len(args) > 1 else ""
-  answer, files, generation = retrieve(question)
+  answer, files, commit = retrieve(question)
   print(answer)
-  if files and generation:
-    # These pointers were opened by confined Python after the generation was
+  if files and commit:
+    # These pointers were opened by confined Python after the commit was
     # pinned; no model-generated citation is trusted.
     print("FILES: " + ", ".join(files))
-    record_read(generation, question, files, chat_id)
+    record_read(commit, question, files, chat_id)
   return 0
 
 

@@ -81,7 +81,7 @@ def _proposal(chat_id="chat-1"):
 
 
 class MemoryRunnerTests(unittest.TestCase):
-  def test_success_publishes_complete_generation_with_verified_provenance(self):
+  def test_success_publishes_complete_commit_with_verified_provenance(self):
     with tempfile.TemporaryDirectory() as raw:
       store, runner = _load(Path(raw))
       seed = Path(raw) / "seed"
@@ -96,8 +96,8 @@ class MemoryRunnerTests(unittest.TestCase):
 
       pointer = store.ready_pointer()
       self.assertIsNotNone(pointer)
-      note = store.read_generation_file(pointer["generation"], "notes/quiet-ui.md")
-      graph = json.loads(store.read_generation_file(pointer["generation"], "graph.json"))
+      note = store.read_revision_file(pointer["commit"], "notes/quiet-ui.md")
+      graph = json.loads(store.read_revision_file(pointer["commit"], "graph.json"))
       self.assertIn("source: [chat:chat-1]", note)
       self.assertTrue(any(node["id"] == "quiet-ui" for node in graph["nodes"]))
       self.assertEqual(graph["problems"], [])
@@ -221,8 +221,8 @@ class MemoryRunnerTests(unittest.TestCase):
 
       self.assertEqual(asyncio.run(runner.run()), 1)
 
-      self.assertEqual(store.ready_pointer()["generation"], old["generation"])
-      self.assertFalse(any(store.GENERATIONS.glob(".staging-*")))
+      self.assertEqual(store.ready_pointer()["commit"], old["commit"])
+      self.assertEqual(store._git("status", "--porcelain", text=True).stdout, "")
 
   def test_claude_child_gets_no_platform_or_app_credentials(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -335,7 +335,7 @@ class MemoryRunnerTests(unittest.TestCase):
 
       self.assertEqual(asyncio.run(runner.run()), 1)
       self.assertIsNone(store.ready_pointer())
-      self.assertFalse(any(store.GENERATIONS.glob(".staging-*")))
+      self.assertFalse((store.REPOSITORY / ".git" / "index.lock").exists())
 
   def test_liveness_uses_reviewed_system_capabilities_not_slug(self):
     with tempfile.TemporaryDirectory() as raw:

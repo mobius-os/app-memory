@@ -1,4 +1,4 @@
-import { NOTE_BASE } from './constants.js'
+import { NOTE_BASE, NOTE_GIT_BASE } from './constants.js'
 
 // ── Shared-memory read-through store ──────────────────────────────────────
 // The graph + notes live in SHARED storage (/api/storage/shared/memory/),
@@ -9,10 +9,11 @@ import { NOTE_BASE } from './constants.js'
 // twin of window.mobius.storage.get/getText/subscribe: read-through cache
 // (last-known value served instantly, offline-capable), background revalidate,
 // and a visibility-aware poller so subscribed views repaint when Memory's
-// maintenance job rewrites the file. Pure factory (deps injected) so the offline
+// maintenance job advances `.ready`. Pure factory (deps injected) so the offline
 // harness can drive it with a mocked cache + fetch and no network.
 export function makeSharedMemoryStore({
   baseUrl = NOTE_BASE,
+  gitBaseUrl = NOTE_GIT_BASE,
   getToken,
   fetchImpl,
   cacheStore,
@@ -73,27 +74,32 @@ export function makeSharedMemoryStore({
   let cacheReady = null;
   function cache() { return (cacheReady ||= openCacheStore()); }
 
-  function url(path) {
-    return path === 'graph.json' ? baseUrl + 'graph.json' : baseUrl + path;
+  function url(path, opts = {}) {
+    if (opts.revision) {
+      const query = new URLSearchParams({ revision: opts.revision, file: path });
+      return `${gitBaseUrl}?${query}`;
+    }
+    return baseUrl + path;
   }
 
   // One network read. Returns { present, body } on a definitive answer (200 or
   // 404) and writes it through to the cache; throws on transient failure
   // (offline / 5xx) so the caller can fall back to the cached value.
-  async function fetchThrough(path) {
+  async function fetchThrough(path, opts = {}) {
     if (!doFetch) throw new Error('no fetch');
     const token = typeof getToken === 'function' ? await getToken() : null;
     const headers = token ? { Authorization: 'Bearer ' + token } : {};
-    const res = await doFetch(url(path), { headers });
+    const key = url(path, opts);
+    const res = await doFetch(key, { headers });
     if (res.status === 404) {
       const entry = { body: null, present: false };
-      (await cache()).write(url(path), entry);
+      (await cache()).write(key, entry);
       return entry;
     }
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.text();
     const entry = { body, present: true };
-    (await cache()).write(url(path), entry);
+    (await cache()).write(key, entry);
     return entry;
   }
 
@@ -102,14 +108,15 @@ export function makeSharedMemoryStore({
   // when there is NO cached value AND the network failed — the genuine
   // can't-render state; a background-revalidate failure is swallowed (the
   // cached value already answered).
-  async function read(path) {
-    const cached = await (await cache()).read(url(path));
+  async function read(path, opts = {}) {
+    const key = url(path, opts);
+    const cached = await (await cache()).read(key);
     if (cached) {
-      fetchThrough(path).catch(() => {}); // revalidate; poller delivers fresh data
+      fetchThrough(path, opts).catch(() => {}); // revalidate; poller delivers fresh data
       return { ...cached, fromCache: true, error: null };
     }
     try {
-      const fresh = await fetchThrough(path);
+      const fresh = await fetchThrough(path, opts);
       return { ...fresh, fromCache: false, error: null };
     } catch (e) {
       return { body: null, present: false, fromCache: false, error: e };
@@ -121,12 +128,12 @@ export function makeSharedMemoryStore({
     try { return JSON.parse(body); } catch { return null; }
   }
 
-  async function getJSON(path) {
-    const r = await read(path);
+  async function getJSON(path, opts = {}) {
+    const r = await read(path, opts);
     return { value: r.present ? parseJSON(r.body) : null, present: r.present, error: r.error };
   }
-  async function getText(path) {
-    const r = await read(path);
+  async function getText(path, opts = {}) {
+    const r = await read(path, opts);
     return { value: r.present ? (r.body ?? '') : null, present: r.present, error: r.error };
   }
 
@@ -164,7 +171,7 @@ export function makeSharedMemoryStore({
         ? setTimeout(() => { if (!settled) raise(); }, indicatorDelayMs)
         : (raise(), null);
       try {
-        const e = await fetchThrough(path);
+        const e = await fetchThrough(path, opts);
         if (alive && e.body !== last) deliver(e.body, e.present, null);
       } catch { /* transient: keep the last value, just clear the indicator */ }
       finally {
@@ -175,7 +182,7 @@ export function makeSharedMemoryStore({
     }
 
     async function init() {
-      const cached = await (await cache()).read(url(path));
+      const cached = await (await cache()).read(url(path, opts));
       if (!alive) return;
       if (cached) {
         // Cached value paints instantly (offline-capable); then revalidate so an
@@ -186,7 +193,7 @@ export function makeSharedMemoryStore({
         // Nothing cached: the first read IS the revalidation.
         onRevalidate(true);
         try {
-          const e = await fetchThrough(path);
+          const e = await fetchThrough(path, opts);
           if (alive) deliver(e.body, e.present, null);
         } catch (e) {
           if (alive) deliver(null, false, e);
@@ -195,7 +202,10 @@ export function makeSharedMemoryStore({
     }
 
     function schedule() {
-      if (!alive || pollMs <= 0) return;
+      // Commit-addressed blobs are immutable. `.ready` is the only mutable
+      // subscription the viewer needs to poll; a pointer change remounts the
+      // graph/note subscriptions with a different revision URL.
+      if (!alive || pollMs <= 0 || opts.revision) return;
       timer = setTimeout(async () => {
         if (isVisible()) await revalidate();
         schedule();

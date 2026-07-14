@@ -4,7 +4,7 @@
 # The Memory app UI remains a read-only graph browser. This cron job is the
 # scoped maintenance path: the platform wrapper supplies a short-lived app
 # token, this script serializes runs, and the Python runner publishes one
-# immutable graph generation. It never reads or forwards an owner/service token.
+# commit-addressed graph update. It never reads or forwards an owner/service token.
 set -uo pipefail
 
 APP_ID="${1:-}"
@@ -12,7 +12,7 @@ API_BASE_URL="${API_BASE_URL:-http://localhost:8000}"
 DATA_DIR="${DATA_DIR:-/data}"
 JOB_STATE="${APP_JOB_STATE_DIR:-$DATA_DIR/apps/${APP_ID:-unknown}/job-state}"
 LOG="$JOB_STATE/memory.log"
-LOCK="$JOB_STATE/memory.lock"
+LOCK="$DATA_DIR/shared/memory/.operation.lock"
 HEARTBEAT="$JOB_STATE/memory.heartbeat"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 RUNNER="${MEMORY_RUNNER:-$SCRIPT_DIR/memory_runner.py}"
@@ -22,7 +22,7 @@ export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$DATA_DIR/cli-auth/claude}"
 export CODEX_HOME="${CODEX_HOME:-$DATA_DIR/cli-auth/codex}"
 export API_BASE_URL DATA_DIR
 
-mkdir -p "$JOB_STATE"
+mkdir -p "$JOB_STATE" "$DATA_DIR/shared/memory"
 log() { echo "[$(date -Iseconds)] memory: $*" >>"$LOG"; }
 
 exec 9>"$LOCK"

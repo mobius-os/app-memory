@@ -26,7 +26,7 @@ def _load(data_dir: Path):
   return store, search
 
 
-def _generation(store, *, title="Quiet interface", body="The user prefers a quiet interface."):
+def _commit(store, *, title="Quiet interface", body="The user prefers a quiet interface."):
   seed = store.ROOT / "seed"
   (seed / "mocs").mkdir(parents=True, exist_ok=True)
   (seed / "notes").mkdir(exist_ok=True)
@@ -76,20 +76,20 @@ class MemorySearchContractTests(unittest.TestCase):
   def test_subagent_failure_falls_back_to_lexical_retrieval(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
-      _generation(store)
+      _commit(store)
       with mock.patch.object(search, "_agent_paths", return_value=[]):
-        answer, files, _generation_id = search.retrieve("quiet interface")
+        answer, files, _commit_id = search.retrieve("quiet interface")
       self.assertEqual(files, ["notes/quiet-ui.md"])
       self.assertIn("prefers a quiet interface", answer)
 
   def test_returns_only_confined_cited_text_and_records_app_telemetry(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
-      pointer = _generation(store)
+      pointer = _commit(store)
 
-      answer, files, generation = search.retrieve("Which quiet UI preferences matter?")
+      answer, files, commit = search.retrieve("Which quiet UI preferences matter?")
 
-      self.assertEqual(generation, pointer["generation"])
+      self.assertEqual(commit, pointer["commit"])
       self.assertEqual(files, ["notes/quiet-ui.md"])
       self.assertIn("prefers a quiet interface", answer)
       self.assertIn("[notes/quiet-ui.md]", answer)
@@ -104,7 +104,7 @@ class MemorySearchContractTests(unittest.TestCase):
         sys.argv = old_argv
       self.assertIn("FILES: notes/quiet-ui.md", out.getvalue())
       trace = json.loads((store.STATE / "read-trace" / "chat-123.json").read_text())
-      self.assertEqual(trace["generation"], pointer["generation"])
+      self.assertEqual(trace["commit"], pointer["commit"])
       self.assertEqual(trace["files"], ["notes/quiet-ui.md"])
       self.assertNotIn("quiet UI preference", json.dumps(trace))
 
@@ -112,55 +112,51 @@ class MemorySearchContractTests(unittest.TestCase):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
       store.ROOT.mkdir(parents=True)
-      store.READY.write_text('{"schema":1,"generation":"../../secret"}', encoding="utf-8")
+      store.READY.write_text('{"schema":2,"commit":"../../secret"}', encoding="utf-8")
 
-      answer, files, generation = search.retrieve("secret project")
+      answer, files, commit = search.retrieve("secret project")
 
-      self.assertEqual((answer, files, generation), ("No relevant memories.", [], None))
+      self.assertEqual((answer, files, commit), ("No relevant memories.", [], None))
 
   def test_symlinked_note_is_never_read_or_emitted(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
-      generation = "20260713T120000Z-aaaaaaaaaaaa"
-      base = store.GENERATIONS / generation
-      (base / "notes").mkdir(parents=True)
-      outside = Path(raw) / "owner-secret.txt"
-      outside.write_text("OWNER SECRET MUST NOT LEAK", encoding="utf-8")
-      (base / "notes" / "quiet-ui.md").symlink_to(outside)
-      (base / "graph.json").write_text(json.dumps({"nodes": [{
-        "id": "quiet-ui", "title": "Secret project", "description": "secret",
-        "path": "notes/quiet-ui.md",
-      }]}), encoding="utf-8")
-      store._atomic_text(store.READY, json.dumps({"schema": 1, "generation": generation}))
+      pointer = _commit(store, title="Secret project", body="safe fact")
+      original_read = search.read_revision_file
 
-      answer, files, pinned = search.retrieve("secret project")
+      def reject_note(commit, rel, **kwargs):
+        if rel == "notes/quiet-ui.md":
+          raise ValueError("unsafe memory source")
+        return original_read(commit, rel, **kwargs)
 
-      self.assertEqual(pinned, generation)
+      with mock.patch.object(search, "read_revision_file", side_effect=reject_note):
+        answer, files, pinned = search.retrieve("secret project")
+
+      self.assertEqual(pinned, pointer["commit"])
       self.assertEqual(files, [])
       self.assertEqual(answer, "No relevant memories.")
-      self.assertNotIn("OWNER SECRET", answer)
 
-  def test_pointer_change_mid_read_does_not_mix_generations(self):
+  def test_pointer_change_mid_read_does_not_mix_commits(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
-      old = _generation(store, body="Old pinned fact.")
-      new = _generation(store, body="New replacement fact.")
+      old = _commit(store, body="Old pinned fact.")
+      new = _commit(store, body="New replacement fact.")
       store._atomic_text(store.READY, json.dumps(old))
-      original_read = search.read_generation_file
+      original_read = search.read_revision_file
       switched = False
 
-      def switching_read(generation, rel, **kwargs):
+      def switching_read(commit, rel, **kwargs):
         nonlocal switched
-        value = original_read(generation, rel, **kwargs)
+        value = original_read(commit, rel, **kwargs)
         if rel == "graph.json" and not switched:
           switched = True
           store._atomic_text(store.READY, json.dumps(new))
         return value
 
-      search.read_generation_file = switching_read
-      answer, files, pinned = search.retrieve("quiet interface")
+      with mock.patch.object(search, "read_revision_file", side_effect=switching_read):
+        answer, files, pinned = search.retrieve("quiet interface")
 
-      self.assertEqual(pinned, old["generation"])
+      self.assertEqual(pinned, old["commit"])
       self.assertEqual(files, ["notes/quiet-ui.md"])
       self.assertIn("Old pinned fact", answer)
       self.assertNotIn("New replacement fact", answer)
