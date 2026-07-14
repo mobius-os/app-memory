@@ -115,6 +115,8 @@ test('fetch wrapper passes app id into the Memory runner gate', () => {
 
 test('manifest activates Memory only through a system prompt contribution', () => {
   const manifest = JSON.parse(readFileSync(new URL('../mobius.json', import.meta.url), 'utf8'))
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(pkg.version, manifest.version)
   assert.equal(manifest.system_app, true)
   assert.equal(manifest.system_prompt, 'memory-core.md')
   assert.deepEqual(manifest.skills, ['memory.md'])
@@ -371,6 +373,31 @@ test('store getText with no cache and offline reports an error, not a crash', as
   assert.equal(r.present, false)
   assert.equal(r.value, null)
   assert.ok(r.error, 'no cache + offline surfaces an error to render the error state')
+})
+
+test('store falls back when a sandbox throws on Cache Storage access', async () => {
+  const prior = Object.getOwnPropertyDescriptor(globalThis, 'caches')
+  Object.defineProperty(globalThis, 'caches', {
+    configurable: true,
+    get() { throw new DOMException('sandboxed', 'SecurityError') },
+  })
+  try {
+    const fetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '{"schema":1,"generation":"20260714T013732Z-e0708938aee4"}',
+    })
+    const store = makeSharedMemoryStore({
+      getToken: () => 't', fetchImpl, pollMs: 0,
+    })
+    const result = await store.getText('.ready')
+    assert.equal(result.present, true)
+    assert.match(result.value, /20260714T013732Z-e0708938aee4/)
+    assert.equal(result.error, null)
+  } finally {
+    if (prior) Object.defineProperty(globalThis, 'caches', prior)
+    else delete globalThis.caches
+  }
 })
 
 test('store getText caches a note then serves it offline', async () => {

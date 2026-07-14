@@ -45,9 +45,16 @@ export function makeSharedMemoryStore({
   }
   async function openCacheStore() {
     if (cacheStore) return cacheStore;
-    if (typeof caches === 'undefined' || !caches.open) return memoryCache();
+    // Sandboxed app frames intentionally omit `allow-same-origin`. Chromium
+    // exposes the Cache Storage name there, but READING `window.caches` throws
+    // a SecurityError. Guard the property access itself — `typeof caches` is
+    // not sufficient in that context — and degrade to the online-only memory
+    // mirror so a missing browser cache can never prevent the graph opening.
+    let cacheApi;
+    try { cacheApi = globalThis.caches; } catch { return memoryCache(); }
+    if (!cacheApi || typeof cacheApi.open !== 'function') return memoryCache();
     let c;
-    try { c = await caches.open(cacheName); } catch { return memoryCache(); }
+    try { c = await cacheApi.open(cacheName); } catch { return memoryCache(); }
     return {
       async read(key) {
         const res = await c.match(key);
