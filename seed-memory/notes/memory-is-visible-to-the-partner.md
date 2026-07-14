@@ -16,7 +16,7 @@ button.
 **Why:** memory written as if unobserved drifts into shorthand the partner will
 one day read cold.
 
-**How to apply:** write notes you'd stand behind if quoted back — factual,
-dated, no judgments you wouldn't say to their face. When the partner corrects a
-note, their correction is authoritative: supersede immediately and say what you
-changed.
+**How to apply:** Memory should publish notes you'd stand behind if quoted back
+— factual, dated, and free of judgments you wouldn't say to the partner's face.
+When the partner corrects a note, their correction is authoritative and the
+next consolidation should supersede it explicitly.

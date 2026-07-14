@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -32,7 +33,36 @@ def _load(data_dir: Path):
 def _seed(path: Path):
   (path / "mocs").mkdir(parents=True)
   (path / "notes").mkdir()
-  (path / "index.md").write_text("# Memory\n", encoding="utf-8")
+  (path / "index.md").write_text(
+    "# Memory\n\n- [[maintaining-memory]]\n", encoding="utf-8",
+  )
+  (path / "mocs" / "maintaining-memory.md").write_text(
+    "---\ntitle: Maintaining memory\ntype: moc\nmanaged_by: memory\n"
+    "managed_schema: 1\n---\n# Maintaining memory\n\n"
+    "- [[how-the-memory-graph-works]]\n",
+    encoding="utf-8",
+  )
+  (path / "mocs" / "mobius-platform.md").write_text(
+    "---\ntitle: The Mobius platform\ntype: moc\n---\n# Platform\n",
+    encoding="utf-8",
+  )
+  (path / "mocs" / "about-the-user.md").write_text(
+    "---\ntitle: About the user\ntype: moc\n---\n# About\n",
+    encoding="utf-8",
+  )
+  (path / "mocs" / "building-mobius-apps.md").write_text(
+    "---\ntitle: Building apps\ntype: moc\n---\n# Apps\n",
+    encoding="utf-8",
+  )
+  (path / "notes" / "how-the-memory-graph-works.md").write_text(
+    "---\ntitle: How the memory graph works\ntype: note\n"
+    "managed_by: memory\nmanaged_schema: 1\n---\nManaged rules.\n",
+    encoding="utf-8",
+  )
+  (path / "notes" / "memory-is-visible-to-the-partner.md").write_text(
+    "---\ntitle: Memory is visible\ntype: note\n---\nVisible.\n",
+    encoding="utf-8",
+  )
 
 
 def _proposal(chat_id="chat-1"):
@@ -70,6 +100,110 @@ class MemoryRunnerTests(unittest.TestCase):
       graph = json.loads(store.read_generation_file(pointer["generation"], "graph.json"))
       self.assertIn("source: [chat:chat-1]", note)
       self.assertTrue(any(node["id"] == "quiet-ui" for node in graph["nodes"]))
+      self.assertEqual(graph["problems"], [])
+      self.assertTrue(any(node["id"] == "memory-unfiled" for node in graph["nodes"]))
+
+  def test_app_owned_docs_migrate_exact_legacy_bytes_but_preserve_custom_root(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      staging = Path(raw) / "staging"
+      _seed(seed)
+      _seed(staging)
+      legacy_root = "# Legacy root injected automatically\n"
+      legacy_moc = "# Legacy main-agent write rules\n"
+      legacy_note = "# Legacy graph router injection\n"
+      (staging / "index.md").write_text(legacy_root, encoding="utf-8")
+      (staging / "mocs" / "maintaining-memory.md").write_text(
+        legacy_moc, encoding="utf-8",
+      )
+      (staging / "notes" / "how-the-memory-graph-works.md").write_text(
+        legacy_note, encoding="utf-8",
+      )
+      deprecated = "# Legacy cross-app coupling\n"
+      (staging / "notes" / "deprecated.md").write_text(
+        deprecated, encoding="utf-8",
+      )
+      runner._LEGACY_MANAGED_SHA256 = {
+        "index.md": {hashlib.sha256(legacy_root.encode()).hexdigest()},
+        "mocs/maintaining-memory.md": {
+          hashlib.sha256(legacy_moc.encode()).hexdigest(),
+        },
+        "notes/how-the-memory-graph-works.md": {
+          hashlib.sha256(legacy_note.encode()).hexdigest(),
+        },
+      }
+      runner._LEGACY_DELETE_SHA256 = {
+        "notes/deprecated.md": {
+          hashlib.sha256(deprecated.encode()).hexdigest(),
+        },
+      }
+
+      changed, deleted = runner._reconcile_app_owned_docs(staging, seed)
+
+      self.assertEqual(
+        set(changed),
+        {"index.md", "mocs/maintaining-memory.md", "notes/how-the-memory-graph-works.md"},
+      )
+      self.assertEqual(deleted, ["notes/deprecated.md"])
+      self.assertFalse((staging / "notes" / "deprecated.md").exists())
+      self.assertEqual(
+        (staging / "index.md").read_text(), (seed / "index.md").read_text(),
+      )
+
+      custom = "# Partner-custom root\n"
+      (staging / "index.md").write_text(custom, encoding="utf-8")
+      custom_deprecated = "# Partner-custom note at the old path\n"
+      (staging / "notes" / "deprecated.md").write_text(
+        custom_deprecated, encoding="utf-8",
+      )
+      changed, deleted = runner._reconcile_app_owned_docs(staging, seed)
+      self.assertNotIn("index.md", changed)
+      self.assertEqual(deleted, [])
+      self.assertEqual((staging / "index.md").read_text(), custom)
+      self.assertEqual(
+        (staging / "notes" / "deprecated.md").read_text(), custom_deprecated,
+      )
+
+      body_marker_only = "# Partner notes\n\nmanaged_by: memory\n"
+      (staging / "mocs" / "maintaining-memory.md").write_text(
+        body_marker_only, encoding="utf-8",
+      )
+      changed, _deleted = runner._reconcile_app_owned_docs(staging, seed)
+      self.assertNotIn("mocs/maintaining-memory.md", changed)
+      self.assertEqual(
+        (staging / "mocs" / "maintaining-memory.md").read_text(),
+        body_marker_only,
+      )
+
+  def test_orphan_repair_covers_disconnected_cycles_and_is_stable(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      _seed(staging)
+      (staging / "notes" / "cycle-a.md").write_text(
+        "# A\n\n[[cycle-b]]\n", encoding="utf-8",
+      )
+      (staging / "notes" / "cycle-b.md").write_text(
+        "# B\n\n[[cycle-a]]\n", encoding="utf-8",
+      )
+
+      first_graph = runner.build_graph(staging, usage={})
+      initial_orphans = {
+        p["node"] for p in first_graph["problems"] if p["kind"] == "orphan"
+      }
+      self.assertTrue({"cycle-a", "cycle-b"}.issubset(initial_orphans))
+      runner._repair_orphans(staging, first_graph)
+      self.assertEqual(runner.build_graph(staging, usage={})["problems"], [])
+
+      (staging / "notes" / "later.md").write_text("# Later\n", encoding="utf-8")
+      runner._repair_orphans(staging, runner.build_graph(staging, usage={}))
+      final_graph = runner.build_graph(staging, usage={})
+      self.assertEqual(final_graph["problems"], [])
+      unfiled = (staging / "mocs" / "memory-unfiled.md").read_text()
+      self.assertIn("[[cycle-a]]", unfiled)
+      self.assertIn("[[cycle-b]]", unfiled)
+      self.assertIn("[[later]]", unfiled)
 
   def test_invalid_model_provenance_fails_without_advancing_pointer(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -170,6 +304,17 @@ class MemoryRunnerTests(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "deletion"):
         runner._apply_proposal(
           staging, {"updates": [], "deletes": ["index.md"]},
+          allowed_chat_ids=set(),
+        )
+      with self.assertRaisesRegex(ValueError, "deletion"):
+        runner._apply_proposal(
+          staging, {"updates": [], "deletes": ["mocs/memory-unfiled.md"]},
+          allowed_chat_ids=set(),
+        )
+      with self.assertRaisesRegex(ValueError, "deletion"):
+        runner._apply_proposal(
+          staging,
+          {"updates": [], "deletes": ["mocs/maintaining-memory.md"]},
           allowed_chat_ids=set(),
         )
 

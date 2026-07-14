@@ -11,16 +11,16 @@ prompt teaches the main agent to formulate a focused question for its read-only
 lookup subagent, which traverses this map and returns only relevant facts with
 file pointers. Everything below is reachable from here.
 
-You record what is **useful for the future and specific to this user/instance** —
-durable facts about the partner (preferences, interests, personality), and
-hard-won bugs you hit *here* — not everything, and not generic app/platform
-how-to (that's a **skill** now, under `/data/shared/skills/`). See
-[[how-the-memory-graph-works]] and the Memory skill (`/data/shared/skills/memory.md`)
-for the rules.
+The scheduled Memory consolidator records what is **useful for the future and
+specific to this user/instance** — durable facts about the partner
+(preferences, interests, personality), and hard-won bugs hit *here* — not
+everything, and not generic app/platform how-to. The main chat agent is a
+read-only consumer of this graph; it does not maintain these files during a
+turn. See [[how-the-memory-graph-works]] for the boundary.
 
 This graph starts almost empty by design — a scaffold of maps with no facts yet.
 It **grows through use**. The **Memory** app owns scheduled consolidation; the
-**Reflection** app may review Memory's update log for system-improvement signals.
+graph has no dependency on any other app.
 
 ## Maps
 
@@ -31,21 +31,17 @@ It **grows through use**. The **Memory** app owns scheduled consolidation; the
   app-building technique lives in skills, not here).
 - [[mobius-platform]] — operational facts specific to this deployment (general
   platform how-to lives in skills, not here).
-- [[maintaining-memory]] — how this graph works and how to grow it.
+- [[maintaining-memory]] — how the installed Memory app grows this graph.
 
 ## Notes
 
-- [[this-instance-is-fresh]] — you know nothing durable about this partner yet;
-  weight observation extra in early chats.
 - [[memory-is-visible-to-the-partner]] — when installed, the Memory app shows
   every note to the partner; write as if you'd stand behind it when quoted back.
-- [[a-nightly-reflection-pass-exists]] — the overnight system-improvement pass
-  writes a brief and reviews Memory's maintenance log; Memory owns graph
-  consolidation.
 
 ## Recent chats
 
-Each chat keeps its own note (`chats/<id>/index.md`) with a one-line name,
-bounded Digest, cumulative full Summary, and facts/intent. The base platform
-injects only the recent names + Digests; the rest is read deliberately. There
-is no separate recent-chats queue or inbox.
+Each chat keeps its own platform-owned note (`chats/<id>/index.md`) with a
+one-line name, bounded Digest, and cumulative full Summary. The base platform
+injects only recent names + Digests. Those chat notes are continuity state, not
+knowledge-graph nodes; the scheduled Memory app receives structurally redacted
+chat text through its reviewed capability and promotes only durable facts.

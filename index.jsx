@@ -249,8 +249,8 @@ export default function App({ appId, token }) {
     if (!generation) return undefined;
     setStatus('loading');
     // Fire-and-forget open-outcome signals, each once per session (see the refs
-    // above). memory_opened tells Reflection the app is being opened on a real
-    // graph; memory_empty_shown flags cold-start installs that never got data.
+    // above). memory_opened reports that the app reached a real graph;
+    // memory_empty_shown flags cold-start installs that never got data.
     const signalReady = (nodeCount, linkCount) => {
       if (openedSignaledRef.current) return;
       openedSignaledRef.current = true;
@@ -807,7 +807,7 @@ export default function App({ appId, token }) {
   };
 
   // Switch the Graph/List segmented control, signalling only a real change so
-  // Reflection sees which view the owner actually uses (not idempotent re-taps).
+  // Emit only real view changes, not idempotent re-taps.
   const selectView = useCallback((next) => {
     const changed = next !== view;
     setView(next);

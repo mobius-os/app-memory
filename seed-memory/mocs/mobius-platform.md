@@ -14,10 +14,9 @@ knowledge (shell rebuild needs a restart, backend edits need a host patch, cron
 survives a rebuild via init-cron, SQLite needs a manual ALTER, `/data` is a git
 repo, list dirs live with describe-tree) is now a **skill** under
 `/data/shared/skills/` — that's where procedure that helps *any* instance
-belongs. Add a note here only when the fact is specific to *this* deployment.
+belongs. The scheduled Memory pass adds a note here only when the fact is
+specific to *this* deployment.
 
 ## Notes
 
-- [[a-nightly-reflection-pass-exists]] — the overnight pass writes a morning
-  brief, reviews Memory's maintenance log, and fixes safe app issues; overnight
-  changes are normal.
+*(none recorded yet)*

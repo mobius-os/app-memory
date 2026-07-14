@@ -28,9 +28,9 @@ Möbius will fetch the manifest, show you the requested permissions and schedule
 
 Memory reads `GET /api/storage/shared/memory/graph.json` and the individual note files under `shared/memory/`. The visible app is a read-only viewer; its scheduled job defaults to 05:30 and can be rescheduled from Memory's Maintenance settings. The job uses Möbius's Background agents order, initializes the graph when needed, consolidates chat notes, rebuilds `graph.json`, and appends a compact maintenance record under `shared/memory/update-log/`.
 
-Installing Memory also contributes a small system-prompt fragment and graph skill. The fragment activates an app-local, prompt-scoped reader: the chat agent states what prior context it needs, a read-only background agent traverses the graph, and the result comes back with verified markdown file pointers. The graph is never injected wholesale. Uninstalling Memory removes that prompt contribution after the next server restart while preserving the owner's graph data for recovery/reinstall. The deterministic graph indexer remains a platform utility used by the app runner.
+Installing Memory also contributes a small system-prompt fragment and graph skill. The fragment activates an app-local, prompt-scoped reader: the chat agent states what prior context it needs, a read-only background agent traverses the graph, and the result comes back with verified markdown file pointers. The graph is never injected wholesale. Uninstalling Memory removes its prompt, skill, and schedule for subsequent turns while preserving the owner's shared graph data for recovery/reinstall. The deterministic graph indexer and immutable-generation publisher are app-owned.
 
-That split keeps the responsibility clear: Memory reads, writes, and consolidates memory. Reflection may review Memory's update log when it prepares a morning brief, but it does not own the graph.
+That split keeps the responsibility clear: Memory reads, writes, and consolidates its graph without depending on another app.
 
 ## License
 

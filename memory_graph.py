@@ -103,9 +103,19 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
       if source != target and key not in seen:
         seen.add(key)
         edges.append({"source": source, "target": target, "kind": "link"})
-  linked = {edge["target"] for edge in edges} | {edge["source"] for edge in edges}
+  adjacency: dict[str, list[str]] = {}
+  for edge in edges:
+    adjacency.setdefault(edge["source"], []).append(edge["target"])
+  reachable = set()
+  pending = ["index"] if "index" in ids else []
+  while pending:
+    node_id = pending.pop()
+    if node_id in reachable:
+      continue
+    reachable.add(node_id)
+    pending.extend(adjacency.get(node_id, ()))
   for node in nodes:
-    if node["id"] != "index" and node["id"] not in linked:
+    if node["id"] != "index" and node["id"] not in reachable:
       problems.append({"kind": "orphan", "node": node["id"]})
   result = {
     "schema": 1,
