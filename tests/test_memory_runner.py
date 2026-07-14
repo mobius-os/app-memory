@@ -353,6 +353,30 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertTrue(runner._app_active(7))
       self.assertFalse(runner._app_active(8))
 
+  def test_agent_choices_apply_canonical_and_legacy_app_overrides(self):
+    with tempfile.TemporaryDirectory() as raw:
+      data_dir = Path(raw)
+      _store, runner = _load(data_dir)
+      settings_dir = data_dir / "apps" / "7"
+      settings_dir.mkdir(parents=True)
+      runner._api_json = lambda _path: {
+        "primary": {"provider": "claude", "model": "system-primary"},
+        "fallback": {"provider": "codex", "model": "system-fallback"},
+      }
+      (settings_dir / "settings.json").write_text(json.dumps({
+        "primary_agent_mode": "custom",
+        "provider": "codex",
+        "model": "gpt-custom",
+        "secondary_agent_mode": "app",
+        "fallback_provider": "claude",
+        "fallback_model": "claude-custom",
+      }))
+
+      self.assertEqual(runner._agent_choices(7), [
+        {"provider": "codex", "model": "gpt-custom", "effort": None},
+        {"provider": "claude", "model": "claude-custom", "effort": None},
+      ])
+
 
 if __name__ == "__main__":
   unittest.main()

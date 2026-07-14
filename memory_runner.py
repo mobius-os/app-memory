@@ -296,13 +296,13 @@ def _agent_choices(app_id: int) -> list[dict]:
   settings = _settings(app_id)
   primary = context.get("primary") if isinstance(context.get("primary"), dict) else None
   fallback = context.get("fallback") if isinstance(context.get("fallback"), dict) else None
-  if settings.get("primary_agent_mode") == "custom" and settings.get("provider"):
+  if settings.get("primary_agent_mode") in ("custom", "app") and settings.get("provider"):
     primary = {
       "provider": settings.get("provider"),
       "model": settings.get("model") or None,
       "effort": settings.get("effort") or None,
     }
-  if settings.get("secondary_agent_mode") == "custom":
+  if settings.get("secondary_agent_mode") in ("custom", "app"):
     provider = settings.get("fallback_provider")
     fallback = ({
       "provider": provider,

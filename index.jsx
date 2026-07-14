@@ -585,11 +585,13 @@ export default function App({ appId, token }) {
         ? safeSettings.fallback_model.trim()
         : '';
 
-      const primaryMode = safeSettings.primary_agent_mode === 'app'
+      const primaryMode = safeSettings.primary_agent_mode === 'custom'
+        || safeSettings.primary_agent_mode === 'app'
         || (safeSettings.primary_agent_mode !== 'system' && Boolean(providerValue || modelValue))
         ? 'app'
         : 'system';
-      const secondaryMode = safeSettings.secondary_agent_mode === 'app'
+      const secondaryMode = safeSettings.secondary_agent_mode === 'custom'
+        || safeSettings.secondary_agent_mode === 'app'
         || (safeSettings.secondary_agent_mode !== 'system' && Boolean(fallbackProviderValue || fallbackModelValue))
         ? 'app'
         : 'system';
@@ -720,11 +722,11 @@ export default function App({ appId, token }) {
     setAgentMessage('');
     const payload = {
       ...agentSettingsExtra,
-      primary_agent_mode: primaryAgentMode,
+      primary_agent_mode: primaryAgentMode === 'app' ? 'custom' : 'system',
       provider: primaryAgentMode === 'app' ? (agentProvider || 'claude') : null,
       model: primaryAgentMode === 'app' ? (agentModel || null) : null,
       effort: primaryAgentMode === 'app' ? (agentSettingsExtra.effort ?? null) : null,
-      secondary_agent_mode: secondaryAgentMode,
+      secondary_agent_mode: secondaryAgentMode === 'app' ? 'custom' : 'system',
       fallback_provider: secondaryAgentMode === 'app' ? (secondaryAgentProvider || null) : null,
       fallback_model: secondaryAgentMode === 'app' && secondaryAgentProvider
         ? (secondaryAgentModel || null)
