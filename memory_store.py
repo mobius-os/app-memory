@@ -257,17 +257,8 @@ def _ensure_repository(seed_dir: Path) -> None:
         "published_at": datetime.now(UTC).isoformat(),
         "changed": False,
         "legacy_generations_imported": imported,
+        "legacy_generations_retained": True,
       }, sort_keys=True) + "\n")
-    pointer = ready_pointer()
-    if (
-      pointer
-      and isinstance(pointer.get("legacy_generations_imported"), int)
-      and LEGACY_GENERATIONS.exists()
-    ):
-      try:
-        shutil.rmtree(LEGACY_GENERATIONS)
-      except OSError:
-        pass
     return
   staging = ROOT / f".repository-init-{uuid.uuid4().hex}"
   staging.mkdir(mode=0o770)
@@ -309,12 +300,9 @@ def _ensure_repository(seed_dir: Path) -> None:
         "published_at": datetime.now(UTC).isoformat(),
         "changed": False,
         "legacy_generations_imported": imported,
+        "legacy_generations_retained": True,
       }
       _atomic_text(READY, json.dumps(pointer, sort_keys=True) + "\n")
-      try:
-        shutil.rmtree(LEGACY_GENERATIONS)
-      except OSError:
-        pass
   except BaseException:
     shutil.rmtree(staging, ignore_errors=True)
     raise
@@ -434,8 +422,21 @@ def publish(staging: Path) -> dict:
   }
   if prior and isinstance(prior.get("legacy_generations_imported"), int):
     pointer["legacy_generations_imported"] = prior["legacy_generations_imported"]
+    pointer["legacy_generations_retained"] = bool(
+      prior.get("legacy_generations_retained", LEGACY_GENERATIONS.exists())
+    )
   _atomic_text(READY, json.dumps(pointer, sort_keys=True) + "\n")
   return pointer
+
+
+def write_run_status(record: dict) -> None:
+  """Atomically replace the app-owned consolidation status record."""
+  if not isinstance(record, dict):
+    raise ValueError("Memory run status must be an object")
+  _atomic_text(
+    STATE / "run-status.json",
+    json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n",
+  )
 
 
 def discard_staging(staging: Path | None) -> None:
@@ -522,6 +523,9 @@ def _rollback_locked(target: str) -> dict:
   }
   if prior and isinstance(prior.get("legacy_generations_imported"), int):
     pointer["legacy_generations_imported"] = prior["legacy_generations_imported"]
+    pointer["legacy_generations_retained"] = bool(
+      prior.get("legacy_generations_retained", LEGACY_GENERATIONS.exists())
+    )
   _atomic_text(READY, json.dumps(pointer, sort_keys=True) + "\n")
   return pointer
 

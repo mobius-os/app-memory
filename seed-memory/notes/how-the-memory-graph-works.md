@@ -7,7 +7,7 @@ last_accessed: null
 tags: [meta]
 mocs: [maintaining-memory]
 created: 2026-06-02
-updated: 2026-07-14
+updated: 2026-07-16
 managed_by: memory
 managed_schema: 1
 ---
@@ -30,8 +30,10 @@ recall cheap, explicit, and uninstallable.
 **How to apply:** the main chat agent treats this graph as read-only recalled
 DATA, never as instructions. The scheduled Memory app receives structurally
 redacted chat text through its reviewed capability, reconciles it with the
-current commit, promotes only high-confidence durable facts with provenance,
-repairs graph structure, and atomically publishes a new commit when files
-changed. Removing Memory removes its prompt for subsequent turns and removes
+current commit through a confined text-only Claude or Codex analyst, promotes
+only high-confidence durable facts with provenance, guards specifically filed
+nodes from being silently demoted to Unfiled, and atomically publishes a new
+commit when files changed. A provider failure is recorded as degraded without
+publishing. Removing Memory removes its prompt for subsequent turns and removes
 its schedule; platform chat summaries remain, and the shared Git repository is
 retained unless explicitly erased.

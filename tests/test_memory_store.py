@@ -125,7 +125,7 @@ class MemoryStoreTests(unittest.TestCase):
       self.assertFalse(store.LEGACY_GENERATIONS.exists())
       self.assertFalse(any(path.name.startswith(".staging-") for path in store.ROOT.iterdir()))
 
-  def test_all_schema_one_generations_move_into_git_then_copies_are_removed(self):
+  def test_all_schema_one_generations_move_into_git_and_recovery_copies_are_retained(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))
       seed = Path(raw) / "seed"
@@ -163,8 +163,12 @@ class MemoryStoreTests(unittest.TestCase):
         store.read_revision_file(first["commit"], "notes/old.md"), "legacy fact",
       )
       self.assertNotEqual(first["commit"], second["commit"])
-      self.assertFalse(store.LEGACY_GENERATIONS.exists())
+      self.assertTrue(store.LEGACY_GENERATIONS.exists())
       self.assertEqual(first["legacy_generations_imported"], 2)
+      self.assertTrue(first["legacy_generations_retained"])
+      rolled = store.rollback(imported[0])
+      self.assertTrue(rolled["legacy_generations_retained"])
+      self.assertTrue(store.LEGACY_GENERATIONS.exists())
 
   def test_rollback_creates_a_new_commit_with_the_old_tree(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -222,7 +226,8 @@ class MemoryStoreTests(unittest.TestCase):
 
       self.assertEqual(pointer["schema"], 2)
       self.assertEqual(pointer["legacy_generations_imported"], 1)
-      self.assertFalse(store.LEGACY_GENERATIONS.exists())
+      self.assertTrue(store.LEGACY_GENERATIONS.exists())
+      self.assertTrue(pointer["legacy_generations_retained"])
 
 
 if __name__ == "__main__":
