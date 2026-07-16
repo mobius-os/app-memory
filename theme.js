@@ -172,7 +172,7 @@ export const CSS = `
   background: var(--bg);
 }
 .mg-agent-mode-btn {
-  min-height: 32px;
+  min-height: 44px;
   padding: 0 10px;
   border: none;
   border-radius: 6px;
@@ -221,6 +221,59 @@ export const CSS = `
 }
 .mg-agent-meta span {
   font-family: var(--mono);
+}
+.mobius-model-trigger {
+  display:flex; align-items:center; gap:10px; width:100%; padding:8px 10px;
+  border:1px solid var(--border); border-radius:9px; text-align:left;
+  background:color-mix(in srgb,var(--bg) 60%,var(--surface)); color:var(--text);
+  font:inherit; cursor:pointer; touch-action:manipulation;
+}
+.mobius-model-trigger__icon,.mobius-model-sheet__row-icon {
+  display:grid; place-items:center; flex:none; color:var(--text);
+  background:color-mix(in srgb,var(--surface) 82%,var(--bg)); border:1px solid var(--border);
+}
+.mobius-model-trigger__icon { width:26px; height:26px; border-radius:7px; }
+.mobius-model-mark { font-size:16px; line-height:1; }
+.mobius-model-trigger__main { flex:1; min-width:0; display:flex; flex-direction:column; }
+.mobius-model-trigger__name,.mobius-model-trigger__id,.mobius-model-sheet__row-title,.mobius-model-sheet__row-id { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mobius-model-trigger__name { font-size:13.5px; font-weight:500; line-height:1.3; }
+.mobius-model-trigger__id { font:11px/1.3 var(--mono); color:var(--muted); }
+.mobius-model-trigger__caret { flex:none; color:var(--muted); font-size:11px; }
+.mobius-model-sheet__backdrop {
+  position:fixed; inset:0; z-index:1000; display:flex; align-items:flex-end; justify-content:center;
+  box-sizing:border-box; background:rgba(0,0,0,.5); overscroll-behavior:contain;
+  padding:max(8px,env(safe-area-inset-top)) max(8px,env(safe-area-inset-right)) max(8px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left));
+}
+.mobius-model-sheet {
+  width:100%; max-width:440px; max-height:calc(100dvh - 16px); min-height:0;
+  display:flex; flex-direction:column; overflow:hidden; background:var(--surface);
+  border:1px solid var(--border); border-radius:16px 16px 0 0;
+  box-shadow:0 -4px 8px rgba(0,0,0,.24); animation:mobius-model-sheet-in .18s ease;
+}
+@keyframes mobius-model-sheet-in { from { transform:translateY(14px); opacity:.5; } }
+.mobius-model-sheet__head { display:flex; align-items:center; justify-content:space-between; padding:14px 16px 8px; }
+.mobius-model-sheet__title { color:var(--muted); font-size:13px; font-weight:500; }
+.mobius-model-sheet__close { min-width:44px; min-height:44px; margin:-8px -8px -8px 0; padding:4px 6px; border:0; background:none; color:var(--accent); font:500 14px var(--font); cursor:pointer; }
+.mobius-model-sheet__body { min-height:0; overflow-y:auto; overscroll-behavior-y:contain; padding:0 8px 16px; }
+.mobius-model-sheet__group-head { display:flex; align-items:center; gap:8px; padding:12px 10px 6px; color:var(--muted); font-size:11px; font-weight:600; }
+.mobius-model-sheet__group-hint { font-weight:400; }
+.mobius-model-sheet__row { display:flex; align-items:center; gap:12px; width:100%; padding:9px 10px; border:0; border-radius:9px; background:none; color:var(--text); font:inherit; text-align:left; cursor:pointer; }
+.mobius-model-sheet__row.is-selected { background:color-mix(in srgb,var(--accent) 10%,var(--surface)); }
+.mobius-model-sheet__row:disabled { opacity:.45; cursor:not-allowed; }
+.mobius-model-sheet__row-icon { width:30px; height:30px; border-radius:8px; }
+.mobius-model-sheet__row-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+.mobius-model-sheet__row-title { font-size:14px; font-weight:500; }
+.mobius-model-sheet__row-id { color:var(--muted); font:12px var(--mono); }
+.mobius-model-sheet__check { width:18px; height:18px; flex:none; position:relative; border-radius:50%; background:var(--accent); border:1.5px solid var(--accent); }
+.mobius-model-sheet__check::after { content:''; position:absolute; left:5px; top:2px; width:5px; height:9px; border:1.5px solid var(--accent-fg); border-top:0; border-left:0; transform:rotate(45deg); }
+.mobius-model-sheet__empty { padding:16px 10px; color:var(--muted); font-size:13px; }
+@media (hover:hover) and (pointer:fine) {
+  .mobius-model-trigger:hover { border-color:var(--accent); }
+  .mobius-model-sheet__row:hover:not(:disabled) { background:color-mix(in srgb,var(--accent) 8%,var(--surface)); }
+}
+@media (min-width:620px) {
+  .mobius-model-sheet__backdrop { align-items:center; padding:24px; }
+  .mobius-model-sheet { border-radius:16px; }
 }
 @media (hover: hover) {
   .mg-agent-mode-btn:not(.is-active):hover { color: var(--text); }

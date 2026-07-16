@@ -42,6 +42,7 @@ import { ListGlyph } from './ui/ListGlyph.jsx'
 import { ChatGlyph } from './ui/ChatGlyph.jsx'
 import { TextGlyph } from './ui/TextGlyph.jsx'
 import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
+import { ModelPicker } from './ui/ModelPicker.jsx'
 
 export { makeSharedMemoryStore } from './storage.js'
 export {
@@ -111,19 +112,6 @@ function buildAgentGroups(payload) {
 
 function isKnownAgentProvider(provider) {
   return AGENT_PROVIDER_META.some((meta) => meta.key === provider);
-}
-
-function choiceValue(provider, model) {
-  return provider ? `${provider}\t${model || ''}` : '';
-}
-
-function splitChoiceValue(value) {
-  const idx = String(value || '').indexOf('\t');
-  if (idx < 0) return { provider: '', model: '' };
-  return {
-    provider: value.slice(0, idx),
-    model: value.slice(idx + 1),
-  };
 }
 
 export default function App({ appId, token }) {
@@ -744,11 +732,11 @@ export default function App({ appId, token }) {
     setAgentMessage('');
     const payload = {
       ...agentSettingsExtra,
-      primary_agent_mode: primaryAgentMode === 'app' ? 'custom' : 'system',
+      primary_agent_mode: primaryAgentMode === 'app' ? 'app' : 'system',
       provider: primaryAgentMode === 'app' ? (agentProvider || 'claude') : null,
       model: primaryAgentMode === 'app' ? (agentModel || null) : null,
       effort: primaryAgentMode === 'app' ? (agentSettingsExtra.effort ?? null) : null,
-      secondary_agent_mode: secondaryAgentMode === 'app' ? 'custom' : 'system',
+      secondary_agent_mode: secondaryAgentMode === 'app' ? 'app' : 'system',
       fallback_provider: secondaryAgentMode === 'app' ? (secondaryAgentProvider || null) : null,
       fallback_model: secondaryAgentMode === 'app' && secondaryAgentProvider
         ? (secondaryAgentModel || null)
@@ -1043,7 +1031,7 @@ export default function App({ appId, token }) {
               <div>
                 <div className="mg-agent-settings-title">Background agents</div>
                 <div className="mg-agent-settings-sub">
-                  System inherits the global primary and secondary; Override is only for Memory.
+                  Uses the ordered Background agents from Möbius Settings by default. Override either slot only for Memory.
                 </div>
               </div>
               {agentStatus === 'error' && (
@@ -1073,7 +1061,7 @@ export default function App({ appId, token }) {
                           aria-pressed={primaryAgentMode === 'system'}
                           onClick={() => setPrimaryAgentModeChoice('system')}
                         >
-                          System
+                          Background agents
                         </button>
                         <button
                           type="button"
@@ -1086,56 +1074,21 @@ export default function App({ appId, token }) {
                       </span>
                     </div>
                     {primaryAgentMode === 'system' ? (
-                      <div className="mg-agent-inherit">Using system Background primary</div>
+                      <div className="mg-agent-inherit">Using the primary Background agent from Möbius Settings</div>
                     ) : (
-                      <>
-                        <select
-                          className="mg-agent-select"
-                          value={choiceValue(agentProvider, agentModel)}
-                          onChange={(event) => {
-                            const next = splitChoiceValue(event.target.value);
-                            setAgentProvider(next.provider);
-                            setAgentModel(next.model);
-                            setAgentMessage('');
-                          }}
-                          aria-label="Memory primary model"
-                        >
-                          {visibleAgentGroups.map((group) => {
-                            const isConnected = !connectedProviders || connectedProviders.has(group.key);
-                            const onProviderDefault = agentProvider === group.key && !agentModel;
-                            return (
-                              <optgroup
-                                key={group.key}
-                                label={`${group.label}${isConnected ? '' : ' (not connected)'}`}
-                              >
-                                <option
-                                  value={choiceValue(group.key, '')}
-                                  disabled={!isConnected && !onProviderDefault}
-                                >
-                                  {group.label} default
-                                </option>
-                                {group.models.map((m) => {
-                                  const on = agentProvider === group.key && agentModel === m.id;
-                                  return (
-                                    <option
-                                      key={`${group.key}-${m.id}`}
-                                      value={choiceValue(group.key, m.id)}
-                                      disabled={!isConnected && !on}
-                                    >
-                                      {m.name}
-                                    </option>
-                                  );
-                                })}
-                              </optgroup>
-                            );
-                          })}
-                        </select>
-                        <div className="mg-agent-meta">
-                          {visibleAgentGroups.find((group) => group.key === agentProvider)?.label || agentProvider}
-                          {' · '}
-                          <span>{agentModel || 'provider default'}</span>
-                        </div>
-                      </>
+                      <ModelPicker
+                        provider={agentProvider}
+                        model={agentModel}
+                        groups={visibleAgentGroups}
+                        connectedProviders={connectedProviders}
+                        title="Memory primary model"
+                        navKey="memory-primary-model"
+                        onChange={(nextProvider, nextModel) => {
+                          setAgentProvider(nextProvider);
+                          setAgentModel(nextModel);
+                          setAgentMessage('');
+                        }}
+                      />
                     )}
                   </div>
                   <div className="mg-agent-slot">
@@ -1148,7 +1101,7 @@ export default function App({ appId, token }) {
                           aria-pressed={secondaryAgentMode === 'system'}
                           onClick={() => setSecondaryAgentModeChoice('system')}
                         >
-                          System
+                          Background agents
                         </button>
                         <button
                           type="button"
@@ -1161,56 +1114,21 @@ export default function App({ appId, token }) {
                       </span>
                     </div>
                     {secondaryAgentMode === 'system' ? (
-                      <div className="mg-agent-inherit">Using system Background secondary</div>
+                      <div className="mg-agent-inherit">Using the secondary Background agent from Möbius Settings</div>
                     ) : (
-                      <>
-                        <select
-                          className="mg-agent-select"
-                          value={choiceValue(secondaryAgentProvider, secondaryAgentModel)}
-                          onChange={(event) => {
-                            const next = splitChoiceValue(event.target.value);
-                            setSecondaryAgentProvider(next.provider);
-                            setSecondaryAgentModel(next.model);
-                            setAgentMessage('');
-                          }}
-                          aria-label="Memory secondary model"
-                        >
-                          {visibleAgentGroups.map((group) => {
-                            const isConnected = !connectedProviders || connectedProviders.has(group.key);
-                            const onProviderDefault = secondaryAgentProvider === group.key && !secondaryAgentModel;
-                            return (
-                              <optgroup
-                                key={group.key}
-                                label={`${group.label}${isConnected ? '' : ' (not connected)'}`}
-                              >
-                                <option
-                                  value={choiceValue(group.key, '')}
-                                  disabled={!isConnected && !onProviderDefault}
-                                >
-                                  {group.label} default
-                                </option>
-                                {group.models.map((m) => {
-                                  const on = secondaryAgentProvider === group.key && secondaryAgentModel === m.id;
-                                  return (
-                                    <option
-                                      key={`${group.key}-${m.id}`}
-                                      value={choiceValue(group.key, m.id)}
-                                      disabled={!isConnected && !on}
-                                    >
-                                      {m.name}
-                                    </option>
-                                  );
-                                })}
-                              </optgroup>
-                            );
-                          })}
-                        </select>
-                        <div className="mg-agent-meta">
-                          {visibleAgentGroups.find((group) => group.key === secondaryAgentProvider)?.label || secondaryAgentProvider}
-                          {' · '}
-                          <span>{secondaryAgentModel || 'provider default'}</span>
-                        </div>
-                      </>
+                      <ModelPicker
+                        provider={secondaryAgentProvider}
+                        model={secondaryAgentModel}
+                        groups={visibleAgentGroups}
+                        connectedProviders={connectedProviders}
+                        title="Memory secondary model"
+                        navKey="memory-secondary-model"
+                        onChange={(nextProvider, nextModel) => {
+                          setSecondaryAgentProvider(nextProvider);
+                          setSecondaryAgentModel(nextModel);
+                          setAgentMessage('');
+                        }}
+                      />
                     )}
                   </div>
                 </div>

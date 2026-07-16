@@ -73,6 +73,7 @@
     "ui/ChatGlyph.jsx",
     "ui/TextGlyph.jsx",
     "ui/NetworkGlyph.jsx",
+    "ui/ModelPicker.jsx",
     "seed-memory/index.md",
     "seed-memory/mocs/about-the-user.md",
     "seed-memory/mocs/building-mobius-apps.md",
