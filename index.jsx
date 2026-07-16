@@ -59,6 +59,7 @@ export {
 export {
   computeRendererFitTransform,
   normalizeRendererGraphData,
+  updateRendererSelectionPin,
 } from './graph/render.jsx'
 
 const AGENT_PROVIDER_META = [

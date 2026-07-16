@@ -22,6 +22,7 @@ const {
   buildLocalGraphData,
   computeRendererFitTransform,
   normalizeRendererGraphData,
+  updateRendererSelectionPin,
   shouldShowScreenLabel,
   renderWikiLinks,
   nodeRadius,
@@ -272,6 +273,26 @@ test('computeRendererFitTransform centers finite graph bounds within limits', ()
   assert.equal(fit.k >= 0.5, true)
   assert.equal(Math.round(fit.x), 200)
   assert.equal(Math.round(fit.y), 150)
+})
+
+test('selected graph node stays pinned and the previous selection is released', () => {
+  const nodes = [
+    { id: 'a', x: -42, y: 17, fx: null, fy: null },
+    { id: 'b', x: 63, y: -28, fx: null, fy: null },
+  ]
+
+  let pinned = updateRendererSelectionPin(nodes, null, 'a')
+  assert.equal(pinned, 'a')
+  assert.deepEqual([nodes[0].fx, nodes[0].fy], [-42, 17])
+
+  pinned = updateRendererSelectionPin(nodes, pinned, 'b')
+  assert.equal(pinned, 'b')
+  assert.deepEqual([nodes[0].fx, nodes[0].fy], [null, null])
+  assert.deepEqual([nodes[1].fx, nodes[1].fy], [63, -28])
+
+  pinned = updateRendererSelectionPin(nodes, pinned, null)
+  assert.equal(pinned, null)
+  assert.deepEqual([nodes[1].fx, nodes[1].fy], [null, null])
 })
 
 test('safeMemoryPath accepts normal markdown note paths and encodes segments', () => {

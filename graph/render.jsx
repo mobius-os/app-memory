@@ -136,6 +136,9 @@ async function createMemoryGraphScene({
   let lastFrame = performance.now();
   let dragStart = null;
   let activeDragNode = null;
+  let dragSimulationActive = false;
+  let pinnedSelectionId = null;
+  let pendingClickPin = null;
   let lastNodeClickAt = 0;
   let lastHoverId = null;
 
@@ -205,6 +208,25 @@ async function createMemoryGraphScene({
     scene.scale.set(transform.k, transform.k);
   }
 
+  function syncSelectionPin() {
+    const selectedId = latestRef.current.selectedId || null;
+    if (pendingClickPin) {
+      if (selectedId === pendingClickPin.id) {
+        pendingClickPin = null;
+      } else if (selectedId !== pendingClickPin.previousSelectedId
+        || performance.now() >= pendingClickPin.expiresAt) {
+        const pendingNode = graph.nodes.find((node) => node?.id === pendingClickPin.id);
+        if (pendingNode && pinnedSelectionId !== pendingClickPin.id) {
+          pendingNode.fx = null;
+          pendingNode.fy = null;
+        }
+        pendingClickPin = null;
+      }
+    }
+    if (selectedId === pinnedSelectionId) return;
+    pinnedSelectionId = updateRendererSelectionPin(graph.nodes, pinnedSelectionId, selectedId);
+  }
+
   function hitNode(screenX, screenY) {
     const k = currentTransform.k || 1;
     const x = (screenX - currentTransform.x) / k;
@@ -227,6 +249,10 @@ async function createMemoryGraphScene({
 
   function draw() {
     if (isDisposed()) return;
+    // Selecting a node is a reading state, not a request to rearrange the
+    // graph. Keep it at the exact position the owner tapped while its panel is
+    // open, even if the force simulation is still cooling.
+    syncSelectionPin();
     const now = performance.now();
     const dt = now - lastFrame;
     lastFrame = now;
@@ -345,15 +371,23 @@ async function createMemoryGraphScene({
     .on('start', (event) => {
       if (!event.subject) return;
       activeDragNode = event.subject;
+      dragSimulationActive = false;
       dragStart = { x: event.x, y: event.y, t: Date.now() };
       event.sourceEvent?.stopPropagation?.();
-      simulation.alphaTarget(0.2).restart();
       event.subject.fx = event.subject.x;
       event.subject.fy = event.subject.y;
       latestRef.current.onNodeHover?.(event.subject);
     })
     .on('drag', (event) => {
       if (!event.subject) return;
+      // d3 emits drag start/end for an ordinary click. Heating the simulation
+      // in start made every selection rearrange the graph even when the pointer
+      // never moved. Only a genuine drag should wake the surrounding layout.
+      if (!dragSimulationActive && dragStart
+        && Math.hypot(event.x - dragStart.x, event.y - dragStart.y) >= 2) {
+        dragSimulationActive = true;
+        simulation.alphaTarget(0.2).restart();
+      }
       const k = currentTransform.k || 1;
       event.subject.fx = (event.x - currentTransform.x) / k;
       event.subject.fy = (event.y - currentTransform.y) / k;
@@ -361,16 +395,37 @@ async function createMemoryGraphScene({
     .on('end', (event) => {
       if (!event.subject) return;
       event.sourceEvent?.stopPropagation?.();
-      simulation.alphaTarget(0);
-      event.subject.fx = null;
-      event.subject.fy = null;
+      if (dragSimulationActive) simulation.alphaTarget(0);
       const moved = dragStart
         ? Math.hypot(event.x - dragStart.x, event.y - dragStart.y)
         : Infinity;
       const quick = dragStart ? Date.now() - dragStart.t < 520 : false;
+      const isClick = moved < 7 && quick;
+      // Pin a click immediately, before React commits selectedId. Otherwise a
+      // still-running initial simulation gets one frame in which to move the
+      // just-tapped node between pointer-up and the selection effect.
+      const keepPinned = isClick || latestRef.current.selectedId === event.subject.id;
+      event.subject.fx = keepPinned ? event.subject.x : null;
+      event.subject.fy = keepPinned ? event.subject.y : null;
       activeDragNode = null;
+      dragSimulationActive = false;
       dragStart = null;
-      if (moved < 7 && quick) {
+      if (isClick) {
+        // Navigation can be asynchronous. Preserve the immediate click pin
+        // until the selection commits, but release it if opening the panel
+        // fails so a node cannot remain accidentally fixed forever.
+        if (pendingClickPin && pendingClickPin.id !== event.subject.id) {
+          const supersededNode = graph.nodes.find((node) => node?.id === pendingClickPin.id);
+          if (supersededNode && pinnedSelectionId !== pendingClickPin.id) {
+            supersededNode.fx = null;
+            supersededNode.fy = null;
+          }
+        }
+        pendingClickPin = {
+          id: event.subject.id,
+          previousSelectedId: latestRef.current.selectedId || null,
+          expiresAt: performance.now() + 1500,
+        };
         lastNodeClickAt = Date.now();
         latestRef.current.onNodeClick?.(event.subject);
       }
@@ -432,6 +487,29 @@ async function createMemoryGraphScene({
     // old scene's textures linger until GC gets around to them.
     try { app.destroy(true, { children: true, texture: true, textureSource: true }); } catch {}
   };
+}
+
+// D3 mutates node positions in place. This transition helper makes the
+// selection invariant explicit and independently testable: exactly one
+// selected node is pinned, and the previously selected node is released.
+export function updateRendererSelectionPin(nodes = [], previousId = null, selectedId = null) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  if (previousId && previousId !== selectedId) {
+    const previous = list.find((node) => node?.id === previousId);
+    if (previous) {
+      previous.fx = null;
+      previous.fy = null;
+    }
+  }
+  if (selectedId) {
+    const selected = list.find((node) => node?.id === selectedId);
+    if (selected && Number.isFinite(selected.x) && Number.isFinite(selected.y)) {
+      selected.fx = selected.x;
+      selected.fy = selected.y;
+      return selectedId;
+    }
+  }
+  return null;
 }
 
 export function normalizeRendererGraphData(graphData = {}, width = 0, height = 0) {
