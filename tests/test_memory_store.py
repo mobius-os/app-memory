@@ -125,7 +125,7 @@ class MemoryStoreTests(unittest.TestCase):
       self.assertFalse(store.LEGACY_GENERATIONS.exists())
       self.assertFalse(any(path.name.startswith(".staging-") for path in store.ROOT.iterdir()))
 
-  def test_all_schema_one_generations_move_into_git_and_recovery_copies_are_retained(self):
+  def test_all_schema_one_generations_move_into_git_then_copies_are_removed(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))
       seed = Path(raw) / "seed"
@@ -163,12 +163,62 @@ class MemoryStoreTests(unittest.TestCase):
         store.read_revision_file(first["commit"], "notes/old.md"), "legacy fact",
       )
       self.assertNotEqual(first["commit"], second["commit"])
-      self.assertTrue(store.LEGACY_GENERATIONS.exists())
+      self.assertFalse(store.LEGACY_GENERATIONS.exists())
       self.assertEqual(first["legacy_generations_imported"], 2)
-      self.assertTrue(first["legacy_generations_retained"])
-      rolled = store.rollback(imported[0])
-      self.assertTrue(rolled["legacy_generations_retained"])
-      self.assertTrue(store.LEGACY_GENERATIONS.exists())
+
+  def test_legacy_migration_preserves_tree_when_an_unknown_file_exists(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      generation = "20260713T120000Z-aaaaaaaaaaaa"
+      legacy = store.LEGACY_GENERATIONS / generation
+      _seed(legacy)
+      (legacy / "graph.json").write_text(
+        '{"nodes":[],"edges":[],"problems":[]}', encoding="utf-8",
+      )
+      unexpected = legacy / "do-not-drop.txt"
+      unexpected.write_text("preserve me", encoding="utf-8")
+      store.ROOT.mkdir(parents=True, exist_ok=True)
+      store._atomic_text(
+        store.READY, json.dumps({"schema": 1, "generation": generation}),
+      )
+
+      with self.assertRaisesRegex(ValueError, "unexpected memory repository entry"):
+        store.start_staging(seed)
+
+      self.assertEqual(unexpected.read_text(encoding="utf-8"), "preserve me")
+      self.assertTrue(store.LEGACY_GENERATIONS.is_dir())
+      self.assertEqual(json.loads(store.READY.read_text())["schema"], 1)
+
+  def test_existing_repository_rejects_symlinked_git_metadata(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      store.ROOT.mkdir(parents=True)
+      store.REPOSITORY.mkdir()
+      outside = Path(raw) / "outside-git"
+      outside.mkdir()
+      (store.REPOSITORY / ".git").symlink_to(outside, target_is_directory=True)
+
+      with self.assertRaisesRegex(ValueError, "unsafe Memory repository"):
+        store.start_staging(seed)
+
+  def test_symlinked_memory_root_is_rejected(self):
+    with tempfile.TemporaryDirectory() as raw:
+      data_dir = Path(raw)
+      shared = data_dir / "shared"
+      shared.mkdir()
+      outside = data_dir / "outside-memory"
+      outside.mkdir()
+      (shared / "memory").symlink_to(outside, target_is_directory=True)
+      store = _load(data_dir)
+      seed = data_dir / "seed"
+      _seed(seed)
+
+      with self.assertRaisesRegex(ValueError, "unsafe Memory root"):
+        store.start_staging(seed)
 
   def test_rollback_creates_a_new_commit_with_the_old_tree(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -226,8 +276,7 @@ class MemoryStoreTests(unittest.TestCase):
 
       self.assertEqual(pointer["schema"], 2)
       self.assertEqual(pointer["legacy_generations_imported"], 1)
-      self.assertTrue(store.LEGACY_GENERATIONS.exists())
-      self.assertTrue(pointer["legacy_generations_retained"])
+      self.assertFalse(store.LEGACY_GENERATIONS.exists())
 
 
 if __name__ == "__main__":

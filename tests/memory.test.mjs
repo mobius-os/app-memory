@@ -111,6 +111,7 @@ test('fetch wrapper passes app id into the Memory runner gate', () => {
   assert.match(wrapper, /MEMORY_APP_ID="\$APP_ID"/)
   assert.match(wrapper, /python3 "\$RUNNER" "\$APP_ID"/)
   assert.match(wrapper, /APP_TOKEN/)
+  assert.match(wrapper, /refusing symlinked shared memory root/)
   assert.doesNotMatch(wrapper, /service-token|SERVICE_TOKEN|AGENT_TOKEN/)
 })
 

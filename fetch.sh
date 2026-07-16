@@ -22,6 +22,11 @@ export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$DATA_DIR/cli-auth/claude}"
 export CODEX_HOME="${CODEX_HOME:-$DATA_DIR/cli-auth/codex}"
 export API_BASE_URL DATA_DIR
 
+if [ -L "$DATA_DIR/shared/memory" ]; then
+  mkdir -p "$JOB_STATE"
+  echo "[$(date -Iseconds)] memory: ERROR refusing symlinked shared memory root" >>"$LOG"
+  exit 1
+fi
 mkdir -p "$JOB_STATE" "$DATA_DIR/shared/memory"
 log() { echo "[$(date -Iseconds)] memory: $*" >>"$LOG"; }
 
