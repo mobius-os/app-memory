@@ -161,6 +161,14 @@ test('viewer pins graph and notes to the validated ready commit', () => {
   assert.match(source, /status === 'initializing'/)
 })
 
+test('note and local-graph tabs use roving focus and a labelled tab panel', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.match(source, /tabIndex=\{detailTab === 'text' \? 0 : -1\}/)
+  assert.match(source, /event\.key === 'ArrowRight'/)
+  assert.match(source, /event\.key === 'Home'/)
+  assert.match(source, /id="mg-detail-panel" role="tabpanel"/)
+})
+
 test('runner liveness is tied to the live app row, not a generic extension', () => {
   const runner = readFileSync(new URL('../memory_runner.py', import.meta.url), 'utf8')
   assert.match(runner, /\/api\/apps\/\{app_id\}/)

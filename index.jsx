@@ -165,9 +165,26 @@ export default function App({ appId, token }) {
   // never resized (the old draggable split rebuilt it on every drag tick and
   // crashed). See the graph/text tab panes below.
   const [detailTab, setDetailTab] = useState('text');
+  const detailTabRefs = useRef([]);
   const [graphRuntime, setGraphRuntime] = useState(undefined); // undefined loading | null failed | { d3, PIXI }
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
+  const selectDetailTab = (next) => {
+    if (next === 'graph' && detailTab !== 'graph') window.mobius.signal('memory_local_graph_viewed');
+    setDetailTab(next);
+  };
+  const onDetailTabKeyDown = (event, index) => {
+    const order = ['text', 'graph'];
+    let nextIndex = index;
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % order.length;
+    else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + order.length) % order.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = order.length - 1;
+    else return;
+    event.preventDefault();
+    selectDetailTab(order[nextIndex]);
+    window.requestAnimationFrame(() => detailTabRefs.current[nextIndex]?.focus());
+  };
   const panelNavRef = useRef(null);
   // One-shot guards for the open-outcome analytics signals: the graph.json
   // subscribe callback re-fires on every revalidation and maintenance rebuild,
@@ -1415,27 +1432,32 @@ export default function App({ appId, token }) {
 
               <div style={S.tabToggle} role="tablist" aria-label="Note or local graph">
                 <button
+                  id="mg-tab-text"
+                  ref={(node) => { detailTabRefs.current[0] = node; }}
                   className="mg-tab"
                   style={{ ...S.tabBtn, ...(detailTab === 'text' ? S.tabBtnActive : {}) }}
-                  onClick={() => setDetailTab('text')}
+                  onClick={() => selectDetailTab('text')}
+                  onKeyDown={(event) => onDetailTabKeyDown(event, 0)}
                   role="tab"
                   aria-selected={detailTab === 'text'}
+                  aria-controls="mg-detail-panel"
+                  tabIndex={detailTab === 'text' ? 0 : -1}
                   aria-label="Show note text"
                   title="Note text"
                 >
                   <TextGlyph />
                 </button>
                 <button
+                  id="mg-tab-graph"
+                  ref={(node) => { detailTabRefs.current[1] = node; }}
                   className="mg-tab"
                   style={{ ...S.tabBtn, ...(detailTab === 'graph' ? S.tabBtnActive : {}) }}
-                  onClick={() => {
-                    const was = detailTab;
-                    setDetailTab('graph');
-                    // Only on a real switch INTO the local graph — is it used or dead weight?
-                    if (was !== 'graph') window.mobius.signal('memory_local_graph_viewed');
-                  }}
+                  onClick={() => selectDetailTab('graph')}
+                  onKeyDown={(event) => onDetailTabKeyDown(event, 1)}
                   role="tab"
                   aria-selected={detailTab === 'graph'}
+                  aria-controls="mg-detail-panel"
+                  tabIndex={detailTab === 'graph' ? 0 : -1}
                   aria-label="Show local graph"
                   title="Local graph"
                 >
@@ -1444,7 +1466,7 @@ export default function App({ appId, token }) {
               </div>
             </div>
 
-            <div style={S.detailBody}>
+            <div id="mg-detail-panel" role="tabpanel" aria-labelledby={detailTab === 'text' ? 'mg-tab-text' : 'mg-tab-graph'} style={S.detailBody}>
               {detailTab === 'text' ? (
                 <div style={S.panelBody} className="mg-md mg-scroll" onClick={onNoteClick}>
                   {noteState.status === 'loading' && (
