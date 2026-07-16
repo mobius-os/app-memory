@@ -130,7 +130,7 @@ export const S = {
     padding: '0 12px',
   },
   settingsSaveBtn: {
-    height: 44, borderRadius: 8, border: 'none', background: 'var(--accent)',
+    height: 44, borderRadius: 8, border: 'none', background: 'var(--accent-hover, var(--accent))',
     color: 'var(--accent-fg)', cursor: 'pointer', fontFamily: 'var(--font)',
     fontSize: 12.5, fontWeight: 700, padding: '0 14px',
   },
@@ -389,7 +389,7 @@ export const S = {
   panelFoot: { padding: 12, borderTop: '1px solid var(--border)', background: 'var(--surface)' },
   discussBtn: {
     width: '100%', border: 'none', borderRadius: 10, padding: '10px 14px',
-    background: 'var(--accent)', color: '#fff', fontSize: 14, fontWeight: 600,
+    background: 'var(--accent-hover, var(--accent))', color: 'var(--accent-fg)', fontSize: 14, fontWeight: 600,
     cursor: 'pointer', fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
     justifyContent: 'center', transition: 'filter 0.15s, transform 0.05s',
     boxShadow: '0 6px 18px var(--accent-dim, rgba(167,139,250,0.35))',

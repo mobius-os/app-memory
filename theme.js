@@ -64,7 +64,7 @@ export const CSS = `
   .mg-settings-btn:hover { color: var(--text); }
   .mg-tab:hover { color: var(--text); }
   .mg-close:hover { background: var(--border); color: var(--text); }
-  .mg-discuss:hover { filter: brightness(1.06); }
+  .mg-discuss:hover { filter: brightness(0.94); }
 }
 /* Keyboard-focus ring for the now-focusable list rows + sort-header buttons,
    so the keyboard affordance these gained is actually visible. */
@@ -186,7 +186,7 @@ export const CSS = `
   user-select: none;
 }
 .mg-agent-mode-btn.is-active {
-  background: var(--accent);
+  background: var(--accent-hover, var(--accent));
   color: var(--accent-fg);
 }
 .mg-agent-inherit {
