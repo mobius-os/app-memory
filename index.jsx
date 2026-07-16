@@ -186,6 +186,9 @@ export default function App({ appId, token }) {
     window.requestAnimationFrame(() => detailTabRefs.current[nextIndex]?.focus());
   };
   const panelNavRef = useRef(null);
+  const panelRef = useRef(null);
+  const panelCloseRef = useRef(null);
+  const panelOpenerRef = useRef(null);
   // One-shot guards for the open-outcome analytics signals: the graph.json
   // subscribe callback re-fires on every revalidation and maintenance rebuild,
   // so without these the open/empty signals would inflate on a single session.
@@ -507,6 +510,7 @@ export default function App({ appId, token }) {
 
   const openPanel = useCallback(async (node, opts = {}) => {
     if (!node) return;
+    if (!selected) panelOpenerRef.current = document.activeElement;
     if (!selected && window.mobius?.nav?.open) {
       try { panelNavRef.current?.close?.(); } catch {}
       const handle = window.mobius.nav.open('memory-note', () => {
@@ -788,13 +792,45 @@ export default function App({ appId, token }) {
     secondaryAgentModel,
   ]);
 
-  // Esc closes the panel — keyboard parity with the scrim tap.
+  // The detail drawer is modal on phone and desktop (it owns a scrim), so it
+  // must also own focus: enter on Close, trap Tab, close on Escape, then return
+  // to the row/control that opened it. Depend on the open BOOLEAN so switching
+  // between nodes inside the drawer does not tear down and recapture focus.
   useEffect(() => {
     if (!selected) return;
-    const onKey = (e) => { if (e.key === 'Escape') closePanel(); };
+    panelCloseRef.current?.focus();
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closePanel();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const focusable = panelRef.current?.querySelectorAll(
+        'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusable?.length) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [selected, closePanel]);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      const opener = panelOpenerRef.current;
+      if (opener && typeof opener.focus === 'function' && document.contains(opener)) opener.focus();
+      panelOpenerRef.current = null;
+    };
+  }, [Boolean(selected), closePanel]);
 
   useEffect(() => {
     if (selected) return;
@@ -1371,14 +1407,21 @@ export default function App({ appId, token }) {
       {/* ----------------------------------------------------- note panel --- */}
       {selected && (
         <>
-          <div style={S.scrim} className="mg-scrim" onClick={closePanel} />
-          <aside style={S.panel} className="mg-panel">
+          <div style={S.scrim} className="mg-scrim" onClick={closePanel} role="presentation" aria-hidden="true" />
+          <aside
+            ref={panelRef}
+            style={S.panel}
+            className="mg-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mg-panel-title"
+          >
             <div style={{ ...S.panelAccent, background: colorForNode(selected) }} />
             <div style={S.panelHead} className="mg-panel-head">
               <div style={S.panelHeadMain}>
                 <span style={{ ...S.rowDot, background: colorForNode(selected), width: 11, height: 11, marginTop: 5 }} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={S.panelTitle}>{selected.title || selected.id}</div>
+                  <div style={S.panelTitle} id="mg-panel-title">{selected.title || selected.id}</div>
                   <div style={S.panelMetaLine}>
                     <span>{selected.type === 'moc' ? 'Hub' : 'Note'}</span>
                     <span>Weight <ImportanceDots value={selected.importance || 1} /></span>
@@ -1388,7 +1431,7 @@ export default function App({ appId, token }) {
                   </div>
                 </div>
               </div>
-              <button style={S.closeBtn} className="mg-close" onClick={closePanel} aria-label="Close">×</button>
+              <button ref={panelCloseRef} type="button" style={S.closeBtn} className="mg-close" onClick={closePanel} aria-label="Close">×</button>
             </div>
 
             {Array.isArray(selected.tags) && selected.tags.length > 0 && (
@@ -1420,6 +1463,7 @@ export default function App({ appId, token }) {
                   {[1, 2, 3, 4].map((d) => (
                     <button
                       key={d}
+                      type="button"
                       style={{ ...S.depthBtn, ...(localDepth === d ? S.depthBtnActive : {}) }}
                       onClick={() => setLocalDepth(d)}
                       title={`${d} hop${d === 1 ? '' : 's'}`}
@@ -1433,6 +1477,7 @@ export default function App({ appId, token }) {
               <div style={S.tabToggle} role="tablist" aria-label="Note or local graph">
                 <button
                   id="mg-tab-text"
+                  type="button"
                   ref={(node) => { detailTabRefs.current[0] = node; }}
                   className="mg-tab"
                   style={{ ...S.tabBtn, ...(detailTab === 'text' ? S.tabBtnActive : {}) }}
@@ -1449,6 +1494,7 @@ export default function App({ appId, token }) {
                 </button>
                 <button
                   id="mg-tab-graph"
+                  type="button"
                   ref={(node) => { detailTabRefs.current[1] = node; }}
                   className="mg-tab"
                   style={{ ...S.tabBtn, ...(detailTab === 'graph' ? S.tabBtnActive : {}) }}
@@ -1517,7 +1563,7 @@ export default function App({ appId, token }) {
             </div>
 
             <div style={S.panelFoot}>
-              <button style={S.discussBtn} className="mg-discuss" onClick={() => discuss(selected)}>
+              <button type="button" style={S.discussBtn} className="mg-discuss" onClick={() => discuss(selected)}>
                 <ChatGlyph />
                 Discuss in a new chat
               </button>

@@ -169,6 +169,16 @@ test('note and local-graph tabs use roving focus and a labelled tab panel', () =
   assert.match(source, /id="mg-detail-panel" role="tabpanel"/)
 })
 
+test('node detail drawer exposes and enforces a modal focus contract', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.match(source, /role="dialog"/)
+  assert.match(source, /aria-modal="true"/)
+  assert.match(source, /aria-labelledby="mg-panel-title"/)
+  assert.match(source, /panelCloseRef\.current\?\.focus/)
+  assert.match(source, /e\.key !== 'Tab'/)
+  assert.match(source, /panelOpenerRef\.current/)
+})
+
 test('runner liveness is tied to the live app row, not a generic extension', () => {
   const runner = readFileSync(new URL('../memory_runner.py', import.meta.url), 'utf8')
   assert.match(runner, /\/api\/apps\/\{app_id\}/)
