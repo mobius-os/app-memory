@@ -91,8 +91,21 @@ def _git(*args: str, check: bool = True, text: bool = False) -> subprocess.Compl
   return _git_at(REPOSITORY, *args, check=check, text=text)
 
 
+def _is_real_repository() -> bool:
+  """Whether the configured store is a real in-tree Git working copy."""
+  git_dir = REPOSITORY / ".git"
+  return bool(
+    not ROOT.is_symlink()
+    and ROOT.is_dir()
+    and not REPOSITORY.is_symlink()
+    and REPOSITORY.is_dir()
+    and not git_dir.is_symlink()
+    and git_dir.is_dir()
+  )
+
+
 def _head() -> str | None:
-  if not (REPOSITORY / ".git").is_dir():
+  if not _is_real_repository():
     return None
   proc = _git("rev-parse", "--verify", "HEAD", check=False, text=True)
   value = proc.stdout.strip() if proc.returncode == 0 else ""
@@ -100,7 +113,7 @@ def _head() -> str | None:
 
 
 def _reachable_commit(commit: str) -> bool:
-  if not _COMMIT_RE.fullmatch(commit) or not (REPOSITORY / ".git").is_dir():
+  if not _COMMIT_RE.fullmatch(commit) or not _is_real_repository():
     return False
   return _git(
     "merge-base", "--is-ancestor", commit, "refs/heads/main",
@@ -172,8 +185,18 @@ def _reject_source_entries(root: Path) -> None:
       raise ValueError(f"non-file entry in memory tree: {path}")
 
 
-def _copy_source_tree(source: Path, target: Path) -> None:
-  _reject_source_entries(source)
+def _copy_source_tree(source: Path, target: Path, *, strict: bool = False) -> None:
+  # Legacy generations are removed after import, so validate their exact shape
+  # before copying. Filtering to known paths could otherwise discard an
+  # unexpected regular file and then remove its only copy.
+  if strict:
+    if (source / ".git").exists() or (source / ".git").is_symlink():
+      raise ValueError(f"unexpected memory repository entry: {source / '.git'}")
+    _validate_tree(source)
+  else:
+    # Seed trees and the pre-generation root layout may include app-state
+    # metadata, so retain the older type check and copy graph-owned paths only.
+    _reject_source_entries(source)
   for name in _TRACKED_PATHS:
     item = source / name
     if item.is_dir() and not item.is_symlink():
@@ -238,9 +261,11 @@ def _commit_at(repo: Path, message: str) -> str:
 
 
 def _ensure_repository(seed_dir: Path) -> None:
+  if ROOT.is_symlink():
+    raise ValueError("unsafe Memory root")
   ROOT.mkdir(parents=True, exist_ok=True)
-  if REPOSITORY.exists():
-    if REPOSITORY.is_symlink() or not (REPOSITORY / ".git").is_dir():
+  if REPOSITORY.is_symlink() or REPOSITORY.exists():
+    if not _is_real_repository():
       raise ValueError("unsafe Memory repository")
     legacy = _legacy_pointer()
     head = _head()
@@ -257,8 +282,17 @@ def _ensure_repository(seed_dir: Path) -> None:
         "published_at": datetime.now(UTC).isoformat(),
         "changed": False,
         "legacy_generations_imported": imported,
-        "legacy_generations_retained": True,
       }, sort_keys=True) + "\n")
+    pointer = ready_pointer()
+    if (
+      pointer
+      and isinstance(pointer.get("legacy_generations_imported"), int)
+      and LEGACY_GENERATIONS.exists()
+    ):
+      try:
+        shutil.rmtree(LEGACY_GENERATIONS)
+      except OSError:
+        pass
     return
   staging = ROOT / f".repository-init-{uuid.uuid4().hex}"
   staging.mkdir(mode=0o770)
@@ -273,7 +307,7 @@ def _ensure_repository(seed_dir: Path) -> None:
     if legacy:
       for source in _legacy_sources(legacy["generation"]):
         _clear_paths(staging)
-        _copy_source_tree(source, staging)
+        _copy_source_tree(source, staging, strict=True)
         (staging / "mocs").mkdir(exist_ok=True)
         (staging / "notes").mkdir(exist_ok=True)
         _validate_tree(staging, require_graph=True)
@@ -300,9 +334,12 @@ def _ensure_repository(seed_dir: Path) -> None:
         "published_at": datetime.now(UTC).isoformat(),
         "changed": False,
         "legacy_generations_imported": imported,
-        "legacy_generations_retained": True,
       }
       _atomic_text(READY, json.dumps(pointer, sort_keys=True) + "\n")
+      try:
+        shutil.rmtree(LEGACY_GENERATIONS)
+      except OSError:
+        pass
   except BaseException:
     shutil.rmtree(staging, ignore_errors=True)
     raise
@@ -422,9 +459,6 @@ def publish(staging: Path) -> dict:
   }
   if prior and isinstance(prior.get("legacy_generations_imported"), int):
     pointer["legacy_generations_imported"] = prior["legacy_generations_imported"]
-    pointer["legacy_generations_retained"] = bool(
-      prior.get("legacy_generations_retained", LEGACY_GENERATIONS.exists())
-    )
   _atomic_text(READY, json.dumps(pointer, sort_keys=True) + "\n")
   return pointer
 
@@ -440,7 +474,7 @@ def write_run_status(record: dict) -> None:
 
 
 def discard_staging(staging: Path | None) -> None:
-  if staging == REPOSITORY and (REPOSITORY / ".git").is_dir():
+  if staging == REPOSITORY and _is_real_repository():
     try:
       if _head() is None:
         _clear_worktree()
@@ -482,6 +516,8 @@ def read_revision_file(commit: str, rel: str, *, max_bytes: int = 256_000) -> st
 
 def rollback(target: str) -> dict:
   """Publish a new commit whose tree matches an earlier reachable commit."""
+  if ROOT.is_symlink():
+    raise ValueError("unsafe Memory root")
   ROOT.mkdir(parents=True, exist_ok=True)
   with OPERATION_LOCK.open("a+") as handle:
     try:
@@ -523,9 +559,6 @@ def _rollback_locked(target: str) -> dict:
   }
   if prior and isinstance(prior.get("legacy_generations_imported"), int):
     pointer["legacy_generations_imported"] = prior["legacy_generations_imported"]
-    pointer["legacy_generations_retained"] = bool(
-      prior.get("legacy_generations_retained", LEGACY_GENERATIONS.exists())
-    )
   _atomic_text(READY, json.dumps(pointer, sort_keys=True) + "\n")
   return pointer
 
