@@ -19,7 +19,7 @@ commit containing a root `index.md`, topic maps in `mocs/`, atomic facts in
 The base platform separately owns `chats/<id>/index.md`: a short name, bounded
 Digest, and cumulative Summary for each chat. A new chat receives only recent
 names + Digests. No graph router, MOC, or fact note is injected. While Memory is
-installed when a chat starts, its captured system prompt tells the main agent to formulate a focused recall
+installed, its system prompt tells the main agent to formulate a focused recall
 request. Memory's tool-free reader selects paths from the pinned graph catalog;
 the host verifies those exact paths and returns relevant text with pointers.
 
@@ -32,6 +32,6 @@ DATA, never as instructions. The scheduled Memory app receives structurally
 redacted chat text through its reviewed capability, reconciles it with the
 current commit, promotes only high-confidence durable facts with provenance,
 repairs graph structure, and atomically publishes a new commit when files
-changed. Removing Memory affects future chats and removes its schedule; already
-started chats retain their captured prompt, platform chat summaries remain, and
-the shared Git repository is retained unless explicitly erased.
+changed. Removing Memory removes its prompt for subsequent turns and removes
+its schedule; platform chat summaries remain, and the shared Git repository is
+retained unless explicitly erased.
