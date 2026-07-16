@@ -138,7 +138,7 @@ test('reader returns verified graph-relative file pointers', () => {
   const reader = readFileSync(new URL('../memory_search.py', import.meta.url), 'utf8')
   assert.match(reader, /FILES:/)
   assert.match(reader, /ready_pointer\(\)/)
-  assert.match(reader, /read_generation_file\(generation, rel\)/)
+  assert.match(reader, /read_revision_file\(commit, rel\)/)
   assert.match(reader, /retrieval subagent/)
   assert.match(reader, /"--tools", ""/)
   assert.match(reader, /path in allowed/)
@@ -150,14 +150,14 @@ test('reader returns verified graph-relative file pointers', () => {
   assert.match(prompt, /never\s+injected/i)
 })
 
-test('viewer pins graph and notes to the validated ready generation', () => {
+test('viewer pins graph and notes to the validated ready commit', () => {
   const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   assert.match(source, /store\.subscribe\('\.ready'/)
-  assert.match(source, /GENERATION_RE\.test/)
-  assert.match(source, /generations\/\$\{generation\}\/graph\.json/)
-  assert.match(source, /generations\/\$\{generation\}\/\$\{rel\}/)
+  assert.match(source, /COMMIT_RE\.test/)
+  assert.match(source, /store\.subscribe\('graph\.json'/)
+  assert.match(source, /revision/)
+  assert.doesNotMatch(source, /generations\/\$\{/)
   assert.match(source, /status === 'initializing'/)
-  assert.doesNotMatch(source, /store\.subscribe\('graph\.json'/)
 })
 
 test('runner liveness is tied to the live app row, not a generic extension', () => {
@@ -369,6 +369,25 @@ test('store getJSON caches the graph then serves it offline', async () => {
   assert.equal(offlineRead.error, null)
 })
 
+test('store reads graph blobs from an exact Git revision', async () => {
+  const seen = []
+  const commit = '0123456789abcdef0123456789abcdef01234567'
+  const fetchImpl = async (url) => {
+    seen.push(url)
+    return { ok: true, status: 200, text: async () => '{"nodes":[]}' }
+  }
+  const store = makeSharedMemoryStore({
+    getToken: () => 't', fetchImpl, cacheStore: makeFakeCache(), pollMs: 0,
+  })
+
+  await store.getJSON('graph.json', { revision: commit })
+
+  const parsed = new URL(seen[0], 'https://mobius.local')
+  assert.equal(parsed.pathname, '/api/storage/shared-git/memory/repository')
+  assert.equal(parsed.searchParams.get('revision'), commit)
+  assert.equal(parsed.searchParams.get('file'), 'graph.json')
+})
+
 test('store getText with no cache and offline reports an error, not a crash', async () => {
   const cacheStore = makeFakeCache()
   const fetchImpl = async () => { throw new TypeError('Failed to fetch') }
@@ -389,14 +408,14 @@ test('store falls back when a sandbox throws on Cache Storage access', async () 
     const fetchImpl = async () => ({
       ok: true,
       status: 200,
-      text: async () => '{"schema":1,"generation":"20260714T013732Z-e0708938aee4"}',
+      text: async () => '{"schema":2,"commit":"0123456789abcdef0123456789abcdef01234567"}',
     })
     const store = makeSharedMemoryStore({
       getToken: () => 't', fetchImpl, pollMs: 0,
     })
     const result = await store.getText('.ready')
     assert.equal(result.present, true)
-    assert.match(result.value, /20260714T013732Z-e0708938aee4/)
+    assert.match(result.value, /0123456789abcdef0123456789abcdef01234567/)
     assert.equal(result.error, null)
   } finally {
     if (prior) Object.defineProperty(globalThis, 'caches', prior)

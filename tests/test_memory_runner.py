@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import importlib
 import json
 import os
@@ -81,7 +80,7 @@ def _proposal(chat_id="chat-1"):
 
 
 class MemoryRunnerTests(unittest.TestCase):
-  def test_success_publishes_complete_generation_with_verified_provenance(self):
+  def test_success_publishes_complete_commit_with_verified_provenance(self):
     with tempfile.TemporaryDirectory() as raw:
       store, runner = _load(Path(raw))
       seed = Path(raw) / "seed"
@@ -96,14 +95,18 @@ class MemoryRunnerTests(unittest.TestCase):
 
       pointer = store.ready_pointer()
       self.assertIsNotNone(pointer)
-      note = store.read_generation_file(pointer["generation"], "notes/quiet-ui.md")
-      graph = json.loads(store.read_generation_file(pointer["generation"], "graph.json"))
+      note = store.read_revision_file(pointer["commit"], "notes/quiet-ui.md")
+      graph = json.loads(store.read_revision_file(pointer["commit"], "graph.json"))
       self.assertIn("source: [chat:chat-1]", note)
       self.assertTrue(any(node["id"] == "quiet-ui" for node in graph["nodes"]))
       self.assertEqual(graph["problems"], [])
       self.assertTrue(any(node["id"] == "memory-unfiled" for node in graph["nodes"]))
+      status = json.loads((store.STATE / "run-status.json").read_text())
+      self.assertEqual(status["status"], "published")
+      self.assertEqual(status["commit"], pointer["commit"])
+      self.assertIn("specifically_reachable", status["topology"]["after"])
 
-  def test_app_owned_docs_migrate_exact_legacy_bytes_but_preserve_custom_root(self):
+  def test_app_owned_docs_require_explicit_frontmatter_ownership(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))
       seed = Path(raw) / "seed"
@@ -124,31 +127,35 @@ class MemoryRunnerTests(unittest.TestCase):
       (staging / "notes" / "deprecated.md").write_text(
         deprecated, encoding="utf-8",
       )
-      runner._LEGACY_MANAGED_SHA256 = {
-        "index.md": {hashlib.sha256(legacy_root.encode()).hexdigest()},
-        "mocs/maintaining-memory.md": {
-          hashlib.sha256(legacy_moc.encode()).hexdigest(),
-        },
-        "notes/how-the-memory-graph-works.md": {
-          hashlib.sha256(legacy_note.encode()).hexdigest(),
-        },
-      }
-      runner._LEGACY_DELETE_SHA256 = {
-        "notes/deprecated.md": {
-          hashlib.sha256(deprecated.encode()).hexdigest(),
-        },
-      }
-
       changed, deleted = runner._reconcile_app_owned_docs(staging, seed)
 
-      self.assertEqual(
-        set(changed),
-        {"index.md", "mocs/maintaining-memory.md", "notes/how-the-memory-graph-works.md"},
+      self.assertEqual(changed, [])
+      self.assertEqual(deleted, [])
+      self.assertEqual((staging / "index.md").read_text(), legacy_root)
+      self.assertEqual((staging / "mocs" / "maintaining-memory.md").read_text(), legacy_moc)
+      self.assertEqual((staging / "notes" / "how-the-memory-graph-works.md").read_text(), legacy_note)
+      self.assertEqual((staging / "notes" / "deprecated.md").read_text(), deprecated)
+
+      (staging / "mocs" / "maintaining-memory.md").unlink()
+      explicit = (
+        "---\ntitle: Old managed copy\nmanaged_by: memory\n---\nOld rules.\n"
       )
-      self.assertEqual(deleted, ["notes/deprecated.md"])
-      self.assertFalse((staging / "notes" / "deprecated.md").exists())
+      (staging / "notes" / "how-the-memory-graph-works.md").write_text(
+        explicit, encoding="utf-8",
+      )
+      changed, deleted = runner._reconcile_app_owned_docs(staging, seed)
+      self.assertEqual(set(changed), {
+        "mocs/maintaining-memory.md",
+        "notes/how-the-memory-graph-works.md",
+      })
+      self.assertEqual(deleted, [])
       self.assertEqual(
-        (staging / "index.md").read_text(), (seed / "index.md").read_text(),
+        (staging / "mocs" / "maintaining-memory.md").read_text(),
+        (seed / "mocs" / "maintaining-memory.md").read_text(),
+      )
+      self.assertEqual(
+        (staging / "notes" / "how-the-memory-graph-works.md").read_text(),
+        (seed / "notes" / "how-the-memory-graph-works.md").read_text(),
       )
 
       custom = "# Partner-custom root\n"
@@ -221,8 +228,8 @@ class MemoryRunnerTests(unittest.TestCase):
 
       self.assertEqual(asyncio.run(runner.run()), 1)
 
-      self.assertEqual(store.ready_pointer()["generation"], old["generation"])
-      self.assertFalse(any(store.GENERATIONS.glob(".staging-*")))
+      self.assertEqual(store.ready_pointer()["commit"], old["commit"])
+      self.assertEqual(store._git("status", "--porcelain", text=True).stdout, "")
 
   def test_claude_child_gets_no_platform_or_app_credentials(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -239,9 +246,106 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertEqual(value, {"updates": []})
       self.assertIn("--tools", captured["cmd"])
       self.assertEqual(captured["cmd"][captured["cmd"].index("--tools") + 1], "")
+      self.assertEqual(captured["input"], "prompt")
+      self.assertNotIn("prompt", captured["cmd"])
       for key in ("APP_TOKEN", "SERVICE_TOKEN", "AGENT_TOKEN", "API_BASE_URL", "DATA_DIR"):
         self.assertNotIn(key, captured["env"])
       self.assertTrue(captured["cwd"].startswith("/tmp/memory-agent-"))
+
+  def test_codex_child_is_ephemeral_read_only_and_gets_no_credentials(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      captured = {}
+
+      class FakePopen:
+        pid = 999999
+        returncode = 0
+
+        def __init__(self, cmd, **kwargs):
+          captured.update({"cmd": cmd, **kwargs})
+
+        def communicate(self, value=None, timeout=None):
+          captured["input"] = value
+          captured["timeout"] = timeout
+          event = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": '{"updates":[]}'},
+          }
+          return json.dumps(event) + "\n", ""
+
+      with (
+        mock.patch.object(runner.shutil, "which", return_value="/usr/bin/codex"),
+        mock.patch.object(runner.subprocess, "Popen", FakePopen),
+      ):
+        value = runner._codex_proposal(
+          {"provider": "codex", "model": "gpt-test", "effort": "high"},
+          "prompt",
+        )
+
+      self.assertEqual(value, {"updates": []})
+      self.assertEqual(captured["input"], "prompt")
+      self.assertIn("--ephemeral", captured["cmd"])
+      self.assertIn("--ignore-user-config", captured["cmd"])
+      self.assertEqual(
+        captured["cmd"][captured["cmd"].index("--sandbox") + 1], "read-only",
+      )
+      self.assertIn("shell_tool", captured["cmd"])
+      self.assertIn("apps", captured["cmd"])
+      for key in ("APP_TOKEN", "SERVICE_TOKEN", "AGENT_TOKEN", "API_BASE_URL", "DATA_DIR"):
+        self.assertNotIn(key, captured["env"])
+      self.assertTrue(captured["cwd"].startswith("/tmp/memory-agent-"))
+
+  def test_degraded_provider_run_is_visible_and_does_not_publish(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      _, first = store.start_staging(seed)
+      runner.build_graph(first, usage={})
+      old = store.publish(first)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      runner._redacted_chats = lambda: []
+      runner._proposal = lambda *_args: runner.ProposalOutcome(
+        status="degraded", proposal=None, provider=None, model=None,
+        attempted_agents=[{
+          "provider": "codex", "model": "gpt-test", "supported": True,
+        }],
+      )
+
+      self.assertEqual(asyncio.run(runner.run()), 2)
+      self.assertEqual(store.ready_pointer()["commit"], old["commit"])
+      status = json.loads((store.STATE / "run-status.json").read_text())
+      self.assertEqual(status["status"], "degraded")
+      self.assertEqual(status["commit"], old["commit"])
+      self.assertEqual(status["reason"], "no_valid_text_only_proposal")
+      run_log = next((store.STATE / "run-log").glob("*.jsonl")).read_text()
+      events = [json.loads(line) for line in run_log.splitlines()]
+      self.assertEqual([event["status"] for event in events], ["running", "degraded"])
+
+  def test_topology_regression_fails_before_unfiled_can_hide_it(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      _, first = store.start_staging(seed)
+      runner.build_graph(first, usage={})
+      old = store.publish(first)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      runner._redacted_chats = lambda: []
+      runner._proposal = lambda *_args: {
+        "summary": "replace the root", "followups": [], "deletes": [],
+        "updates": [{"path": "index.md", "content": "# Empty root\n"}],
+      }
+
+      self.assertEqual(asyncio.run(runner.run()), 1)
+      self.assertEqual(store.ready_pointer()["commit"], old["commit"])
+      status = json.loads((store.STATE / "run-status.json").read_text())
+      self.assertEqual(status["status"], "failed")
+      self.assertEqual(status["error_class"], "ValueError")
 
   def test_proposal_data_is_bounded_valid_json(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -335,7 +439,7 @@ class MemoryRunnerTests(unittest.TestCase):
 
       self.assertEqual(asyncio.run(runner.run()), 1)
       self.assertIsNone(store.ready_pointer())
-      self.assertFalse(any(store.GENERATIONS.glob(".staging-*")))
+      self.assertFalse((store.REPOSITORY / ".git" / "index.lock").exists())
 
   def test_liveness_uses_reviewed_system_capabilities_not_slug(self):
     with tempfile.TemporaryDirectory() as raw:

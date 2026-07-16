@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Memory's scheduled consolidator with immutable generation publication.
+"""Memory's scheduled consolidator with commit-addressed publication.
 
 The model never receives filesystem, shell, network, or owner-token authority.
 Python fetches structurally-redacted chat logs with a short-lived app token,
 passes bounded data to a tool-free text process, validates its proposed note
-upserts, and publishes a complete generation atomically.
+upserts, and atomically advances a pointer after committing a complete graph.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -21,6 +21,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from memory_store import (
   publish,
   ready_pointer,
   start_staging,
+  write_run_status,
 )
 
 
@@ -61,39 +63,17 @@ _MANAGED_DOCS = frozenset({
 })
 _GENERATED_DOCS = frozenset({"mocs/memory-unfiled.md"})
 _PROTECTED_DOCS = _MANAGED_DOCS | _GENERATED_DOCS
-# Exact pre-capability scaffold documents shipped by the legacy Memory app.
-# They are safe to migrate because a byte mismatch means the partner or an
-# agent changed the file, in which case reconciliation leaves it untouched.
-_LEGACY_MANAGED_SHA256 = {
-  "index.md": frozenset({
-    "b787bbaa4fe77e4b55c664a4ee4c033197c17ba1e086b42a486e71c11087c92b",
-  }),
-  "mocs/about-the-user.md": frozenset({
-    "9c3178f0fff2e97d1fe19ac2b5828de4c9ed4e72a8c99b905f3b25d628e52eb4",
-  }),
-  "mocs/building-mobius-apps.md": frozenset({
-    "627ba8912e54aedc82555074c5dc3f8c0769bcbaa67da0efab522c9b2275c316",
-  }),
-  "mocs/maintaining-memory.md": frozenset({
-    "fc47234f6278213c99262c19c724f22f7946b782233526cb702250bea3398e7a",
-  }),
-  "mocs/mobius-platform.md": frozenset({
-    "b27048e5772f0b8924dae752403f45a0688bbd9e075abe458fed110d08157798",
-  }),
-  "notes/how-the-memory-graph-works.md": frozenset({
-    "f8c2bfe49d466eb133ff4888d144cae8f66e5edd0ae4a3fd3541a971fbd45eb1",
-  }),
-  "notes/memory-is-visible-to-the-partner.md": frozenset({
-    "f8b309a22f300c1d3a1b333c76ad136d99e8de376ffa97347095fa6cd9a85be5",
-  }),
-}
-_LEGACY_DELETE_SHA256 = {
-  "notes/a-nightly-reflection-pass-exists.md": frozenset({
-    "e983f7d847ab82349893f2d7f2a2abf631dafece4fe4628aeb7ad1d4951d0a61",
-  }),
-}
 _UNFILED_START = "<!-- memory-managed:unfiled:start -->"
 _UNFILED_END = "<!-- memory-managed:unfiled:end -->"
+
+
+@dataclass(frozen=True)
+class ProposalOutcome:
+  status: str
+  proposal: dict | None
+  provider: str | None
+  model: str | None
+  attempted_agents: list[dict]
 
 
 def _log(message: str) -> None:
@@ -120,27 +100,15 @@ def _is_memory_managed(text: str) -> bool:
 def _reconcile_app_owned_docs(
   staging: Path, seed_dir: Path,
 ) -> tuple[list[str], list[str]]:
-  """Refresh Memory-owned architecture docs and exact legacy scaffolds.
+  """Refresh documents that explicitly declare Memory app ownership.
 
   The knowledge graph is partner data, so ordinary files are never overwritten
-  just because a new app version ships. Two architecture documents explicitly
-  carry ``managed_by: memory`` and are app-owned. The legacy root + predecessors
-  are migrated only when their bytes exactly match known releases; any local
-  edit opts the file out automatically.
+  just because a new app version ships. A content hash proves which bytes are
+  present, not who owns them, so legacy hashes never authorize replacement or
+  deletion. Missing app-owned architecture documents are added from the seed.
   """
   changed: list[str] = []
-  deleted: list[str] = []
-  for rel, known_hashes in sorted(_LEGACY_DELETE_SHA256.items()):
-    target = staging / rel
-    if target.is_symlink() or (target.exists() and not target.is_file()):
-      raise ValueError(f"unsafe legacy Memory target: {rel}")
-    if not target.is_file():
-      continue
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    if digest in known_hashes:
-      target.unlink()
-      deleted.append(rel)
-  for rel in sorted(set(_MANAGED_DOCS) | set(_LEGACY_MANAGED_SHA256)):
+  for rel in sorted(_MANAGED_DOCS):
     source = seed_dir / rel
     target = staging / rel
     if source.is_symlink() or not source.is_file():
@@ -152,20 +120,14 @@ def _reconcile_app_owned_docs(
       current = target.read_text(encoding="utf-8")
     except FileNotFoundError:
       current = ""
-    digest = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else ""
-    app_owned = (
-      rel in _MANAGED_DOCS
-      and _is_memory_managed(current)
-    )
-    legacy_exact = digest in _LEGACY_MANAGED_SHA256.get(rel, ())
-    if current and not app_owned and not legacy_exact:
+    if current and not _is_memory_managed(current):
       continue
     if current == source_text:
       continue
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(source_text, encoding="utf-8")
     changed.append(rel)
-  return changed, deleted
+  return changed, []
 
 
 def _repair_orphans(staging: Path, graph: dict) -> list[str]:
@@ -244,6 +206,62 @@ def _repair_orphans(staging: Path, graph: dict) -> list[str]:
     root.write_text(next_root, encoding="utf-8")
     changed.append("index.md")
   return changed
+
+
+def _specific_reachable(graph: dict) -> set[str]:
+  """Return nodes reachable from the root without using the fallback MOC."""
+  node_ids = {
+    str(node.get("id")) for node in graph.get("nodes", [])
+    if isinstance(node, dict) and isinstance(node.get("id"), str)
+  }
+  adjacency: dict[str, list[str]] = {}
+  for edge in graph.get("edges", []):
+    if not isinstance(edge, dict):
+      continue
+    source = edge.get("source")
+    target = edge.get("target")
+    if not isinstance(source, str) or not isinstance(target, str):
+      continue
+    if source == "memory-unfiled" or target == "memory-unfiled":
+      continue
+    adjacency.setdefault(source, []).append(target)
+  reachable: set[str] = set()
+  pending = ["index"] if "index" in node_ids else []
+  while pending:
+    node_id = pending.pop()
+    if node_id in reachable:
+      continue
+    reachable.add(node_id)
+    pending.extend(adjacency.get(node_id, ()))
+  return reachable - {"index", "memory-unfiled"}
+
+
+def _assert_no_topology_regression(baseline: dict, candidate: dict) -> None:
+  """Refuse to demote surviving specifically-filed nodes into Unfiled."""
+  candidate_ids = {
+    str(node.get("id")) for node in candidate.get("nodes", [])
+    if isinstance(node, dict) and isinstance(node.get("id"), str)
+  }
+  lost = sorted(
+    (_specific_reachable(baseline) & candidate_ids)
+    - _specific_reachable(candidate)
+  )
+  if lost:
+    preview = ", ".join(lost[:20])
+    suffix = " ..." if len(lost) > 20 else ""
+    raise ValueError(
+      "memory topology regression would move specifically-filed nodes to "
+      f"Unfiled: {preview}{suffix}"
+    )
+
+
+def _topology_counts(graph: dict) -> dict[str, int]:
+  return {
+    "nodes": len(graph.get("nodes") or []),
+    "edges": len(graph.get("edges") or []),
+    "problems": len(graph.get("problems") or []),
+    "specifically_reachable": len(_specific_reachable(graph)),
+  }
 
 
 def _app_id() -> int | None:
@@ -440,8 +458,8 @@ Return ONLY one JSON object with this shape:
 At most {_MAX_UPDATES} updates and {_MAX_DELETES} deletes. Update paths may be
 index.md, notes/<slug>.md, or mocs/<slug>.md. Delete paths may be notes/<slug>.md
 or mocs/<slug>.md; never index.md. Deletion is appropriate only after a fact was
-merged, superseded, or is demonstrably stale. Published generations are
-immutable, so the prior generation remains a rollback source.
+merged, superseded, or is demonstrably stale. Published commits are immutable,
+so earlier graph states remain rollback sources in Git history.
 An empty updates array is correct when nothing clears the inclusion bar.
 
 DATA:\n{payload}
@@ -455,13 +473,14 @@ def _claude_proposal(choice: dict, prompt: str) -> dict | None:
   }
   cmd = [
     os.environ.get("CLAUDE_CLI_PATH", "/usr/local/bin/claude"),
-    "-p", prompt, "--tools", "", "--output-format", "text",
+    "-p", "--tools", "", "--output-format", "text",
   ]
   if choice.get("model"):
     cmd += ["--model", str(choice["model"])]
   with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
     proc = subprocess.run(
-      cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=TIMEOUT,
+      cmd, input=prompt, cwd=cwd, env=env, capture_output=True, text=True,
+      timeout=TIMEOUT, start_new_session=True,
     )
   if proc.returncode != 0:
     return None
@@ -475,24 +494,114 @@ def _claude_proposal(choice: dict, prompt: str) -> dict | None:
   return value if isinstance(value, dict) else None
 
 
-def _proposal(app_id: int, staging: Path, chats: list[dict]) -> dict:
+def _codex_agent_text(stdout: str) -> str:
+  parts: list[str] = []
+  for raw_line in stdout.splitlines():
+    try:
+      event = json.loads(raw_line)
+    except (TypeError, ValueError):
+      continue
+    if event.get("type") not in ("item.completed", "agent_message"):
+      continue
+    item = event.get("item") if isinstance(event.get("item"), dict) else event
+    if item.get("type") not in ("agent_message", "agentMessage"):
+      continue
+    value = item.get("text") or item.get("content")
+    if isinstance(value, str) and value:
+      parts.append(value)
+  return "".join(parts)
+
+
+def _codex_proposal(choice: dict, prompt: str) -> dict | None:
+  codex = os.environ.get("CODEX_CLI_PATH") or shutil.which("codex")
+  if not codex:
+    return None
+  env = {
+    key: value for key, value in os.environ.items()
+    if key in ("PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME")
+  }
+  cmd = [
+    codex, "exec", "--json", "--ephemeral", "--ignore-user-config",
+    "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+    "--sandbox", "read-only", "--color", "never",
+  ]
+  # Match the platform's reviewed text-only compaction seam: disable every
+  # feature that can expose shell, app, browser, computer, delegation, image,
+  # or goal tools. The read-only sandbox is defense in depth.
+  for feature in (
+    "shell_tool", "unified_exec", "apps", "browser_use",
+    "browser_use_external", "browser_use_full_cdp_access", "computer_use",
+    "multi_agent", "image_generation", "goals",
+  ):
+    cmd.extend(("--disable", feature))
+  if choice.get("model"):
+    cmd.extend(("--model", str(choice["model"])))
+  effort = choice.get("effort")
+  if effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+    cmd.extend(("--config", f"model_reasoning_effort={json.dumps(effort)}"))
+  cmd.append("-")
+  with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
+    proc = subprocess.Popen(
+      cmd, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    try:
+      stdout, _stderr = proc.communicate(prompt, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+      try:
+        os.killpg(proc.pid, signal.SIGKILL)
+      except ProcessLookupError:
+        pass
+      proc.communicate()
+      return None
+  if proc.returncode != 0:
+    return None
+  raw = _codex_agent_text(stdout).strip()
+  if raw.startswith("```"):
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
+  try:
+    value = json.loads(raw)
+  except ValueError:
+    return None
+  return value if isinstance(value, dict) else None
+
+
+def _proposal(app_id: int, staging: Path, chats: list[dict]) -> ProposalOutcome:
   prompt = _proposal_prompt(staging, chats)
+  attempted = []
   for choice in _agent_choices(app_id):
-    # Claude's explicit empty tool set is the only verified text-only provider
-    # in this deployment. Codex's host CLI is intentionally not used here.
-    if choice.get("provider") != "claude":
+    provider = str(choice.get("provider") or "")
+    analyst = {"claude": _claude_proposal, "codex": _codex_proposal}.get(provider)
+    attempted.append({
+      "provider": provider or None,
+      "model": str(choice.get("model")) if choice.get("model") else None,
+      "supported": analyst is not None,
+    })
+    if analyst is None:
       continue
     try:
-      value = _claude_proposal(choice, prompt)
+      value = analyst(choice, prompt)
     except (OSError, subprocess.TimeoutExpired):
       value = None
     if value is not None:
-      return value
-  return {"summary": "No safe text-only provider available; graph rebuilt without semantic changes.", "followups": [], "updates": [], "deletes": []}
+      return ProposalOutcome(
+        status="ok",
+        proposal=value,
+        provider=provider,
+        model=str(choice.get("model")) if choice.get("model") else None,
+        attempted_agents=attempted,
+      )
+  return ProposalOutcome(
+    status="degraded",
+    proposal=None,
+    provider=None,
+    model=None,
+    attempted_agents=attempted,
+  )
 
 
 def _known_chat_sources(staging: Path) -> set[str]:
-  """Return provenance ids already present in the pinned source generation."""
+  """Return provenance ids already present in the pinned source commit."""
   known: set[str] = set()
   notes = staging / "notes"
   if not notes.is_dir() or notes.is_symlink():
@@ -577,18 +686,29 @@ def _apply_proposal(
 
 
 def _append_update_log(
+  run_id: str,
+  previous_commit: str | None,
   pointer: dict,
   proposal: dict,
   changed: list[str],
   deleted: list[str],
+  baseline: dict,
   graph: dict,
+  provider: str | None,
+  model: str | None,
 ) -> None:
   STATE.mkdir(parents=True, exist_ok=True)
   path = STATE / "update-log" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
   path.parent.mkdir(parents=True, exist_ok=True)
   record = {
+    "schema": 1,
+    "run_id": run_id,
+    "status": "published",
     "timestamp": datetime.now(UTC).isoformat(),
-    "generation": pointer["generation"],
+    "previous_commit": previous_commit,
+    "commit": pointer["commit"],
+    "provider": provider,
+    "model": model,
     "summary": str(proposal.get("summary") or "")[:1000],
     "changed_paths": changed,
     "deleted_paths": deleted,
@@ -596,6 +716,10 @@ def _append_update_log(
       "nodes": len(graph.get("nodes") or []),
       "edges": len(graph.get("edges") or []),
       "problems": len(graph.get("problems") or []),
+    },
+    "topology": {
+      "before": _topology_counts(baseline),
+      "after": _topology_counts(graph),
     },
     "followups": proposal.get("followups") if isinstance(proposal.get("followups"), list) else [],
   }
@@ -605,19 +729,77 @@ def _append_update_log(
     os.fsync(handle.fileno())
 
 
+def _record_run_status(record: dict) -> None:
+  """Persist both the current status and an append-only operational event."""
+  write_run_status(record)
+  try:
+    path = STATE / "run-log" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+      handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+      handle.flush()
+      os.fsync(handle.fileno())
+  except OSError as exc:
+    _log(f"WARN run status saved but append-only run log failed: {exc!r}")
+
+
 async def run() -> int:
+  started_at = datetime.now(UTC).isoformat()
   app_id = _app_id()
   if app_id is None or not APP_TOKEN or not _app_active(app_id):
     _log("ERROR missing scoped token or inactive app")
     return 1
   staging = None
+  run_id = "unstarted"
+  previous = ready_pointer()
+  baseline = None
   try:
-    _run_id, staging = start_staging(SEED_DIR)
+    run_id, staging = start_staging(SEED_DIR)
+    # Migration may legitimately advance the pointer before consolidation.
+    # Treat that imported commit as this run's immutable source revision.
+    previous = ready_pointer()
+    _record_run_status({
+      "schema": 1,
+      "run_id": run_id,
+      "status": "running",
+      "started_at": started_at,
+      "app_id": app_id,
+      "process_uid": os.getuid(),
+      "previous_commit": previous.get("commit") if previous else None,
+      "commit": previous.get("commit") if previous else None,
+    })
+    baseline = build_graph(staging, usage=load_usage())
     changed, deleted = _reconcile_app_owned_docs(staging, SEED_DIR)
     # Build once so the analyst receives a catalog even on first legacy import.
     build_graph(staging, usage=load_usage())
     chats = await asyncio.to_thread(_redacted_chats)
-    proposal = await asyncio.to_thread(_proposal, app_id, staging, chats)
+    raw_outcome = await asyncio.to_thread(_proposal, app_id, staging, chats)
+    if isinstance(raw_outcome, ProposalOutcome):
+      outcome = raw_outcome
+    else:
+      # Preserve the narrow test/integration seam for callers that provide an
+      # already-validated proposal without launching a child provider.
+      outcome = ProposalOutcome("ok", raw_outcome, None, None, [])
+    if outcome.status == "degraded":
+      finished_at = datetime.now(UTC).isoformat()
+      _record_run_status({
+        "schema": 1,
+        "run_id": run_id,
+        "status": "degraded",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "app_id": app_id,
+        "process_uid": os.getuid(),
+        "previous_commit": previous.get("commit") if previous else None,
+        "commit": previous.get("commit") if previous else None,
+        "attempted_agents": outcome.attempted_agents,
+        "reason": "no_valid_text_only_proposal",
+      })
+      _log("DEGRADED no configured text-only provider produced a valid proposal")
+      return 2
+    proposal = outcome.proposal
+    if not isinstance(proposal, dict):
+      raise ValueError("text-only provider returned no proposal object")
     proposed_changed, proposed_deleted = _apply_proposal(
       staging,
       proposal,
@@ -627,8 +809,9 @@ async def run() -> int:
     )
     changed.extend(proposed_changed)
     deleted.extend(proposed_deleted)
-    graph = build_graph(staging, usage=load_usage())
-    changed.extend(_repair_orphans(staging, graph))
+    candidate = build_graph(staging, usage=load_usage())
+    _assert_no_topology_regression(baseline, candidate)
+    changed.extend(_repair_orphans(staging, candidate))
     if changed:
       changed = list(dict.fromkeys(changed))
     graph = build_graph(staging, usage=load_usage())
@@ -639,24 +822,71 @@ async def run() -> int:
     if problems:
       raise ValueError(f"invalid memory graph: {problems!r}")
     if not _app_active(app_id):
-      _log("Memory app became inactive; publication aborted")
-      return 1
+      raise RuntimeError("Memory app became inactive; publication aborted")
     pointer = publish(staging)
     staging = None
+    status = {
+      "schema": 1,
+      "run_id": run_id,
+      "status": "published",
+      "started_at": started_at,
+      "finished_at": datetime.now(UTC).isoformat(),
+      "app_id": app_id,
+      "process_uid": os.getuid(),
+      "previous_commit": previous.get("commit") if previous else None,
+      "commit": pointer["commit"],
+      "new_commit": bool(pointer.get("changed")),
+      "provider": outcome.provider,
+      "model": outcome.model,
+      "changed_paths": changed,
+      "deleted_paths": deleted,
+      "topology": {
+        "before": _topology_counts(baseline),
+        "after": _topology_counts(graph),
+      },
+    }
     try:
-      _append_update_log(pointer, proposal, changed, deleted, graph)
+      _record_run_status(status)
+      _append_update_log(
+        run_id,
+        previous.get("commit") if previous else None,
+        pointer,
+        proposal,
+        changed,
+        deleted,
+        baseline,
+        graph,
+        outcome.provider,
+        outcome.model,
+      )
     except OSError as exc:
-      # The immutable graph is already durably published. App-owned telemetry
+      # The graph commit is already durably published. App-owned telemetry
       # is useful but cannot retroactively make that successful commit a
       # failure or truthfully claim the pointer did not advance.
       _log(f"WARN graph published but update log failed: {exc!r}")
     _log(
-      f"published {pointer['generation']} nodes={len(graph['nodes'])} "
-      f"changed={len(changed)} deleted={len(deleted)}"
+      f"published {pointer['commit']} nodes={len(graph['nodes'])} "
+      f"changed={len(changed)} deleted={len(deleted)} "
+      f"new_commit={pointer['changed']}"
     )
     return 0
   except Exception as exc:
-    _log(f"ERROR run failed without advancing pointer: {exc!r}")
+    try:
+      _record_run_status({
+        "schema": 1,
+        "run_id": run_id,
+        "status": "failed",
+        "started_at": started_at,
+        "finished_at": datetime.now(UTC).isoformat(),
+        "app_id": app_id,
+        "process_uid": os.getuid(),
+        "previous_commit": previous.get("commit") if previous else None,
+        "commit": previous.get("commit") if previous else None,
+        "error_class": type(exc).__name__,
+      })
+    except OSError:
+      pass
+    _log(f"ERROR run failed without publishing proposed graph changes: {exc!r}")
     return 1
   finally:
     discard_staging(staging)

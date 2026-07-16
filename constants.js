@@ -1,4 +1,5 @@
 export const NOTE_BASE = '/api/storage/shared/memory/';
+export const NOTE_GIT_BASE = '/api/storage/shared-git/memory/repository';
 // Self-hosted under /vendor (frontend/public/vendor/, precached by sw.js).
 // Prod CSP (script-src 'self' 'unsafe-inline' https://esm.sh) blocks
 // cdn.jsdelivr.net, which silently degraded the graph to the list view.

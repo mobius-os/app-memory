@@ -32,4 +32,4 @@ returned text and verified file pointers.
   at least one map ([[index]] → maps → notes). No orphans.
 - **Recall deliberately.** The main agent formulates what prior context it
   needs; Memory's tool-free reader selects paths from one pinned immutable
-  generation, and the host verifies them before opening files.
+  commit, and the host verifies them before opening files.

@@ -1,4 +1,4 @@
-"""App-owned deterministic builder for one immutable Memory generation."""
+"""App-owned deterministic builder for one Memory graph commit."""
 
 from __future__ import annotations
 
