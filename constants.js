@@ -10,6 +10,32 @@ export const PIXI_URL = '/vendor/pixi.js@8.19.0/pixi.min.js';
 export const MAX_LOCAL_DEPTH = 4;
 export const WIKILINK_RE = /\[\[\s*([^\]|#]+?)\s*(?:#[^\]|]*)?(?:\|\s*([^\]]+?)\s*)?\]\]/g;
 
+export const EFFORT_LEVELS = {
+  claude: [
+    { value: 'low', label: 'Low' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'high', label: 'High' },
+    { value: 'xhigh', label: 'Extra high' },
+    { value: 'max', label: 'Max' },
+    { value: 'ultracode', label: 'Ultracode' },
+  ],
+  codex: [
+    { value: 'none', label: 'None' },
+    { value: 'minimal', label: 'Minimal' },
+    { value: 'low', label: 'Low' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'high', label: 'High' },
+    { value: 'xhigh', label: 'Extra high' },
+  ],
+};
+
+export function defaultEffort(provider) {
+  const levels = EFFORT_LEVELS[provider] || [];
+  return levels.find((level) => level.value === 'medium')?.value
+    || levels[0]?.value
+    || 'medium';
+}
+
 // Stable, theme-agnostic accent palette for primary-MOC color coding.
 // Chosen for distinguishability in both light and dark mode; MOC nodes
 // themselves render in the theme accent so they read as "hubs".

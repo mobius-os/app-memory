@@ -233,11 +233,16 @@ export const CSS = `
   background:color-mix(in srgb,var(--surface) 82%,var(--bg)); border:1px solid var(--border);
 }
 .mobius-model-trigger__icon { width:26px; height:26px; border-radius:7px; }
-.mobius-model-mark { font-size:16px; line-height:1; }
+.mobius-model-trigger__icon svg { width:15px; height:15px; }
 .mobius-model-trigger__main { flex:1; min-width:0; display:flex; flex-direction:column; }
 .mobius-model-trigger__name,.mobius-model-trigger__id,.mobius-model-sheet__row-title,.mobius-model-sheet__row-id { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .mobius-model-trigger__name { font-size:13.5px; font-weight:500; line-height:1.3; }
 .mobius-model-trigger__id { font:11px/1.3 var(--mono); color:var(--muted); }
+.mobius-model-trigger__effort {
+  flex:none; padding:3px 7px; border:1px solid color-mix(in srgb,var(--accent) 24%,var(--border));
+  border-radius:999px; background:color-mix(in srgb,var(--accent) 12%,var(--surface));
+  color:var(--muted); font-size:11px; font-weight:500; line-height:1; white-space:nowrap;
+}
 .mobius-model-trigger__caret { flex:none; color:var(--muted); font-size:11px; }
 .mobius-model-sheet__backdrop {
   position:fixed; inset:0; z-index:1000; display:flex; align-items:flex-end; justify-content:center;
@@ -256,20 +261,42 @@ export const CSS = `
 .mobius-model-sheet__close { min-width:44px; min-height:44px; margin:-8px -8px -8px 0; padding:4px 6px; border:0; background:none; color:var(--accent); font:500 14px var(--font); cursor:pointer; }
 .mobius-model-sheet__body { min-height:0; overflow-y:auto; overscroll-behavior-y:contain; padding:0 8px 16px; }
 .mobius-model-sheet__group-head { display:flex; align-items:center; gap:8px; padding:12px 10px 6px; color:var(--muted); font-size:11px; font-weight:600; }
+.mobius-model-sheet__group-icon { width:18px; height:18px; display:grid; place-items:center; color:var(--text); }
+.mobius-model-sheet__group-icon svg { width:15px; height:15px; }
 .mobius-model-sheet__group-hint { font-weight:400; }
 .mobius-model-sheet__row { display:flex; align-items:center; gap:12px; width:100%; padding:9px 10px; border:0; border-radius:9px; background:none; color:var(--text); font:inherit; text-align:left; cursor:pointer; }
 .mobius-model-sheet__row.is-selected { background:color-mix(in srgb,var(--accent) 10%,var(--surface)); }
 .mobius-model-sheet__row:disabled { opacity:.45; cursor:not-allowed; }
 .mobius-model-sheet__row-icon { width:30px; height:30px; border-radius:8px; }
+.mobius-model-sheet__row-icon svg { width:16px; height:16px; }
 .mobius-model-sheet__row-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
 .mobius-model-sheet__row-title { font-size:14px; font-weight:500; }
 .mobius-model-sheet__row-id { color:var(--muted); font:12px var(--mono); }
 .mobius-model-sheet__check { width:18px; height:18px; flex:none; position:relative; border-radius:50%; background:var(--accent); border:1.5px solid var(--accent); }
 .mobius-model-sheet__check::after { content:''; position:absolute; left:5px; top:2px; width:5px; height:9px; border:1.5px solid var(--accent-fg); border-top:0; border-left:0; transform:rotate(45deg); }
+.mobius-model-sheet__effort { margin:2px 10px 8px 52px; }
 .mobius-model-sheet__empty { padding:16px 10px; color:var(--muted); font-size:13px; }
+.mobius-effort { margin-top:8px; display:flex; align-items:center; gap:10px; min-height:24px; }
+.mobius-effort-track { position:relative; display:flex; align-items:center; gap:10px; min-height:24px; padding:0 2px; }
+.mobius-effort-track::before { content:''; position:absolute; left:7px; right:7px; top:50%; height:2px; transform:translateY(-50%); background:var(--border); }
+.mobius-effort-stop {
+  position:relative; z-index:1; width:14px; height:14px; padding:0;
+  border:1px solid var(--border); border-radius:999px; background:var(--surface);
+  cursor:pointer; touch-action:manipulation; user-select:none;
+}
+.mobius-effort-stop.is-filled { background:var(--accent); border-color:var(--accent); }
+.mobius-effort-stop.is-active { transform:scale(1.3); box-shadow:0 0 0 3px var(--accent-dim); }
+.mobius-effort-stop:disabled { cursor:default; opacity:.55; pointer-events:none; }
+.mobius-effort-label { color:var(--muted); font-size:12px; line-height:1; white-space:nowrap; }
+.mobius-effort.is-disabled .mobius-effort-label { opacity:.55; }
 @media (hover:hover) and (pointer:fine) {
   .mobius-model-trigger:hover { border-color:var(--accent); }
   .mobius-model-sheet__row:hover:not(:disabled) { background:color-mix(in srgb,var(--accent) 8%,var(--surface)); }
+  .mobius-effort-stop:not(:disabled):not(.is-active):hover { border-color:var(--accent); }
+}
+@media (prefers-reduced-motion:no-preference) {
+  .mobius-effort-stop { transition:background .15s,border-color .15s,box-shadow .15s,transform .15s; }
+  .mobius-effort-stop:not(:disabled):active { opacity:.82; }
 }
 @media (min-width:620px) {
   .mobius-model-sheet__backdrop { align-items:center; padding:24px; }

@@ -12,7 +12,7 @@
 // Only App lives here: it owns top-level graph/note state, persistence wiring,
 // shell navigation state, and mounts the graph, list, and note-panel UI.
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { D3_URL, PALETTE, PIXI_URL, S } from './constants.js'
+import { D3_URL, EFFORT_LEVELS, PALETTE, PIXI_URL, S, defaultEffort } from './constants.js'
 import { CSS } from './theme.js'
 import { makeSharedMemoryStore } from './storage.js'
 import {
@@ -43,6 +43,7 @@ import { ChatGlyph } from './ui/ChatGlyph.jsx'
 import { TextGlyph } from './ui/TextGlyph.jsx'
 import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
+import { EffortStepper } from './ui/EffortStepper.jsx'
 
 export { makeSharedMemoryStore } from './storage.js'
 export {
@@ -64,19 +65,11 @@ export {
 } from './graph/render.jsx'
 
 const AGENT_PROVIDER_META = [
-  { key: 'codex', label: 'OpenAI Codex' },
   { key: 'claude', label: 'Claude Code' },
+  { key: 'codex', label: 'OpenAI Codex' },
 ];
 
 const FALLBACK_AGENT_GROUPS = [
-  {
-    key: 'codex',
-    label: 'OpenAI Codex',
-    models: [
-      { id: 'gpt-5.5', name: 'gpt-5.5' },
-      { id: 'gpt-5.4', name: 'gpt-5.4' },
-    ],
-  },
   {
     key: 'claude',
     label: 'Claude Code',
@@ -87,6 +80,14 @@ const FALLBACK_AGENT_GROUPS = [
       { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
       { id: 'claude-sonnet-4-5-20251001', name: 'Sonnet 4.5' },
       { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5' },
+    ],
+  },
+  {
+    key: 'codex',
+    label: 'OpenAI Codex',
+    models: [
+      { id: 'gpt-5.5', name: 'gpt-5.5' },
+      { id: 'gpt-5.4', name: 'gpt-5.4' },
     ],
   },
 ];
@@ -112,6 +113,17 @@ function buildAgentGroups(payload) {
 
 function isKnownAgentProvider(provider) {
   return AGENT_PROVIDER_META.some((meta) => meta.key === provider);
+}
+
+function effortForProvider(provider, value) {
+  const levels = EFFORT_LEVELS[provider] || [];
+  return levels.some((level) => level.value === value)
+    ? value
+    : defaultEffort(provider);
+}
+
+function effortLabel(provider, value) {
+  return (EFFORT_LEVELS[provider] || []).find((level) => level.value === value)?.label || value;
 }
 
 export default function App({ appId, token }) {
@@ -140,9 +152,11 @@ export default function App({ appId, token }) {
   const [primaryAgentMode, setPrimaryAgentMode] = useState('system');
   const [agentProvider, setAgentProvider] = useState('claude');
   const [agentModel, setAgentModel] = useState('');
+  const [agentEffort, setAgentEffort] = useState(defaultEffort('claude'));
   const [secondaryAgentMode, setSecondaryAgentMode] = useState('system');
   const [secondaryAgentProvider, setSecondaryAgentProvider] = useState('');
   const [secondaryAgentModel, setSecondaryAgentModel] = useState('');
+  const [secondaryAgentEffort, setSecondaryAgentEffort] = useState('');
   const [agentSaving, setAgentSaving] = useState(false);
   const [agentMessage, setAgentMessage] = useState('');
   const [localDepth, setLocalDepth] = useState(1);
@@ -588,21 +602,27 @@ export default function App({ appId, token }) {
       const modelValue = typeof safeSettings.model === 'string'
         ? safeSettings.model.trim()
         : '';
+      const effortValue = typeof safeSettings.effort === 'string'
+        ? safeSettings.effort.trim()
+        : '';
       const fallbackProviderValue = typeof safeSettings.fallback_provider === 'string'
         ? safeSettings.fallback_provider.trim()
         : '';
       const fallbackModelValue = typeof safeSettings.fallback_model === 'string'
         ? safeSettings.fallback_model.trim()
         : '';
+      const fallbackEffortValue = typeof safeSettings.fallback_effort === 'string'
+        ? safeSettings.fallback_effort.trim()
+        : '';
 
       const primaryMode = safeSettings.primary_agent_mode === 'custom'
         || safeSettings.primary_agent_mode === 'app'
-        || (safeSettings.primary_agent_mode !== 'system' && Boolean(providerValue || modelValue))
+        || (safeSettings.primary_agent_mode !== 'system' && Boolean(providerValue || modelValue || effortValue))
         ? 'app'
         : 'system';
       const secondaryMode = safeSettings.secondary_agent_mode === 'custom'
         || safeSettings.secondary_agent_mode === 'app'
-        || (safeSettings.secondary_agent_mode !== 'system' && Boolean(fallbackProviderValue || fallbackModelValue))
+        || (safeSettings.secondary_agent_mode !== 'system' && Boolean(fallbackProviderValue || fallbackModelValue || fallbackEffortValue))
         ? 'app'
         : 'system';
       setPrimaryAgentMode(primaryMode);
@@ -611,6 +631,7 @@ export default function App({ appId, token }) {
       if (isKnownAgentProvider(providerValue)) {
         setAgentProvider(providerValue);
         setAgentModel(modelValue);
+        setAgentEffort(effortForProvider(providerValue, effortValue));
       } else {
         const chosen = groups.find((group) => (!connected || connected.has(group.key)) && group.models?.length)
           || groups.find((group) => group.models?.length)
@@ -618,11 +639,13 @@ export default function App({ appId, token }) {
         if (chosen) {
           setAgentProvider(chosen.key);
           setAgentModel(chosen.models?.[0]?.id || '');
+          setAgentEffort(defaultEffort(chosen.key));
         }
       }
       if (isKnownAgentProvider(fallbackProviderValue)) {
         setSecondaryAgentProvider(fallbackProviderValue);
         setSecondaryAgentModel(fallbackModelValue);
+        setSecondaryAgentEffort(effortForProvider(fallbackProviderValue, fallbackEffortValue));
       }
       setAgentStatus('ready');
     } catch (err) {
@@ -706,25 +729,31 @@ export default function App({ appId, token }) {
     setPrimaryAgentMode(mode);
     setAgentMessage('');
     if (mode !== 'app') return;
-    if (isKnownAgentProvider(agentProvider)) return;
+    const currentGroup = (agentGroups || FALLBACK_AGENT_GROUPS)
+      .find((group) => group.key === agentProvider);
+    if (currentGroup?.models?.some((item) => item.id === agentModel)) return;
     const chosen = chooseAgentGroup();
     if (chosen) {
       setAgentProvider(chosen.key);
       setAgentModel(chosen.models?.[0]?.id || '');
+      setAgentEffort(defaultEffort(chosen.key));
     }
-  }, [agentProvider, chooseAgentGroup]);
+  }, [agentGroups, agentProvider, agentModel, chooseAgentGroup]);
 
   const setSecondaryAgentModeChoice = useCallback((mode) => {
     setSecondaryAgentMode(mode);
     setAgentMessage('');
     if (mode !== 'app') return;
-    if (isKnownAgentProvider(secondaryAgentProvider)) return;
+    const currentGroup = (agentGroups || FALLBACK_AGENT_GROUPS)
+      .find((group) => group.key === secondaryAgentProvider);
+    if (currentGroup?.models?.some((item) => item.id === secondaryAgentModel)) return;
     const chosen = chooseAgentGroup(agentProvider);
     if (chosen) {
       setSecondaryAgentProvider(chosen.key);
       setSecondaryAgentModel(chosen.models?.[0]?.id || '');
+      setSecondaryAgentEffort(defaultEffort(chosen.key));
     }
-  }, [agentProvider, secondaryAgentProvider, chooseAgentGroup]);
+  }, [agentGroups, agentProvider, secondaryAgentProvider, secondaryAgentModel, chooseAgentGroup]);
 
   const saveAgentSettings = useCallback(async () => {
     if (agentSaving) return;
@@ -735,14 +764,14 @@ export default function App({ appId, token }) {
       primary_agent_mode: primaryAgentMode === 'app' ? 'app' : 'system',
       provider: primaryAgentMode === 'app' ? (agentProvider || 'claude') : null,
       model: primaryAgentMode === 'app' ? (agentModel || null) : null,
-      effort: primaryAgentMode === 'app' ? (agentSettingsExtra.effort ?? null) : null,
+      effort: primaryAgentMode === 'app' ? effortForProvider(agentProvider, agentEffort) : null,
       secondary_agent_mode: secondaryAgentMode === 'app' ? 'app' : 'system',
       fallback_provider: secondaryAgentMode === 'app' ? (secondaryAgentProvider || null) : null,
       fallback_model: secondaryAgentMode === 'app' && secondaryAgentProvider
         ? (secondaryAgentModel || null)
         : null,
       fallback_effort: secondaryAgentMode === 'app' && secondaryAgentProvider
-        ? (agentSettingsExtra.fallback_effort ?? null)
+        ? effortForProvider(secondaryAgentProvider, secondaryAgentEffort)
         : null,
     };
     try {
@@ -775,9 +804,11 @@ export default function App({ appId, token }) {
     primaryAgentMode,
     agentProvider,
     agentModel,
+    agentEffort,
     secondaryAgentMode,
     secondaryAgentProvider,
     secondaryAgentModel,
+    secondaryAgentEffort,
   ]);
 
   // The detail drawer is modal on phone and desktop (it owns a scrim), so it
@@ -1083,9 +1114,14 @@ export default function App({ appId, token }) {
                         connectedProviders={connectedProviders}
                         title="Memory primary model"
                         navKey="memory-primary-model"
+                        effortLabel={effortLabel(agentProvider, agentEffort)}
+                        effortControl={(
+                          <EffortStepper provider={agentProvider} value={agentEffort} onChange={setAgentEffort} />
+                        )}
                         onChange={(nextProvider, nextModel) => {
                           setAgentProvider(nextProvider);
                           setAgentModel(nextModel);
+                          setAgentEffort(effortForProvider(nextProvider, agentEffort));
                           setAgentMessage('');
                         }}
                       />
@@ -1123,9 +1159,18 @@ export default function App({ appId, token }) {
                         connectedProviders={connectedProviders}
                         title="Memory secondary model"
                         navKey="memory-secondary-model"
+                        effortLabel={effortLabel(secondaryAgentProvider, secondaryAgentEffort)}
+                        effortControl={(
+                          <EffortStepper
+                            provider={secondaryAgentProvider}
+                            value={secondaryAgentEffort}
+                            onChange={setSecondaryAgentEffort}
+                          />
+                        )}
                         onChange={(nextProvider, nextModel) => {
                           setSecondaryAgentProvider(nextProvider);
                           setSecondaryAgentModel(nextModel);
+                          setSecondaryAgentEffort(effortForProvider(nextProvider, secondaryAgentEffort));
                           setAgentMessage('');
                         }}
                       />
