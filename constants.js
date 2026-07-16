@@ -30,7 +30,8 @@ export const S = {
   },
   header: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '11px 14px', borderBottom: '1px solid var(--border)',
+    padding: 'max(11px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 11px max(14px, env(safe-area-inset-left))',
+    borderBottom: '1px solid var(--border)',
     background: 'var(--surface)', flexShrink: 0, gap: 12, position: 'relative', zIndex: 5,
   },
   brand: { display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 },
@@ -54,7 +55,7 @@ export const S = {
   },
   headerRight: { display: 'flex', alignItems: 'center', gap: 8 },
   settingsBtn: {
-    minHeight: 34, border: '1px solid var(--border)', borderRadius: 8,
+    minHeight: 44, border: '1px solid var(--border)', borderRadius: 8,
     background: 'var(--surface2)', color: 'var(--muted)', cursor: 'pointer',
     fontFamily: 'var(--font)', fontSize: 12.5, fontWeight: 650,
     padding: '0 11px', transition: 'color 0.15s, background 0.15s',
@@ -86,7 +87,7 @@ export const S = {
     fontSize: 11.5, fontWeight: 650, color: 'var(--muted)', whiteSpace: 'nowrap',
   },
   timeInput: {
-    height: 36, minWidth: 116, borderRadius: 8, border: '1px solid var(--border)',
+    height: 44, minWidth: 116, borderRadius: 8, border: '1px solid var(--border)',
     background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font)',
     fontSize: 13, fontWeight: 650, padding: '0 9px',
   },
@@ -97,14 +98,14 @@ export const S = {
     display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto',
   },
   settingsGhostBtn: {
-    height: 36, borderRadius: 8, border: '1px solid var(--border)',
+    height: 44, borderRadius: 8, border: '1px solid var(--border)',
     background: 'transparent', color: 'var(--muted)', cursor: 'pointer',
     fontFamily: 'var(--font)', fontSize: 12.5, fontWeight: 650,
     padding: '0 12px',
   },
   settingsSaveBtn: {
-    height: 36, borderRadius: 8, border: 'none', background: 'var(--accent)',
-    color: 'var(--accent-fg, #fff)', cursor: 'pointer', fontFamily: 'var(--font)',
+    height: 44, borderRadius: 8, border: 'none', background: 'var(--accent)',
+    color: 'var(--accent-fg)', cursor: 'pointer', fontFamily: 'var(--font)',
     fontSize: 12.5, fontWeight: 700, padding: '0 14px',
   },
   settingsSaveBtnDisabled: {
@@ -124,7 +125,7 @@ export const S = {
   toggleBtn: {
     display: 'flex', alignItems: 'center', border: 'none', background: 'transparent',
     color: 'var(--muted)', fontSize: 12.5, fontWeight: 600, padding: '5px 11px',
-    borderRadius: 6, cursor: 'pointer', fontFamily: 'var(--font)', transition: 'color 0.15s, background 0.15s',
+    minHeight: 44, borderRadius: 6, cursor: 'pointer', fontFamily: 'var(--font)', transition: 'color 0.15s, background 0.15s',
   },
   toggleActive: {
     background: 'var(--bg)', color: 'var(--text)',
@@ -134,7 +135,7 @@ export const S = {
   healthBadge: {
     display: 'flex', alignItems: 'center', gap: 6, border: '1px solid var(--border)',
     background: 'var(--surface2)', color: 'var(--text)', borderRadius: 9,
-    fontSize: 12, fontWeight: 700, padding: '5px 10px', cursor: 'pointer',
+    minHeight: 44, fontSize: 12, fontWeight: 700, padding: '5px 10px', cursor: 'pointer',
     fontFamily: 'var(--font)', fontVariantNumeric: 'tabular-nums',
   },
   healthWarn: {},
@@ -192,7 +193,7 @@ export const S = {
     color: 'var(--muted)', marginBottom: 8,
   },
   legendRow: {
-    display: 'flex', alignItems: 'center', gap: 9, padding: '3px 4px', width: '100%',
+    display: 'flex', alignItems: 'center', gap: 9, padding: '8px 4px', minHeight: 44, width: '100%',
     background: 'transparent', border: 'none', borderRadius: 6, cursor: 'pointer',
     textAlign: 'left', fontFamily: 'var(--font)', color: 'var(--text)',
   },
@@ -280,7 +281,7 @@ export const S = {
   },
   closeBtn: {
     border: 'none', background: 'var(--surface2)', color: 'var(--muted)',
-    width: 30, height: 30, borderRadius: 8, fontSize: 20, lineHeight: 1, cursor: 'pointer',
+    width: 44, height: 44, borderRadius: 8, fontSize: 20, lineHeight: 1, cursor: 'pointer',
     flexShrink: 0, fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
     justifyContent: 'center', transition: 'background 0.15s, color 0.15s',
   },
@@ -314,7 +315,7 @@ export const S = {
     background: 'var(--surface2)', border: '1px solid var(--border)', flexShrink: 0,
   },
   depthBtn: {
-    minWidth: 28, height: 26, border: 'none', borderRadius: 6, background: 'transparent',
+    minWidth: 44, height: 44, border: 'none', borderRadius: 6, background: 'transparent',
     color: 'var(--muted)', fontSize: 12, fontWeight: 700, fontFamily: 'var(--font)',
     cursor: 'pointer',
   },
@@ -327,7 +328,7 @@ export const S = {
   },
   tabBtn: {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
-    width: 32, height: 26, border: 'none', borderRadius: 6, background: 'transparent',
+    width: 44, height: 44, border: 'none', borderRadius: 6, background: 'transparent',
     color: 'var(--muted)', cursor: 'pointer', fontFamily: 'var(--font)',
     transition: 'color 0.15s, background 0.15s',
   },

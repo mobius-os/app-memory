@@ -842,6 +842,7 @@ export default function App({ appId, token }) {
   return (
     <div className="mg-root" style={S.root}>
       <style>{CSS}</style>
+      <h1 className="mg-sr-only">Memory</h1>
 
       <header style={S.header}>
         <div style={S.brand}>

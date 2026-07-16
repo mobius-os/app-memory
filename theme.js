@@ -25,6 +25,11 @@ export const CSS = `
 }
 /* /mobius-ui:Focus */
 
+.mg-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
 @keyframes mg-orbit-spin { to { transform: rotate(360deg); } }
 .mg-orbit {
   position: relative; width: 46px; height: 46px;
@@ -231,7 +236,7 @@ export const CSS = `
   }
   .mg-panel-head { padding: 11px 12px 8px !important; }
   .mg-panel .mg-close {
-    width: 34px !important; height: 34px !important; border-radius: 10px !important;
+    width: 44px !important; height: 44px !important; border-radius: 10px !important;
   }
   .mg-panel .mg-tag-row {
     flex-wrap: nowrap !important; overflow-x: auto; padding: 0 12px 7px !important;
