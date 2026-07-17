@@ -65,6 +65,7 @@ _GENERATED_DOCS = frozenset({"mocs/memory-unfiled.md"})
 _PROTECTED_DOCS = _MANAGED_DOCS | _GENERATED_DOCS
 _UNFILED_START = "<!-- memory-managed:unfiled:start -->"
 _UNFILED_END = "<!-- memory-managed:unfiled:end -->"
+_ACTIVE_AGENT_GROUPS: set[int] = set()
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,41 @@ def _log(message: str) -> None:
       handle.write(f"[{datetime.now(UTC).isoformat()}] memory_runner: {message}\n")
   except OSError:
     pass
+
+
+def _kill_agent_group(pid: int) -> None:
+  try:
+    os.killpg(pid, signal.SIGKILL)
+  except ProcessLookupError:
+    pass
+
+
+def _run_text_process(
+  cmd: list[str], prompt: str, *, cwd: str, env: dict[str, str],
+) -> tuple[int, str] | None:
+  """Run one isolated analyst and reap its whole session on timeout."""
+  proc = subprocess.Popen(
+    cmd, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE, text=True, start_new_session=True,
+  )
+  _ACTIVE_AGENT_GROUPS.add(proc.pid)
+  try:
+    try:
+      stdout, _stderr = proc.communicate(prompt, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+      _kill_agent_group(proc.pid)
+      proc.communicate()
+      return None
+    return proc.returncode, stdout
+  finally:
+    _ACTIVE_AGENT_GROUPS.discard(proc.pid)
+
+
+def _terminate_active_agents(signum: int, _frame) -> None:
+  """Do not let analyst sessions escape an outer schedule/container stop."""
+  for pid in tuple(_ACTIVE_AGENT_GROUPS):
+    _kill_agent_group(pid)
+  raise SystemExit(128 + signum)
 
 
 def _is_memory_managed(text: str) -> bool:
@@ -478,13 +514,10 @@ def _claude_proposal(choice: dict, prompt: str) -> dict | None:
   if choice.get("model"):
     cmd += ["--model", str(choice["model"])]
   with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
-    proc = subprocess.run(
-      cmd, input=prompt, cwd=cwd, env=env, capture_output=True, text=True,
-      timeout=TIMEOUT, start_new_session=True,
-    )
-  if proc.returncode != 0:
+    result = _run_text_process(cmd, prompt, cwd=cwd, env=env)
+  if result is None or result[0] != 0:
     return None
-  raw = (proc.stdout or "").strip()
+  raw = (result[1] or "").strip()
   if raw.startswith("```"):
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
   try:
@@ -541,21 +574,10 @@ def _codex_proposal(choice: dict, prompt: str) -> dict | None:
     cmd.extend(("--config", f"model_reasoning_effort={json.dumps(effort)}"))
   cmd.append("-")
   with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
-    proc = subprocess.Popen(
-      cmd, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-      stderr=subprocess.PIPE, text=True, start_new_session=True,
-    )
-    try:
-      stdout, _stderr = proc.communicate(prompt, timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-      try:
-        os.killpg(proc.pid, signal.SIGKILL)
-      except ProcessLookupError:
-        pass
-      proc.communicate()
-      return None
-  if proc.returncode != 0:
+    result = _run_text_process(cmd, prompt, cwd=cwd, env=env)
+  if result is None or result[0] != 0:
     return None
+  stdout = result[1]
   raw = _codex_agent_text(stdout).strip()
   if raw.startswith("```"):
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
@@ -893,6 +915,8 @@ async def run() -> int:
 
 
 def main() -> None:
+  signal.signal(signal.SIGTERM, _terminate_active_agents)
+  signal.signal(signal.SIGINT, _terminate_active_agents)
   raise SystemExit(asyncio.run(run()))
 
 

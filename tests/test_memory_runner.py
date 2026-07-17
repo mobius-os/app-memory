@@ -236,11 +236,19 @@ class MemoryRunnerTests(unittest.TestCase):
       _store, runner = _load(Path(raw))
       captured = {}
 
-      def fake_run(cmd, **kwargs):
-        captured.update({"cmd": cmd, **kwargs})
-        return subprocess.CompletedProcess(cmd, 0, '{"updates":[]}', "")
+      class FakePopen:
+        pid = 999998
+        returncode = 0
 
-      with mock.patch.object(runner.subprocess, "run", side_effect=fake_run):
+        def __init__(self, cmd, **kwargs):
+          captured.update({"cmd": cmd, **kwargs})
+
+        def communicate(self, value=None, timeout=None):
+          captured["input"] = value
+          captured["timeout"] = timeout
+          return '{"updates":[]}', ""
+
+      with mock.patch.object(runner.subprocess, "Popen", FakePopen):
         value = runner._claude_proposal({"provider": "claude"}, "prompt")
 
       self.assertEqual(value, {"updates": []})
@@ -248,9 +256,56 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertEqual(captured["cmd"][captured["cmd"].index("--tools") + 1], "")
       self.assertEqual(captured["input"], "prompt")
       self.assertNotIn("prompt", captured["cmd"])
+      self.assertTrue(captured["start_new_session"])
       for key in ("APP_TOKEN", "SERVICE_TOKEN", "AGENT_TOKEN", "API_BASE_URL", "DATA_DIR"):
         self.assertNotIn(key, captured["env"])
       self.assertTrue(captured["cwd"].startswith("/tmp/memory-agent-"))
+
+  def test_agent_timeout_kills_and_reaps_the_whole_process_session(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+
+      class TimedOutPopen:
+        pid = 123456
+        returncode = -9
+        calls = 0
+
+        def __init__(self, _cmd, **_kwargs):
+          pass
+
+        def communicate(self, _value=None, timeout=None):
+          self.calls += 1
+          if self.calls == 1:
+            raise subprocess.TimeoutExpired("agent", timeout)
+          return "", ""
+
+      with (
+        mock.patch.object(runner.subprocess, "Popen", TimedOutPopen),
+        mock.patch.object(runner.os, "killpg") as killpg,
+      ):
+        result = runner._run_text_process(
+          ["agent"], "prompt", cwd=raw, env={"PATH": "/usr/bin"},
+        )
+
+      self.assertIsNone(result)
+      killpg.assert_called_once_with(123456, runner.signal.SIGKILL)
+      self.assertEqual(runner._ACTIVE_AGENT_GROUPS, set())
+
+  def test_shutdown_signal_kills_every_active_agent_group(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      runner._ACTIVE_AGENT_GROUPS.update({123456, 234567})
+      try:
+        with mock.patch.object(runner, "_kill_agent_group") as kill_group:
+          with self.assertRaises(SystemExit) as raised:
+            runner._terminate_active_agents(runner.signal.SIGTERM, None)
+        self.assertEqual(raised.exception.code, 128 + runner.signal.SIGTERM)
+        self.assertEqual(
+          {call.args[0] for call in kill_group.call_args_list},
+          {123456, 234567},
+        )
+      finally:
+        runner._ACTIVE_AGENT_GROUPS.clear()
 
   def test_codex_child_is_ephemeral_read_only_and_gets_no_credentials(self):
     with tempfile.TemporaryDirectory() as raw:
