@@ -10,6 +10,28 @@ from pathlib import Path
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 
+# Structural-quality thresholds. These drive *warnings*, not errors: they flag
+# split candidates so run-status/update-log can resurface them, but they never
+# block publication of an otherwise-valid commit (see run() in memory_runner).
+MAX_NOTE_PROSE_LINES = 30  # one atomic claim per note; longer prose = split it
+MAX_MAP_ENTRIES = 30  # a map this wide is a navigation hazard; split into submaps
+
+
+def _prose_line_count(text: str) -> int:
+  """Non-blank body lines, excluding the YAML frontmatter block.
+
+  The oversized-note heuristic measures prose length, not byte size, so a note
+  with long wrapped lines is not penalised while a note that has accreted many
+  separate claims is. Blank lines and frontmatter do not count.
+  """
+  body = text
+  if text.startswith("---\n"):
+    end = text.find("\n---", 4)
+    if end >= 0:
+      newline = text.find("\n", end + 1)
+      body = text[newline + 1:] if newline >= 0 else ""
+  return sum(1 for line in body.splitlines() if line.strip())
+
 
 def _frontmatter(text: str) -> dict:
   if not text.startswith("---\n"):
@@ -62,6 +84,7 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
     if previous_path is not None:
       problems.append({
         "kind": "duplicate_id",
+        "severity": "error",
         "node": node_id,
         "paths": [previous_path, rel],
       })
@@ -86,7 +109,26 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
       "bytes": len(text.encode("utf-8")),
     })
     paths_by_id.setdefault(node_id, rel)
-    links_by_source[node_id] = [match.strip() for match in _WIKILINK.findall(text)]
+    wikilinks = [match.strip() for match in _WIKILINK.findall(text)]
+    links_by_source[node_id] = wikilinks
+    if node_type == "moc":
+      entries = {Path(target).stem for target in wikilinks if target}
+      if len(entries) > MAX_MAP_ENTRIES:
+        problems.append({
+          "kind": "overfull_map",
+          "severity": "warning",
+          "node": node_id,
+          "entries": len(entries),
+        })
+    else:
+      prose_lines = _prose_line_count(text)
+      if prose_lines > MAX_NOTE_PROSE_LINES:
+        problems.append({
+          "kind": "oversized_note",
+          "severity": "warning",
+          "node": node_id,
+          "lines": prose_lines,
+        })
 
   ids = set(paths_by_id)
   edges = []
@@ -96,7 +138,8 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
       target = Path(raw_target).stem
       if target not in ids:
         problems.append({
-          "kind": "dangling_link", "source": source, "target": raw_target,
+          "kind": "dangling_link", "severity": "error",
+          "source": source, "target": raw_target,
         })
         continue
       key = (source, target)
@@ -116,7 +159,20 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
     pending.extend(adjacency.get(node_id, ()))
   for node in nodes:
     if node["id"] != "index" and node["id"] not in reachable:
-      problems.append({"kind": "orphan", "node": node["id"]})
+      problems.append({"kind": "orphan", "severity": "error", "node": node["id"]})
+  moc_ids = {node["id"] for node in nodes if node["type"] == "moc"}
+  for node in nodes:
+    if node["type"] == "moc":
+      continue
+    for moc in node["mocs"]:
+      target = Path(str(moc)).stem
+      if target and target not in moc_ids:
+        problems.append({
+          "kind": "bare_map_entry",
+          "severity": "warning",
+          "node": node["id"],
+          "moc": str(moc),
+        })
   result = {
     "schema": 1,
     "generated_at": datetime.now(UTC).isoformat(),

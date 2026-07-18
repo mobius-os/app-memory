@@ -837,12 +837,16 @@ async def run() -> int:
     if changed:
       changed = list(dict.fromkeys(changed))
     graph = build_graph(staging, usage=load_usage())
-    problems = [
+    # Only structural errors block publication. Warnings (oversized_note,
+    # overfull_map, bare_map_entry) are split candidates: they ride along in
+    # graph.json and are counted in run-status/update-log so the partner can
+    # act on them, but they must not fail an otherwise-valid commit.
+    blocking = [
       problem for problem in graph.get("problems", [])
-      if isinstance(problem, dict)
+      if isinstance(problem, dict) and problem.get("severity") != "warning"
     ]
-    if problems:
-      raise ValueError(f"invalid memory graph: {problems!r}")
+    if blocking:
+      raise ValueError(f"invalid memory graph: {blocking!r}")
     if not _app_active(app_id):
       raise RuntimeError("Memory app became inactive; publication aborted")
     pointer = publish(staging)

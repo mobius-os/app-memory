@@ -1,6 +1,6 @@
 {
   "name": "app-memory",
-  "version": "2.1.4",
+  "version": "2.1.5",
   "private": true,
   "type": "module",
   "description": "Dev/test harness only — Mobius installs index.jsx as a single compiled module.",

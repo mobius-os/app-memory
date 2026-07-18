@@ -212,6 +212,81 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertIn("[[cycle-b]]", unfiled)
       self.assertIn("[[later]]", unfiled)
 
+  def test_structural_lints_surface_as_warnings_not_errors(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      (staging / "mocs").mkdir(parents=True)
+      (staging / "notes").mkdir()
+      # A fully linked graph so orphan/dangling errors cannot mask the lints;
+      # the split-candidate warnings must be the only problems reported.
+      (staging / "index.md").write_text(
+        "---\ntitle: Home\ntype: moc\n---\n# Home\n\n- [[map]]\n",
+        encoding="utf-8",
+      )
+      (staging / "mocs" / "map.md").write_text(
+        "---\ntitle: Map\ntype: moc\n---\n# Map\n\n"
+        "- [[sprawling]]\n- [[filed-nowhere]]\n",
+        encoding="utf-8",
+      )
+      # 40 prose lines > MAX_NOTE_PROSE_LINES (30) -> oversized_note.
+      body = "\n".join(f"Distinct claim number {i}." for i in range(40))
+      (staging / "notes" / "sprawling.md").write_text(
+        "---\ntitle: Sprawling\ntype: note\nmocs: [map]\n---\n" + body + "\n",
+        encoding="utf-8",
+      )
+      # mocs points at a map that does not exist -> bare_map_entry.
+      (staging / "notes" / "filed-nowhere.md").write_text(
+        "---\ntitle: Filed nowhere\ntype: note\nmocs: [ghost-map]\n---\nShort.\n",
+        encoding="utf-8",
+      )
+
+      graph = runner.build_graph(staging, usage={})
+
+      by_kind = {p["kind"]: p for p in graph["problems"]}
+      self.assertIn("oversized_note", by_kind)
+      self.assertEqual(by_kind["oversized_note"]["node"], "sprawling")
+      self.assertGreater(by_kind["oversized_note"]["lines"], 30)
+      self.assertIn("bare_map_entry", by_kind)
+      self.assertEqual(by_kind["bare_map_entry"]["node"], "filed-nowhere")
+      # Every reported problem is a warning, so none of them block publication
+      # under the same predicate the runner uses.
+      for problem in graph["problems"]:
+        self.assertEqual(problem["severity"], "warning", problem)
+      blocking = [
+        p for p in graph["problems"] if p.get("severity") != "warning"
+      ]
+      self.assertEqual(blocking, [])
+
+  def test_overfull_map_is_flagged_as_a_split_candidate(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      (staging / "mocs").mkdir(parents=True)
+      (staging / "notes").mkdir()
+      entries = "".join(f"- [[note-{i}]]\n" for i in range(31))
+      (staging / "index.md").write_text(
+        "---\ntitle: Home\ntype: moc\n---\n# Home\n\n- [[map]]\n",
+        encoding="utf-8",
+      )
+      (staging / "mocs" / "map.md").write_text(
+        "---\ntitle: Map\ntype: moc\n---\n# Map\n\n" + entries,
+        encoding="utf-8",
+      )
+      for i in range(31):
+        (staging / "notes" / f"note-{i}.md").write_text(
+          f"---\ntitle: Note {i}\ntype: note\nmocs: [map]\n---\nBody.\n",
+          encoding="utf-8",
+        )
+
+      problems = runner.build_graph(staging, usage={})["problems"]
+
+      overfull = [p for p in problems if p["kind"] == "overfull_map"]
+      self.assertEqual(len(overfull), 1)
+      self.assertEqual(overfull[0]["node"], "map")
+      self.assertEqual(overfull[0]["severity"], "warning")
+      self.assertGreater(overfull[0]["entries"], 30)
+
   def test_invalid_model_provenance_fails_without_advancing_pointer(self):
     with tempfile.TemporaryDirectory() as raw:
       store, runner = _load(Path(raw))
