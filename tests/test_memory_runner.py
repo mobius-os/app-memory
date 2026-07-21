@@ -305,6 +305,12 @@ class MemoryRunnerTests(unittest.TestCase):
 
       self.assertEqual(store.ready_pointer()["commit"], old["commit"])
       self.assertEqual(store._git("status", "--porcelain", text=True).stdout, "")
+      status = json.loads((store.STATE / "run-status.json").read_text())
+      self.assertEqual(status["error_code"], "unverified_chat_provenance")
+      self.assertEqual(status["offending_path"], "notes/quiet-ui.md")
+      self.assertEqual(status["invalid_source_count"], 1)
+      pending = json.loads(runner._PENDING_CHAT_IDS.read_text())
+      self.assertEqual(pending["chat_ids"], ["chat-1"])
 
   def test_claude_child_gets_no_platform_or_app_credentials(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -495,6 +501,148 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertLessEqual(len(encoded), runner._MAX_PROMPT_DATA_CHARS)
       self.assertTrue(value["redacted_recent_chats"])
       self.assertLess(len(value["redacted_recent_chats"]), len(chats))
+
+  def test_proposal_data_exposes_short_handles_not_canonical_chat_ids(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      staging.mkdir()
+      canonical = "1f905105-a3a6-4a67-a6e3-1b34ea6963d8"
+
+      data = json.loads(runner._proposal_data(staging, [{
+        "id": canonical, "title": "Capability work", "messages": [],
+      }]))
+
+      row = data["redacted_recent_chats"][0]
+      self.assertEqual(row["source_handle"], "chat:c01")
+      self.assertNotIn("id", row)
+      self.assertNotIn(canonical, json.dumps(data))
+
+  def test_short_source_handle_is_expanded_before_publication(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      canonical = "1f905105-a3a6-4a67-a6e3-1b34ea6963d8"
+      runner._redacted_chats = lambda: [{"id": canonical, "messages": []}]
+      runner._proposal = lambda *_args: _proposal("c01")
+      runner._remember_pending_chats([{"id": canonical}])
+
+      self.assertEqual(asyncio.run(runner.run()), 0)
+
+      note = store.read_revision_file(
+        store.ready_pointer()["commit"], "notes/quiet-ui.md",
+      )
+      self.assertIn(f"source: [chat:{canonical}]", note)
+      self.assertNotIn("chat:c01", note)
+      self.assertFalse(runner._PENDING_CHAT_IDS.exists())
+
+  def test_success_acknowledges_only_chats_that_fit_the_prompt(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      staging.mkdir()
+      runner._MAX_PROMPT_DATA_CHARS = 500
+      chats = [
+        {"id": "first", "title": "first", "messages": [{"role": "user", "text": "a"}]},
+        {"id": "second", "title": "second", "messages": [{"role": "user", "text": "b" * 1000}]},
+      ]
+      runner._remember_pending_chats(chats)
+
+      offered = runner._proposal_batch(staging, chats)
+      runner._acknowledge_pending_chats(offered)
+
+      self.assertEqual([chat["id"] for chat in offered], ["first"])
+      self.assertEqual(runner._load_pending_chat_ids(), ["second"])
+
+  def test_failed_run_chat_ids_are_retried_before_latest_window(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      runner._remember_pending_chats([{"id": "pending-chat"}])
+
+      def fake_api(path):
+        if path.startswith("/api/chat-logs?"):
+          return {"items": [
+            {"id": "latest-chat"}, {"id": "pending-chat"},
+          ]}
+        chat_id = path.rsplit("/", 1)[-1]
+        return {"title": chat_id, "messages": []}
+
+      runner._api_json = fake_api
+
+      chats = runner._redacted_chats(limit=30)
+
+      self.assertEqual(
+        [chat["id"] for chat in chats],
+        ["pending-chat", "latest-chat"],
+      )
+
+  def test_latest_id_is_queued_even_when_its_detail_fetch_fails(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+
+      def fake_api(path):
+        if path.startswith("/api/chat-logs?"):
+          return {"items": [{"id": "temporarily-unreadable"}]}
+        return None
+
+      runner._api_json = fake_api
+
+      self.assertEqual(runner._redacted_chats(), [])
+      self.assertEqual(
+        runner._load_pending_chat_ids(),
+        ["temporarily-unreadable"],
+      )
+
+  def test_semantically_invalid_primary_proposal_uses_configured_fallback(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      _seed(staging)
+      runner.build_graph(staging, usage={})
+      canonical = "1f905105-a3a6-4a67-a6e3-1b34ea6963d8"
+      runner._agent_choices = lambda _app_id: [
+        {"provider": "claude", "model": "primary"},
+        {"provider": "codex", "model": "fallback"},
+      ]
+      runner._claude_proposal = lambda *_args: _proposal("invented-source")
+      runner._codex_proposal = lambda *_args: _proposal("c01")
+
+      outcome = runner._proposal(7, staging, [{"id": canonical, "messages": []}])
+
+      self.assertEqual(outcome.status, "ok")
+      self.assertEqual(outcome.provider, "codex")
+      self.assertEqual(
+        outcome.attempted_agents[0]["rejection_code"],
+        "unverified_chat_provenance",
+      )
+      self.assertIn(
+        f"source: [chat:{canonical}]",
+        outcome.proposal["updates"][0]["content"],
+      )
+
+  def test_semantically_invalid_only_provider_degrades_with_reason_code(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      _seed(staging)
+      runner.build_graph(staging, usage={})
+      runner._agent_choices = lambda _app_id: [
+        {"provider": "claude", "model": "only"},
+      ]
+      runner._claude_proposal = lambda *_args: _proposal("invented-source")
+
+      outcome = runner._proposal(7, staging, [{"id": "chat-1", "messages": []}])
+
+      self.assertEqual(outcome.status, "degraded")
+      self.assertIsNone(outcome.proposal)
+      self.assertEqual(
+        outcome.attempted_agents[0]["rejection_code"],
+        "unverified_chat_provenance",
+      )
 
   def test_existing_content_is_available_for_alignment_and_old_provenance_survives(self):
     with tempfile.TemporaryDirectory() as raw:
