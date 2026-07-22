@@ -80,6 +80,23 @@ def _proposal(chat_id="chat-1"):
 
 
 class MemoryRunnerTests(unittest.TestCase):
+  def test_proposal_prompt_does_not_treat_assistant_completion_as_fact(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      prompt = runner._proposal_prompt(
+        Path(raw),
+        [{
+          "id": "chat-1",
+          "title": "Prototype",
+          "updated_at": "2026-07-22T00:00:00Z",
+          "messages": [{"role": "assistant", "text": "I implemented it."}],
+        }],
+      )
+
+      self.assertIn("unverified testimony", prompt)
+      self.assertIn("never promote", prompt)
+      self.assertIn("partner confirms", prompt)
+
   def test_success_publishes_complete_commit_with_verified_provenance(self):
     with tempfile.TemporaryDirectory() as raw:
       store, runner = _load(Path(raw))
