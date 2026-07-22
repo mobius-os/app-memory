@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react'
 
 function GripVertical() {
   return (
@@ -13,14 +13,23 @@ function GripVertical() {
   )
 }
 
-export function BackgroundAgentList({ children, onMove }) {
+export function BackgroundAgentList({
+  children,
+  onMove,
+  itemLabels = [],
+  reorderDisabled = false,
+  reorderDisabledReason = '',
+}) {
   const items = React.Children.toArray(children)
   const rowRefs = useRef([])
   const dragRef = useRef(null)
   const pointerYRef = useRef(0)
   const commitRafRef = useRef(null)
+  const mountedRef = useRef(true)
+  const disabledReasonId = useId()
   const [drag, setDrag] = useState(null)
   const [committing, setCommitting] = useState(false)
+  const [announcement, setAnnouncement] = useState('')
 
   useEffect(() => { dragRef.current = drag }, [drag])
   useEffect(() => { rowRefs.current.length = items.length }, [items.length])
@@ -44,7 +53,22 @@ export function BackgroundAgentList({ children, onMove }) {
     })
   }, [])
 
+  const commitMove = useCallback((fromIndex, toIndex) => {
+    if (reorderDisabled || fromIndex === toIndex) return
+    const label = itemLabels[fromIndex] || `Background agent ${fromIndex + 1}`
+    beginCommit()
+    Promise.resolve()
+      .then(() => onMove(fromIndex, toIndex))
+      .then((applied) => {
+        if (mountedRef.current && applied !== false) {
+          setAnnouncement(`${label} moved to priority ${toIndex + 1}.`)
+        }
+      })
+      .catch(() => {})
+  }, [beginCommit, itemLabels, onMove, reorderDisabled])
+
   const startReorder = useCallback((index, event) => {
+    if (reorderDisabled) return
     const node = rowRefs.current[index]
     if (!node) return
     const rect = node.getBoundingClientRect()
@@ -61,7 +85,7 @@ export function BackgroundAgentList({ children, onMove }) {
       rowHeight: rect.height,
       slots,
     })
-  }, [])
+  }, [reorderDisabled])
 
   const activeFromIndex = drag?.fromIndex ?? null
   useEffect(() => {
@@ -96,8 +120,7 @@ export function BackgroundAgentList({ children, onMove }) {
       const toIndex = indexFromY(center, slots)
       setDrag(null)
       if (toIndex !== fromIndex) {
-        beginCommit()
-        onMove(fromIndex, toIndex)
+        commitMove(fromIndex, toIndex)
       }
     }
 
@@ -110,10 +133,14 @@ export function BackgroundAgentList({ children, onMove }) {
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', cancel)
     }
-  }, [activeFromIndex, beginCommit, indexFromY, onMove])
+  }, [activeFromIndex, commitMove, indexFromY])
 
-  useEffect(() => () => {
-    if (commitRafRef.current) cancelAnimationFrame(commitRafRef.current)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (commitRafRef.current) cancelAnimationFrame(commitRafRef.current)
+    }
   }, [])
 
   const styleForIndex = (index) => {
@@ -136,44 +163,54 @@ export function BackgroundAgentList({ children, onMove }) {
   }
 
   const moveBy = (index, delta) => {
-    if (dragRef.current) return
+    if (reorderDisabled || dragRef.current) return
     const toIndex = index + delta
     if (toIndex < 0 || toIndex >= items.length) return
-    beginCommit()
-    onMove(index, toIndex)
+    commitMove(index, toIndex)
   }
 
   return (
-    <div className={`mobius-agent-priority-list${committing ? ' is-committing' : ''}`}>
-      {items.map((child, index) => (
-        <div
-          key={child.key || index}
-          ref={(node) => { rowRefs.current[index] = node }}
-          className={`mobius-agent-priority-row${drag?.fromIndex === index ? ' is-dragging' : ''}${drag?.toIndex === index && drag?.fromIndex !== index ? ' is-drop-target' : ''}`}
-          style={styleForIndex(index)}
-          aria-label={`Background agent priority ${index + 1}`}
-        >
-          <button
-            type="button"
-            className="mobius-agent-priority-handle"
-            aria-label={`Move background agent priority ${index + 1}`}
-            onPointerDown={(event) => {
-              if (event.button !== undefined && event.button !== 0) return
-              event.preventDefault()
-              event.stopPropagation()
-              startReorder(index, event)
-            }}
-            onClick={(event) => event.preventDefault()}
-            onKeyDown={(event) => {
-              if (event.key === 'ArrowUp') { event.preventDefault(); moveBy(index, -1) }
-              if (event.key === 'ArrowDown') { event.preventDefault(); moveBy(index, 1) }
-            }}
+    <div
+      className={`mobius-agent-priority-list${committing ? ' is-committing' : ''}${reorderDisabled ? ' is-reorder-disabled' : ''}`}
+      aria-describedby={reorderDisabled && reorderDisabledReason ? disabledReasonId : undefined}
+    >
+      {reorderDisabled && reorderDisabledReason && (
+        <p id={disabledReasonId} className="mobius-agent-priority-help">{reorderDisabledReason}</p>
+      )}
+      {items.map((child, index) => {
+        const label = itemLabels[index] || `Background agent ${index + 1}`
+        return (
+          <div
+            key={child.key || index}
+            ref={(node) => { rowRefs.current[index] = node }}
+            className={`mobius-agent-priority-row${drag?.fromIndex === index ? ' is-dragging' : ''}${drag?.toIndex === index && drag?.fromIndex !== index ? ' is-drop-target' : ''}`}
+            style={styleForIndex(index)}
+            aria-label={`${label}, background agent priority ${index + 1}`}
           >
-            <GripVertical />
-          </button>
-          <div className="mobius-agent-priority-body">{child}</div>
-        </div>
-      ))}
+            <button
+              type="button"
+              className="mobius-agent-priority-handle"
+              aria-label={`Move ${label}; currently priority ${index + 1}`}
+              disabled={reorderDisabled}
+              onPointerDown={(event) => {
+                if (event.button !== undefined && event.button !== 0) return
+                event.preventDefault()
+                event.stopPropagation()
+                startReorder(index, event)
+              }}
+              onClick={(event) => event.preventDefault()}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowUp') { event.preventDefault(); moveBy(index, -1) }
+                if (event.key === 'ArrowDown') { event.preventDefault(); moveBy(index, 1) }
+              }}
+            >
+              <GripVertical />
+            </button>
+            <div className="mobius-agent-priority-body">{child}</div>
+          </div>
+        )
+      })}
+      <span className="mobius-agent-priority-status" role="status" aria-live="polite">{announcement}</span>
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 function ClaudeLogo() {
   return (
@@ -149,7 +150,7 @@ export function ModelPicker({
           </span>
         )}
       </button>
-      {open && (
+      {open && createPortal(
         <div
           className="mobius-model-sheet__backdrop"
           role="presentation"
@@ -247,7 +248,8 @@ export function ModelPicker({
               })}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   )

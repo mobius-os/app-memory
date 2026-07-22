@@ -165,9 +165,15 @@ export const CSS = `
 }
 .mobius-agent-priority-handle:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 .mobius-agent-priority-handle svg { display:block; }
+.mobius-agent-priority-handle:disabled { cursor:not-allowed; opacity:.45; }
 .mobius-agent-priority-body { min-width:0; }
+.mobius-agent-priority-help { margin:0 0 2px; color:var(--muted); font-size:12px; line-height:1.4; }
+.mobius-agent-priority-status {
+  position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+  overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
+}
 @media (hover:hover) and (pointer:fine) {
-  .mobius-agent-priority-handle:hover { color:var(--text); background:var(--surface2); }
+  .mobius-agent-priority-handle:not(:disabled):hover { color:var(--text); background:var(--surface2); }
 }
 @media (prefers-reduced-motion:reduce) { .mobius-agent-priority-row { transition:none; } }
 .mobius-model-trigger {

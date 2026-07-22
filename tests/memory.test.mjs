@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { buildEnv, esbuildPath } from './test-deps.mjs'
+import { canReorderAgentSlots, reorderAgentSlots } from '../ui/backgroundAgentOrder.js'
 
 mkdirSync(new URL('./.build/', import.meta.url), { recursive: true })
 execFileSync(esbuildPath, [
@@ -33,6 +34,7 @@ const {
   timeToDailyCron,
   MEMORY_SANITIZE_OPTIONS,
   makeSharedMemoryStore,
+  buildAgentGroups,
 } = await import('./.build/index.mjs')
 
 test('shouldShowNodeLabel hides ordinary nodes below every threshold except close zoom', () => {
@@ -207,13 +209,16 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(source, /onSettingsDefault=\{\(\) => setSecondaryAgentModeChoice\('system'\)\}/)
   assert.match(source, /setPrimaryAgentModeChoice\('app'\)/)
   assert.match(source, /setSecondaryAgentModeChoice\('app'\)/)
-  assert.match(source, /<BackgroundAgentList onMove=\{reorderAgents\}>/)
-  assert.match(source, /setPrimaryAgentMode\(secondary\.mode\)/)
-  assert.match(source, /setSecondaryAgentMode\(primary\.mode\)/)
+  assert.match(source, /<BackgroundAgentList/)
+  assert.match(source, /onMove=\{reorderAgents\}/)
+  assert.match(source, /reorderDisabled=\{!canReorderAgents\}/)
   assert.match(priorityList, /mobius-agent-priority-handle/)
   assert.match(priorityList, /onPointerDown/)
   assert.match(priorityList, /event\.key === 'ArrowUp'/)
+  assert.match(priorityList, /itemLabels/)
+  assert.match(priorityList, /aria-live="polite"/)
   assert.ok(manifest.source_files.includes('ui/BackgroundAgentList.jsx'))
+  assert.ok(manifest.source_files.includes('ui/backgroundAgentOrder.js'))
   assert.ok(source.indexOf("{ key: 'claude', label: 'Claude Code' }")
     < source.indexOf("{ key: 'codex', label: 'OpenAI Codex' }"))
   assert.match(source, /Boolean\(providerValue \|\| modelValue \|\| effortValue\)/)
@@ -223,6 +228,7 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(source, /<EffortStepper/)
   const picker = readFileSync(new URL('../ui/ModelPicker.jsx', import.meta.url), 'utf8')
   const effort = readFileSync(new URL('../ui/EffortStepper.jsx', import.meta.url), 'utf8')
+  const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
   assert.match(picker, /role="dialog"/)
   assert.match(picker, /aria-modal="true"/)
   assert.match(picker, /event\.key !== 'Tab'/)
@@ -234,6 +240,12 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(picker, /aria-pressed=\{useSettingsDefault\}/)
   assert.match(picker, /aria-pressed=\{selected\}/)
   assert.match(picker, /effortLabel \? `, \$\{effortLabel\} effort`/)
+  assert.match(picker, /\{open && createPortal\([\s\S]*document\.body,\s*\)\}/)
+  assert.match(picker, /event\.target === event\.currentTarget\) closeSheet\(\)/)
+  assert.match(picker, /mobius-model-sheet__close" onClick=\{closeSheet\}/)
+  assert.match(picker, /closeRef\.current\?\.focus\?\.\(\)/)
+  assert.match(picker, /triggerRef\.current\?\.focus\?\.\(\)/)
+  assert.match(theme, /\.mobius-model-sheet__backdrop\s*\{[\s\S]*position:fixed[\s\S]*z-index:1000/)
   assert.match(effort, /role="radiogroup"/)
   assert.match(effort, /role="radio"/)
   assert.match(effort, /e\.key === 'Home'/)
@@ -243,6 +255,39 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(runner, /def _settings/)
   assert.match(runner, /def _agent_choices/)
   assert.match(runner, /job-context/)
+})
+
+test('agent order swaps exact overrides and refuses inherited positional rows', () => {
+  const primary = { mode: 'app', provider: 'claude', model: 'claude-primary', effort: 'high' }
+  const fallback = { mode: 'app', provider: 'codex', model: 'codex-fallback', effort: 'medium' }
+  const before = [primary, fallback]
+  const after = reorderAgentSlots(before, 1, 0)
+  assert.equal(canReorderAgentSlots(before), true)
+  assert.deepEqual(after, [fallback, primary])
+  assert.notEqual(after[0], fallback)
+
+  const inherited = [{ mode: 'system' }, fallback]
+  assert.equal(canReorderAgentSlots(inherited), false)
+  assert.equal(reorderAgentSlots(inherited, 0, 1), inherited)
+})
+
+test('live model groups deduplicate ids without a stale app-local registry', () => {
+  assert.deepEqual(buildAgentGroups({
+    claude: [
+      { id: 'claude-current', name: 'Current' },
+      { id: 'claude-current', name: 'Duplicate' },
+      { id: '  claude-current  ', name: '  Duplicate after normalization  ' },
+      { id: '   ', name: 'Empty id' },
+    ],
+    codex: [{ id: ' codex-current ', name: '  ' }],
+  }), [
+    { key: 'claude', label: 'Claude Code', models: [{ id: 'claude-current', name: 'Current' }] },
+    { key: 'codex', label: 'OpenAI Codex', models: [{ id: 'codex-current', name: 'codex-current' }] },
+  ])
+  assert.deepEqual(buildAgentGroups(null), [])
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /FALLBACK_AGENT_GROUPS|claude-opus-4-8|gpt-5\.5/)
+  assert.match(source, /Could not load available models/)
 })
 
 test('renderWikiLinks replaces slugs with note titles and keeps aliases', () => {

@@ -75,6 +75,7 @@
     "ui/NetworkGlyph.jsx",
     "ui/EffortStepper.jsx",
     "ui/BackgroundAgentList.jsx",
+    "ui/backgroundAgentOrder.js",
     "ui/ModelPicker.jsx",
     "seed-memory/index.md",
     "seed-memory/mocs/about-the-user.md",

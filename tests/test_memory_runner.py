@@ -347,17 +347,40 @@ class MemoryRunnerTests(unittest.TestCase):
           return '{"updates":[]}', ""
 
       with mock.patch.object(runner.subprocess, "Popen", FakePopen):
-        value = runner._claude_proposal({"provider": "claude"}, "prompt")
+        value = runner._claude_proposal({"provider": "claude", "effort": "ultracode"}, "prompt")
 
       self.assertEqual(value, {"updates": []})
       self.assertIn("--tools", captured["cmd"])
       self.assertEqual(captured["cmd"][captured["cmd"].index("--tools") + 1], "")
+      self.assertEqual(captured["cmd"][captured["cmd"].index("--effort") + 1], "xhigh")
       self.assertEqual(captured["input"], "prompt")
       self.assertNotIn("prompt", captured["cmd"])
       self.assertTrue(captured["start_new_session"])
       for key in ("APP_TOKEN", "SERVICE_TOKEN", "AGENT_TOKEN", "API_BASE_URL", "DATA_DIR"):
         self.assertNotIn(key, captured["env"])
       self.assertTrue(captured["cwd"].startswith("/tmp/memory-agent-"))
+
+  def test_claude_effort_allows_reviewed_values_and_omits_unknown_values(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      commands = []
+
+      class FakePopen:
+        pid = 999998
+        returncode = 0
+
+        def __init__(self, cmd, **_kwargs):
+          commands.append(cmd)
+
+        def communicate(self, value=None, timeout=None):
+          return '{"updates":[]}', ""
+
+      with mock.patch.object(runner.subprocess, "Popen", FakePopen):
+        runner._claude_proposal({"provider": "claude", "effort": "max"}, "prompt")
+        runner._claude_proposal({"provider": "claude", "effort": "future-level"}, "prompt")
+
+      self.assertEqual(commands[0][commands[0].index("--effort") + 1], "max")
+      self.assertNotIn("--effort", commands[1])
 
   def test_agent_timeout_kills_and_reaps_the_whole_process_session(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -774,6 +797,36 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertEqual(runner._agent_choices(7), [
         {"provider": "codex", "model": "gpt-custom", "effort": None},
         {"provider": "claude", "model": "claude-custom", "effort": None},
+      ])
+
+  def test_agent_choices_deduplicate_exact_identity_but_keep_distinct_effort(self):
+    with tempfile.TemporaryDirectory() as raw:
+      data_dir = Path(raw)
+      _store, runner = _load(data_dir)
+      settings_dir = data_dir / "apps" / "7"
+      settings_dir.mkdir(parents=True)
+      runner._api_json = lambda _path: {
+        "primary": {"provider": "claude", "model": "system-primary", "effort": "medium"},
+        "fallback": {"provider": "codex", "model": "same", "effort": "high"},
+      }
+      settings = {
+        "primary_agent_mode": "app",
+        "provider": "codex",
+        "model": "same",
+        "effort": "high",
+        "secondary_agent_mode": "system",
+      }
+      path = settings_dir / "settings.json"
+      path.write_text(json.dumps(settings))
+      self.assertEqual(runner._agent_choices(7), [
+        {"provider": "codex", "model": "same", "effort": "high"},
+      ])
+
+      settings["effort"] = "medium"
+      path.write_text(json.dumps(settings))
+      self.assertEqual(runner._agent_choices(7), [
+        {"provider": "codex", "model": "same", "effort": "medium"},
+        {"provider": "codex", "model": "same", "effort": "high"},
       ])
 
 
