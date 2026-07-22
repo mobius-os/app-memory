@@ -44,6 +44,7 @@ import { TextGlyph } from './ui/TextGlyph.jsx'
 import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
 import { EffortStepper } from './ui/EffortStepper.jsx'
+import { BackgroundAgentList } from './ui/BackgroundAgentList.jsx'
 
 export { makeSharedMemoryStore } from './storage.js'
 export {
@@ -755,6 +756,40 @@ export default function App({ appId, token }) {
     }
   }, [agentGroups, agentProvider, secondaryAgentProvider, secondaryAgentModel, chooseAgentGroup]);
 
+  const reorderAgents = useCallback((fromIndex, toIndex) => {
+    if (fromIndex === toIndex) return;
+    const primary = {
+      mode: primaryAgentMode,
+      provider: agentProvider,
+      model: agentModel,
+      effort: agentEffort,
+    };
+    const secondary = {
+      mode: secondaryAgentMode,
+      provider: secondaryAgentProvider,
+      model: secondaryAgentModel,
+      effort: secondaryAgentEffort,
+    };
+    setPrimaryAgentMode(secondary.mode);
+    setAgentProvider(secondary.provider);
+    setAgentModel(secondary.model);
+    setAgentEffort(secondary.effort);
+    setSecondaryAgentMode(primary.mode);
+    setSecondaryAgentProvider(primary.provider);
+    setSecondaryAgentModel(primary.model);
+    setSecondaryAgentEffort(primary.effort);
+    setAgentMessage('');
+  }, [
+    primaryAgentMode,
+    agentProvider,
+    agentModel,
+    agentEffort,
+    secondaryAgentMode,
+    secondaryAgentProvider,
+    secondaryAgentModel,
+    secondaryAgentEffort,
+  ]);
+
   const saveAgentSettings = useCallback(async () => {
     if (agentSaving) return;
     setAgentSaving(true);
@@ -1062,7 +1097,7 @@ export default function App({ appId, token }) {
               <div>
                 <div className="mg-agent-settings-title">Background agents</div>
                 <div className="mg-agent-settings-sub">
-                  Uses the ordered Background agents from Möbius Settings by default. Override either slot only for Memory.
+                  Tried in order. Drag to change priority. Each row follows Möbius Settings by default, or can use its own model for Memory.
                 </div>
               </div>
               {agentStatus === 'error' && (
@@ -1081,11 +1116,8 @@ export default function App({ appId, token }) {
               <div style={S.settingsError}>{agentMessage}</div>
             ) : (
               <>
-                <div className="mg-agent-stack">
-                  <div className="mg-agent-slot">
-                    <div className="mg-agent-slot-head">
-                      <span className="mg-agent-slot-title">Background primary</span>
-                    </div>
+                <BackgroundAgentList onMove={reorderAgents}>
+                  <div key="primary">
                     <ModelPicker
                       provider={primaryAgentMode === 'system' ? '' : agentProvider}
                       model={primaryAgentMode === 'system' ? '' : agentModel}
@@ -1110,10 +1142,7 @@ export default function App({ appId, token }) {
                       }}
                     />
                   </div>
-                  <div className="mg-agent-slot">
-                    <div className="mg-agent-slot-head">
-                      <span className="mg-agent-slot-title">Background secondary</span>
-                    </div>
+                  <div key="secondary">
                     <ModelPicker
                       provider={secondaryAgentMode === 'system' ? '' : secondaryAgentProvider}
                       model={secondaryAgentMode === 'system' ? '' : secondaryAgentModel}
@@ -1142,7 +1171,7 @@ export default function App({ appId, token }) {
                       }}
                     />
                   </div>
-                </div>
+                </BackgroundAgentList>
                 <div style={S.settingsActions}>
                   {agentMessage && (
                     <span style={agentMessage === 'Agents saved' ? S.settingsOk : S.settingsError}>

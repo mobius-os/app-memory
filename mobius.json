@@ -74,6 +74,7 @@
     "ui/TextGlyph.jsx",
     "ui/NetworkGlyph.jsx",
     "ui/EffortStepper.jsx",
+    "ui/BackgroundAgentList.jsx",
     "ui/ModelPicker.jsx",
     "seed-memory/index.md",
     "seed-memory/mocs/about-the-user.md",
