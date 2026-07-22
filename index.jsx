@@ -44,6 +44,8 @@ import { TextGlyph } from './ui/TextGlyph.jsx'
 import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
 import { EffortStepper } from './ui/EffortStepper.jsx'
+import { BackgroundAgentList } from './ui/BackgroundAgentList.jsx'
+import { agentSlotLabel, canReorderAgentSlots, reorderAgentSlots } from './ui/backgroundAgentOrder.js'
 
 export { makeSharedMemoryStore } from './storage.js'
 export {
@@ -69,46 +71,32 @@ const AGENT_PROVIDER_META = [
   { key: 'codex', label: 'OpenAI Codex' },
 ];
 
-const FALLBACK_AGENT_GROUPS = [
-  {
-    key: 'claude',
-    label: 'Claude Code',
-    models: [
-      { id: 'claude-opus-4-8', name: 'Opus 4.8' },
-      { id: 'claude-opus-4-7', name: 'Opus 4.7' },
-      { id: 'claude-opus-4-6', name: 'Opus 4.6' },
-      { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
-      { id: 'claude-sonnet-4-5-20251001', name: 'Sonnet 4.5' },
-      { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5' },
-    ],
-  },
-  {
-    key: 'codex',
-    label: 'OpenAI Codex',
-    models: [
-      { id: 'gpt-5.5', name: 'gpt-5.5' },
-      { id: 'gpt-5.4', name: 'gpt-5.4' },
-    ],
-  },
-];
-
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 
-function buildAgentGroups(payload) {
-  if (!payload || typeof payload !== 'object') return FALLBACK_AGENT_GROUPS;
+export function buildAgentGroups(payload) {
+  if (!payload || typeof payload !== 'object') return [];
   const groups = [];
   for (const meta of AGENT_PROVIDER_META) {
     const rows = Array.isArray(payload[meta.key]) ? payload[meta.key] : null;
     if (!rows || rows.length === 0) continue;
+    const seen = new Set();
+    const models = [];
+    for (const row of rows) {
+      if (!row || typeof row.id !== 'string') continue;
+      const id = row.id.trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id;
+      models.push({ id, name });
+    }
+    if (!models.length) continue;
     groups.push({
       key: meta.key,
       label: meta.label,
-      models: rows
-        .filter((row) => row && typeof row.id === 'string')
-        .map((row) => ({ id: row.id, name: row.name || row.id })),
+      models,
     });
   }
-  return groups.length ? groups : FALLBACK_AGENT_GROUPS;
+  return groups;
 }
 
 function isKnownAgentProvider(provider) {
@@ -551,7 +539,7 @@ export default function App({ appId, token }) {
   ), [token]);
 
   const chooseAgentGroup = useCallback((avoidProvider = '') => {
-    const groups = agentGroups || FALLBACK_AGENT_GROUPS;
+    const groups = agentGroups || [];
     const connected = (group) => !connectedProviders || connectedProviders.has(group.key);
     return (
       groups.find((group) => group.key !== avoidProvider && connected(group) && group.models?.length) ||
@@ -591,9 +579,9 @@ export default function App({ appId, token }) {
         setConnectedProviders(connected);
       }
 
-      const groups = modelsRes?.ok
-        ? buildAgentGroups(await modelsRes.json())
-        : FALLBACK_AGENT_GROUPS;
+      if (!modelsRes?.ok) throw new Error('Could not load available models.');
+      const groups = buildAgentGroups(await modelsRes.json());
+      if (!groups.length) throw new Error('No available models were returned.');
       setAgentGroups(groups);
 
       const providerValue = typeof safeSettings.provider === 'string'
@@ -729,7 +717,7 @@ export default function App({ appId, token }) {
     setPrimaryAgentMode(mode);
     setAgentMessage('');
     if (mode !== 'app') return;
-    const currentGroup = (agentGroups || FALLBACK_AGENT_GROUPS)
+    const currentGroup = (agentGroups || [])
       .find((group) => group.key === agentProvider);
     if (currentGroup?.models?.some((item) => item.id === agentModel)) return;
     const chosen = chooseAgentGroup();
@@ -744,7 +732,7 @@ export default function App({ appId, token }) {
     setSecondaryAgentMode(mode);
     setAgentMessage('');
     if (mode !== 'app') return;
-    const currentGroup = (agentGroups || FALLBACK_AGENT_GROUPS)
+    const currentGroup = (agentGroups || [])
       .find((group) => group.key === secondaryAgentProvider);
     if (currentGroup?.models?.some((item) => item.id === secondaryAgentModel)) return;
     const chosen = chooseAgentGroup(agentProvider);
@@ -754,6 +742,42 @@ export default function App({ appId, token }) {
       setSecondaryAgentEffort(defaultEffort(chosen.key));
     }
   }, [agentGroups, agentProvider, secondaryAgentProvider, secondaryAgentModel, chooseAgentGroup]);
+
+  const reorderAgents = useCallback((fromIndex, toIndex) => {
+    const slots = [{
+      mode: primaryAgentMode,
+      provider: agentProvider,
+      model: agentModel,
+      effort: agentEffort,
+    }, {
+      mode: secondaryAgentMode,
+      provider: secondaryAgentProvider,
+      model: secondaryAgentModel,
+      effort: secondaryAgentEffort,
+    }];
+    const ordered = reorderAgentSlots(slots, fromIndex, toIndex);
+    if (ordered === slots) return false;
+    const [primary, secondary] = ordered;
+    setPrimaryAgentMode(primary.mode);
+    setAgentProvider(primary.provider);
+    setAgentModel(primary.model);
+    setAgentEffort(primary.effort);
+    setSecondaryAgentMode(secondary.mode);
+    setSecondaryAgentProvider(secondary.provider);
+    setSecondaryAgentModel(secondary.model);
+    setSecondaryAgentEffort(secondary.effort);
+    setAgentMessage('');
+    return true;
+  }, [
+    primaryAgentMode,
+    agentProvider,
+    agentModel,
+    agentEffort,
+    secondaryAgentMode,
+    secondaryAgentProvider,
+    secondaryAgentModel,
+    secondaryAgentEffort,
+  ]);
 
   const saveAgentSettings = useCallback(async () => {
     if (agentSaving) return;
@@ -909,7 +933,16 @@ export default function App({ appId, token }) {
     return c;
   }, [graph]);
   const selectedUpdated = relDate(noteState.fm.updated);
-  const visibleAgentGroups = agentGroups || FALLBACK_AGENT_GROUPS;
+  const visibleAgentGroups = agentGroups || [];
+  const agentSlots = [
+    { mode: primaryAgentMode, provider: agentProvider, model: agentModel, effort: agentEffort },
+    { mode: secondaryAgentMode, provider: secondaryAgentProvider, model: secondaryAgentModel, effort: secondaryAgentEffort },
+  ];
+  const canReorderAgents = canReorderAgentSlots(agentSlots);
+  const agentLabels = [
+    agentSlotLabel(agentSlots[0], visibleAgentGroups, 'Settings default primary agent'),
+    agentSlotLabel(agentSlots[1], visibleAgentGroups, 'Settings default secondary agent'),
+  ];
 
   // ---------------------------------------------------------------- render ---
   return (
@@ -1062,7 +1095,7 @@ export default function App({ appId, token }) {
               <div>
                 <div className="mg-agent-settings-title">Background agents</div>
                 <div className="mg-agent-settings-sub">
-                  Uses the ordered Background agents from Möbius Settings by default. Override either slot only for Memory.
+                  Tried in order. Drag to change priority. Each row follows Möbius Settings by default, or can use its own model for Memory.
                 </div>
               </div>
               {agentStatus === 'error' && (
@@ -1081,102 +1114,67 @@ export default function App({ appId, token }) {
               <div style={S.settingsError}>{agentMessage}</div>
             ) : (
               <>
-                <div className="mg-agent-stack">
-                  <div className="mg-agent-slot">
-                    <div className="mg-agent-slot-head">
-                      <span className="mg-agent-slot-title">Background primary</span>
-                      <span className="mg-agent-mode" role="radiogroup" aria-label="Memory primary agent mode">
-                        <button
-                          type="button"
-                          className={`mg-agent-mode-btn${primaryAgentMode === 'system' ? ' is-active' : ''}`}
-                          aria-pressed={primaryAgentMode === 'system'}
-                          onClick={() => setPrimaryAgentModeChoice('system')}
-                        >
-                          Background agents
-                        </button>
-                        <button
-                          type="button"
-                          className={`mg-agent-mode-btn${primaryAgentMode === 'app' ? ' is-active' : ''}`}
-                          aria-pressed={primaryAgentMode === 'app'}
-                          onClick={() => setPrimaryAgentModeChoice('app')}
-                        >
-                          Override
-                        </button>
-                      </span>
-                    </div>
-                    {primaryAgentMode === 'system' ? (
-                      <div className="mg-agent-inherit">Using the primary Background agent from Möbius Settings</div>
-                    ) : (
-                      <ModelPicker
-                        provider={agentProvider}
-                        model={agentModel}
-                        groups={visibleAgentGroups}
-                        connectedProviders={connectedProviders}
-                        title="Memory primary model"
-                        navKey="memory-primary-model"
-                        effortLabel={effortLabel(agentProvider, agentEffort)}
-                        effortControl={(
-                          <EffortStepper provider={agentProvider} value={agentEffort} onChange={setAgentEffort} />
-                        )}
-                        onChange={(nextProvider, nextModel) => {
-                          setAgentProvider(nextProvider);
-                          setAgentModel(nextModel);
-                          setAgentEffort(effortForProvider(nextProvider, agentEffort));
-                          setAgentMessage('');
-                        }}
-                      />
-                    )}
+                <BackgroundAgentList
+                  onMove={reorderAgents}
+                  itemLabels={agentLabels}
+                  reorderDisabled={!canReorderAgents}
+                  reorderDisabledReason="Choose an app override for both rows before changing priority; inherited Settings agents keep their Möbius Settings order."
+                >
+                  <div key="primary">
+                    <ModelPicker
+                      provider={primaryAgentMode === 'system' ? '' : agentProvider}
+                      model={primaryAgentMode === 'system' ? '' : agentModel}
+                      groups={visibleAgentGroups}
+                      connectedProviders={connectedProviders}
+                      title="Memory primary model"
+                      navKey="memory-primary-model"
+                      useSettingsDefault={primaryAgentMode === 'system'}
+                      onSettingsDefault={() => setPrimaryAgentModeChoice('system')}
+                      effortLabel={primaryAgentMode === 'system' ? '' : effortLabel(agentProvider, agentEffort)}
+                      efforts={EFFORT_LEVELS[agentProvider] || []}
+                      effort={agentEffort}
+                      effortControl={primaryAgentMode === 'system' ? null : (
+                        <EffortStepper provider={agentProvider} value={agentEffort} onChange={setAgentEffort} />
+                      )}
+                      onChange={(nextProvider, nextModel) => {
+                        setPrimaryAgentModeChoice('app');
+                        setAgentProvider(nextProvider);
+                        setAgentModel(nextModel);
+                        setAgentEffort(effortForProvider(nextProvider, agentEffort));
+                        setAgentMessage('');
+                      }}
+                    />
                   </div>
-                  <div className="mg-agent-slot">
-                    <div className="mg-agent-slot-head">
-                      <span className="mg-agent-slot-title">Background secondary</span>
-                      <span className="mg-agent-mode" role="radiogroup" aria-label="Memory secondary agent mode">
-                        <button
-                          type="button"
-                          className={`mg-agent-mode-btn${secondaryAgentMode === 'system' ? ' is-active' : ''}`}
-                          aria-pressed={secondaryAgentMode === 'system'}
-                          onClick={() => setSecondaryAgentModeChoice('system')}
-                        >
-                          Background agents
-                        </button>
-                        <button
-                          type="button"
-                          className={`mg-agent-mode-btn${secondaryAgentMode === 'app' ? ' is-active' : ''}`}
-                          aria-pressed={secondaryAgentMode === 'app'}
-                          onClick={() => setSecondaryAgentModeChoice('app')}
-                        >
-                          Override
-                        </button>
-                      </span>
-                    </div>
-                    {secondaryAgentMode === 'system' ? (
-                      <div className="mg-agent-inherit">Using the secondary Background agent from Möbius Settings</div>
-                    ) : (
-                      <ModelPicker
-                        provider={secondaryAgentProvider}
-                        model={secondaryAgentModel}
-                        groups={visibleAgentGroups}
-                        connectedProviders={connectedProviders}
-                        title="Memory secondary model"
-                        navKey="memory-secondary-model"
-                        effortLabel={effortLabel(secondaryAgentProvider, secondaryAgentEffort)}
-                        effortControl={(
-                          <EffortStepper
-                            provider={secondaryAgentProvider}
-                            value={secondaryAgentEffort}
-                            onChange={setSecondaryAgentEffort}
-                          />
-                        )}
-                        onChange={(nextProvider, nextModel) => {
-                          setSecondaryAgentProvider(nextProvider);
-                          setSecondaryAgentModel(nextModel);
-                          setSecondaryAgentEffort(effortForProvider(nextProvider, secondaryAgentEffort));
-                          setAgentMessage('');
-                        }}
-                      />
-                    )}
+                  <div key="secondary">
+                    <ModelPicker
+                      provider={secondaryAgentMode === 'system' ? '' : secondaryAgentProvider}
+                      model={secondaryAgentMode === 'system' ? '' : secondaryAgentModel}
+                      groups={visibleAgentGroups}
+                      connectedProviders={connectedProviders}
+                      title="Memory secondary model"
+                      navKey="memory-secondary-model"
+                      useSettingsDefault={secondaryAgentMode === 'system'}
+                      onSettingsDefault={() => setSecondaryAgentModeChoice('system')}
+                      effortLabel={secondaryAgentMode === 'system' ? '' : effortLabel(secondaryAgentProvider, secondaryAgentEffort)}
+                      efforts={EFFORT_LEVELS[secondaryAgentProvider] || []}
+                      effort={secondaryAgentEffort}
+                      effortControl={secondaryAgentMode === 'system' ? null : (
+                        <EffortStepper
+                          provider={secondaryAgentProvider}
+                          value={secondaryAgentEffort}
+                          onChange={setSecondaryAgentEffort}
+                        />
+                      )}
+                      onChange={(nextProvider, nextModel) => {
+                        setSecondaryAgentModeChoice('app');
+                        setSecondaryAgentProvider(nextProvider);
+                        setSecondaryAgentModel(nextModel);
+                        setSecondaryAgentEffort(effortForProvider(nextProvider, secondaryAgentEffort));
+                        setAgentMessage('');
+                      }}
+                    />
                   </div>
-                </div>
+                </BackgroundAgentList>
                 <div style={S.settingsActions}>
                   {agentMessage && (
                     <span style={agentMessage === 'Agents saved' ? S.settingsOk : S.settingsError}>

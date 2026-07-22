@@ -384,7 +384,27 @@ def _agent_choices(app_id: int) -> list[dict]:
       "model": settings.get("fallback_model") or None,
       "effort": settings.get("fallback_effort") or None,
     } if provider else None)
-  return [value for value in (primary, fallback) if isinstance(value, dict)]
+  choices = []
+  seen = set()
+  for value in (primary, fallback):
+    if not isinstance(value, dict):
+      continue
+    provider = value.get("provider")
+    if not isinstance(provider, str) or not provider.strip():
+      continue
+    model = value.get("model")
+    effort = value.get("effort")
+    normalized = {
+      "provider": provider.strip(),
+      "model": model.strip() if isinstance(model, str) and model.strip() else None,
+      "effort": effort.strip() if isinstance(effort, str) and effort.strip() else None,
+    }
+    identity = (normalized["provider"], normalized["model"], normalized["effort"])
+    if identity in seen:
+      continue
+    seen.add(identity)
+    choices.append(normalized)
+  return choices
 
 
 def _redacted_chats(limit: int = 30) -> list[dict]:
@@ -646,6 +666,12 @@ def _claude_proposal(choice: dict, prompt: str) -> dict | None:
   ]
   if choice.get("model"):
     cmd += ["--model", str(choice["model"])]
+  effort = choice.get("effort")
+  effort = effort.strip() if isinstance(effort, str) else ""
+  if effort == "ultracode":
+    effort = "xhigh"
+  if effort in {"low", "medium", "high", "xhigh", "max"}:
+    cmd += ["--effort", effort]
   with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
     result = _run_text_process(cmd, prompt, cwd=cwd, env=env)
   if result is None or result[0] != 0:
