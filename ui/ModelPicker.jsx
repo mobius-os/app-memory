@@ -29,8 +29,12 @@ export function ModelPicker({
   title = 'Model',
   navKey = 'model-picker',
   allowProviderDefault = false,
+  useSettingsDefault = false,
+  onSettingsDefault,
   effortControl = null,
   effortLabel = '',
+  efforts = [],
+  effort = '',
 }) {
   const [open, setOpen] = useState(false)
   const sheetRef = useRef(null)
@@ -39,7 +43,13 @@ export function ModelPicker({
   const navRef = useRef(null)
   const activeGroup = groups?.find((group) => group.key === provider)
   const activeModel = activeGroup?.models?.find((item) => item.id === model)
-  const modelName = activeModel?.name || (model ? model : activeGroup ? `${activeGroup.label} default` : 'Choose model')
+  const modelName = useSettingsDefault
+    ? 'Default from settings'
+    : (activeModel?.name || (model ? model : activeGroup ? `${activeGroup.label} default` : 'Choose model'))
+  const effortIndex = Math.max(0, efforts.findIndex((item) => item.value === effort))
+  const triggerLabel = useSettingsDefault
+    ? `${title}: Default from settings`
+    : `${title}: ${modelName}${effortLabel ? `, ${effortLabel} effort` : ''}`
 
   const closeSheet = useCallback(() => {
     const handle = navRef.current
@@ -113,16 +123,31 @@ export function ModelPicker({
         className="mobius-model-trigger"
         onClick={openSheet}
         aria-haspopup="dialog"
+        aria-label={triggerLabel}
       >
         <span className="mobius-model-trigger__icon" aria-hidden="true">
-          <ProviderLogo provider={provider} />
+          {useSettingsDefault ? '—' : <ProviderLogo provider={provider} />}
         </span>
         <span className="mobius-model-trigger__main">
           <span className="mobius-model-trigger__name">{modelName}</span>
-          <span className="mobius-model-trigger__id">{model || 'Provider default'}</span>
+          {!useSettingsDefault && (
+            <span className="mobius-model-trigger__id">{model || 'Provider default'}</span>
+          )}
         </span>
-        {effortLabel && <span className="mobius-model-trigger__effort">{effortLabel}</span>}
-        <span className="mobius-model-trigger__caret" aria-hidden="true">▾</span>
+        {!useSettingsDefault && effortLabel && efforts.length > 0 && (
+          <span className="mobius-model-trigger__effort-visual" aria-hidden="true">
+            {efforts.map((item, index) => (
+              <span
+                key={item.value}
+                className={
+                  'mobius-model-trigger__effort-dot'
+                  + (index <= effortIndex ? ' is-filled' : '')
+                  + (index === effortIndex ? ' is-active' : '')
+                }
+              />
+            ))}
+          </span>
+        )}
       </button>
       {open && (
         <div
@@ -146,6 +171,18 @@ export function ModelPicker({
               </button>
             </div>
             <div className="mobius-model-sheet__body">
+              <button
+                type="button"
+                className={`mobius-model-sheet__row${useSettingsDefault ? ' is-selected' : ''}`}
+                aria-pressed={useSettingsDefault}
+                onClick={() => { onSettingsDefault?.(); closeSheet() }}
+              >
+                <span className="mobius-model-sheet__row-icon" aria-hidden="true">—</span>
+                <span className="mobius-model-sheet__row-main">
+                  <span className="mobius-model-sheet__row-title">Default from settings</span>
+                </span>
+                {useSettingsDefault && <span className="mobius-model-sheet__check" aria-hidden="true" />}
+              </button>
               {(!groups || groups.length === 0) && (
                 <div className="mobius-model-sheet__empty">No models available.</div>
               )}
@@ -165,6 +202,7 @@ export function ModelPicker({
                       <button
                         type="button"
                         className={`mobius-model-sheet__row${defaultOn ? ' is-selected' : ''}`}
+                        aria-pressed={defaultOn}
                         disabled={!connected && !defaultOn}
                         onClick={() => { onChange(group.key, ''); closeSheet() }}
                       >
@@ -184,6 +222,7 @@ export function ModelPicker({
                           <button
                             type="button"
                             className={`mobius-model-sheet__row${selected ? ' is-selected' : ''}`}
+                            aria-pressed={selected}
                             disabled={disabled}
                             onClick={() => {
                               onChange(group.key, item.id)

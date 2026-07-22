@@ -243,7 +243,20 @@ export const CSS = `
   border-radius:999px; background:color-mix(in srgb,var(--accent) 12%,var(--surface));
   color:var(--muted); font-size:11px; font-weight:500; line-height:1; white-space:nowrap;
 }
-.mobius-model-trigger__caret { flex:none; color:var(--muted); font-size:11px; }
+.mobius-model-trigger__effort-visual {
+  position:relative; flex:none; display:inline-flex; align-items:center;
+  justify-content:space-between; gap:5px; min-width:68px; padding:7px 3px;
+}
+.mobius-model-trigger__effort-visual::before {
+  content:''; position:absolute; left:6px; right:6px; top:50%; height:1px;
+  background:var(--border); transform:translateY(-50%);
+}
+.mobius-model-trigger__effort-dot {
+  position:relative; z-index:1; width:6px; height:6px; border-radius:50%;
+  border:1px solid var(--border); background:var(--surface);
+}
+.mobius-model-trigger__effort-dot.is-filled { border-color:var(--accent); background:var(--accent); }
+.mobius-model-trigger__effort-dot.is-active { transform:scale(1.35); box-shadow:0 0 0 2px var(--accent-dim); }
 .mobius-model-sheet__backdrop {
   position:fixed; inset:0; z-index:1000; display:flex; align-items:flex-end; justify-content:center;
   box-sizing:border-box; background:rgba(0,0,0,.5); overscroll-behavior:contain;

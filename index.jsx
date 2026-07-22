@@ -1085,96 +1085,62 @@ export default function App({ appId, token }) {
                   <div className="mg-agent-slot">
                     <div className="mg-agent-slot-head">
                       <span className="mg-agent-slot-title">Background primary</span>
-                      <span className="mg-agent-mode" role="radiogroup" aria-label="Memory primary agent mode">
-                        <button
-                          type="button"
-                          className={`mg-agent-mode-btn${primaryAgentMode === 'system' ? ' is-active' : ''}`}
-                          aria-pressed={primaryAgentMode === 'system'}
-                          onClick={() => setPrimaryAgentModeChoice('system')}
-                        >
-                          Background agents
-                        </button>
-                        <button
-                          type="button"
-                          className={`mg-agent-mode-btn${primaryAgentMode === 'app' ? ' is-active' : ''}`}
-                          aria-pressed={primaryAgentMode === 'app'}
-                          onClick={() => setPrimaryAgentModeChoice('app')}
-                        >
-                          Override
-                        </button>
-                      </span>
                     </div>
-                    {primaryAgentMode === 'system' ? (
-                      <div className="mg-agent-inherit">Using the primary Background agent from Möbius Settings</div>
-                    ) : (
-                      <ModelPicker
-                        provider={agentProvider}
-                        model={agentModel}
-                        groups={visibleAgentGroups}
-                        connectedProviders={connectedProviders}
-                        title="Memory primary model"
-                        navKey="memory-primary-model"
-                        effortLabel={effortLabel(agentProvider, agentEffort)}
-                        effortControl={(
-                          <EffortStepper provider={agentProvider} value={agentEffort} onChange={setAgentEffort} />
-                        )}
-                        onChange={(nextProvider, nextModel) => {
-                          setAgentProvider(nextProvider);
-                          setAgentModel(nextModel);
-                          setAgentEffort(effortForProvider(nextProvider, agentEffort));
-                          setAgentMessage('');
-                        }}
-                      />
-                    )}
+                    <ModelPicker
+                      provider={primaryAgentMode === 'system' ? '' : agentProvider}
+                      model={primaryAgentMode === 'system' ? '' : agentModel}
+                      groups={visibleAgentGroups}
+                      connectedProviders={connectedProviders}
+                      title="Memory primary model"
+                      navKey="memory-primary-model"
+                      useSettingsDefault={primaryAgentMode === 'system'}
+                      onSettingsDefault={() => setPrimaryAgentModeChoice('system')}
+                      effortLabel={primaryAgentMode === 'system' ? '' : effortLabel(agentProvider, agentEffort)}
+                      efforts={EFFORT_LEVELS[agentProvider] || []}
+                      effort={agentEffort}
+                      effortControl={primaryAgentMode === 'system' ? null : (
+                        <EffortStepper provider={agentProvider} value={agentEffort} onChange={setAgentEffort} />
+                      )}
+                      onChange={(nextProvider, nextModel) => {
+                        setPrimaryAgentModeChoice('app');
+                        setAgentProvider(nextProvider);
+                        setAgentModel(nextModel);
+                        setAgentEffort(effortForProvider(nextProvider, agentEffort));
+                        setAgentMessage('');
+                      }}
+                    />
                   </div>
                   <div className="mg-agent-slot">
                     <div className="mg-agent-slot-head">
                       <span className="mg-agent-slot-title">Background secondary</span>
-                      <span className="mg-agent-mode" role="radiogroup" aria-label="Memory secondary agent mode">
-                        <button
-                          type="button"
-                          className={`mg-agent-mode-btn${secondaryAgentMode === 'system' ? ' is-active' : ''}`}
-                          aria-pressed={secondaryAgentMode === 'system'}
-                          onClick={() => setSecondaryAgentModeChoice('system')}
-                        >
-                          Background agents
-                        </button>
-                        <button
-                          type="button"
-                          className={`mg-agent-mode-btn${secondaryAgentMode === 'app' ? ' is-active' : ''}`}
-                          aria-pressed={secondaryAgentMode === 'app'}
-                          onClick={() => setSecondaryAgentModeChoice('app')}
-                        >
-                          Override
-                        </button>
-                      </span>
                     </div>
-                    {secondaryAgentMode === 'system' ? (
-                      <div className="mg-agent-inherit">Using the secondary Background agent from Möbius Settings</div>
-                    ) : (
-                      <ModelPicker
-                        provider={secondaryAgentProvider}
-                        model={secondaryAgentModel}
-                        groups={visibleAgentGroups}
-                        connectedProviders={connectedProviders}
-                        title="Memory secondary model"
-                        navKey="memory-secondary-model"
-                        effortLabel={effortLabel(secondaryAgentProvider, secondaryAgentEffort)}
-                        effortControl={(
-                          <EffortStepper
-                            provider={secondaryAgentProvider}
-                            value={secondaryAgentEffort}
-                            onChange={setSecondaryAgentEffort}
-                          />
-                        )}
-                        onChange={(nextProvider, nextModel) => {
-                          setSecondaryAgentProvider(nextProvider);
-                          setSecondaryAgentModel(nextModel);
-                          setSecondaryAgentEffort(effortForProvider(nextProvider, secondaryAgentEffort));
-                          setAgentMessage('');
-                        }}
-                      />
-                    )}
+                    <ModelPicker
+                      provider={secondaryAgentMode === 'system' ? '' : secondaryAgentProvider}
+                      model={secondaryAgentMode === 'system' ? '' : secondaryAgentModel}
+                      groups={visibleAgentGroups}
+                      connectedProviders={connectedProviders}
+                      title="Memory secondary model"
+                      navKey="memory-secondary-model"
+                      useSettingsDefault={secondaryAgentMode === 'system'}
+                      onSettingsDefault={() => setSecondaryAgentModeChoice('system')}
+                      effortLabel={secondaryAgentMode === 'system' ? '' : effortLabel(secondaryAgentProvider, secondaryAgentEffort)}
+                      efforts={EFFORT_LEVELS[secondaryAgentProvider] || []}
+                      effort={secondaryAgentEffort}
+                      effortControl={secondaryAgentMode === 'system' ? null : (
+                        <EffortStepper
+                          provider={secondaryAgentProvider}
+                          value={secondaryAgentEffort}
+                          onChange={setSecondaryAgentEffort}
+                        />
+                      )}
+                      onChange={(nextProvider, nextModel) => {
+                        setSecondaryAgentModeChoice('app');
+                        setSecondaryAgentProvider(nextProvider);
+                        setSecondaryAgentModel(nextModel);
+                        setSecondaryAgentEffort(effortForProvider(nextProvider, secondaryAgentEffort));
+                        setAgentMessage('');
+                      }}
+                    />
                   </div>
                 </div>
                 <div style={S.settingsActions}>
