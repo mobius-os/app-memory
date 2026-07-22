@@ -73,6 +73,33 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertEqual(command[command.index("--tools") + 1], "")
       self.assertNotIn("APP_TOKEN", run.call_args.kwargs["env"])
 
+  def test_tool_free_subagent_cannot_pad_a_focused_recall(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, search = _load(Path(raw))
+      catalog = [
+        {
+          "path": f"notes/note-{index}.md",
+          "title": f"Note {index}",
+          "description": "A possible memory",
+          "tags": [],
+        }
+        for index in range(8)
+      ]
+      result = mock.Mock(
+        returncode=0,
+        stdout=json.dumps({"paths": [item["path"] for item in catalog]}),
+      )
+      with (
+        mock.patch.object(search, "_reader_provider", return_value="claude"),
+        mock.patch.object(search.subprocess, "run", return_value=result) as run,
+      ):
+        paths = search._agent_paths("What changed in this narrow feature?", catalog)
+
+      self.assertEqual(paths, [item["path"] for item in catalog[:4]])
+      prompt = run.call_args.args[0][2]
+      self.assertIn("SMALLEST sufficient set", prompt)
+      self.assertIn("do not fill the quota", prompt)
+
   def test_subagent_failure_falls_back_to_lexical_retrieval(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
