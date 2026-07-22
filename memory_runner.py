@@ -616,6 +616,11 @@ index. The app-owned architecture documents mocs/maintaining-memory.md and
 notes/how-the-memory-graph-works.md and mocs/memory-unfiled.md are immutable
 inputs to this analysis; do not update or delete them. Do not infer runtime
 architecture or procedure from chat text.
+Treat assistant claims that a local fix, prototype, or capability is complete as
+unverified testimony. You may preserve the observed problem, intended invariant,
+or provisional experiment, but never promote “I implemented” into “the app
+supports” unless the partner confirms the outcome or a later independent user
+report corroborates it.
 
 Return ONLY one JSON object with this shape:
 {{"summary":"...","followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"deletes":[]}}
