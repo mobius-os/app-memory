@@ -2,17 +2,17 @@
 // source_files; the multi-file installer fetches each path and esbuild bundles
 // from this entry, resolving the relative imports below at compile time.
 //
-//   constants.js  — shared storage URLs, graph-runtime URLs, palette, and style table
+//   constants.js  — shared storage URLs, palette, and style table
 //   theme.js      — the single app stylesheet (CSS)
 //   domain.js     — pure + DOM-level graph, markdown, sanitization, and formatting helpers; no React/network
 //   storage.js    — shared-memory read-through cache and subscribe store
-//   graph/render.jsx — d3/Pixi runtime loader, renderer component, and renderer math
+//   graph/render.jsx — dependency-free SVG renderer, layout, and interaction math
 //   ui/*.jsx      — one React component per file
 //
 // Only App lives here: it owns top-level graph/note state, persistence wiring,
 // shell navigation state, and mounts the graph, list, and note-panel UI.
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { D3_URL, EFFORT_LEVELS, PALETTE, PIXI_URL, S, defaultEffort } from './constants.js'
+import { EFFORT_LEVELS, PALETTE, S, defaultEffort } from './constants.js'
 import { CSS } from './theme.js'
 import { makeSharedMemoryStore } from './storage.js'
 import {
@@ -33,7 +33,7 @@ import {
   stripFrontmatter,
   timeToDailyCron,
 } from './domain.js'
-import { MemoryGraphRenderer, loadScriptOnce } from './graph/render.jsx'
+import { MemoryGraphRenderer } from './graph/render.jsx'
 import { Th } from './ui/Th.jsx'
 import { ImportanceDots } from './ui/ImportanceDots.jsx'
 import { EmptyConstellation } from './ui/EmptyConstellation.jsx'
@@ -62,8 +62,9 @@ export {
 } from './domain.js'
 export {
   computeRendererFitTransform,
+  layoutRendererGraphData,
   normalizeRendererGraphData,
-  updateRendererSelectionPin,
+  rendererLayoutBudget,
 } from './graph/render.jsx'
 
 const AGENT_PROVIDER_META = [
@@ -151,12 +152,10 @@ export default function App({ appId, token }) {
   // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
   // Defaults to 'text' — the user arrives here from the global graph, so they
   // already have spatial context; the note body is what they came to read.
-  // Only the active tab's pane mounts, so the Pixi local-graph renderer is
-  // never resized (the old draggable split rebuilt it on every drag tick and
-  // crashed). See the graph/text tab panes below.
+  // Only the active tab's pane mounts, so the local graph does no hidden-pane
+  // layout work. See the graph/text tab panes below.
   const [detailTab, setDetailTab] = useState('text');
   const detailTabRefs = useRef([]);
-  const [graphRuntime, setGraphRuntime] = useState(undefined); // undefined loading | null failed | { d3, PIXI }
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
   const selectDetailTab = (next) => {
@@ -198,27 +197,6 @@ export default function App({ appId, token }) {
     () => makeSharedMemoryStore({ getToken: () => token }),
     [token],
   );
-
-  // --- Load the Quartz-style graph renderer runtime. ---
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        await Promise.all([
-          loadScriptOnce(D3_URL),
-          loadScriptOnce(PIXI_URL),
-        ]);
-        const d3 = window.d3;
-        const PIXI = window.PIXI;
-        if (!d3 || !PIXI) throw new Error('Graph runtime scripts loaded without d3/PIXI globals.');
-        if (alive) setGraphRuntime({ d3, PIXI });
-      } catch (e) {
-        // Graph view degrades to the list view if the runtime can't load.
-        if (alive) setGraphRuntime(null);
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
 
   // Pin every render to the immutable Git commit selected by the atomic
   // pointer. A missing pointer means first-install initialization is still in
@@ -311,7 +289,7 @@ export default function App({ appId, token }) {
     return unsub;
   }, [revision, store]);
 
-  // --- Measure graph containers in CSS pixels; Pixi handles the DPR backing store. ---
+  // --- Measure graph containers in CSS pixels for the SVG viewBox. ---
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -365,8 +343,8 @@ export default function App({ appId, token }) {
   // --- Node radius from importance + usage. ---
   const radiusForNode = useCallback((n) => nodeRadius(n), []);
 
-  // --- D3 mutates node objects (x/y/vx/vy) in place, so the renderer gets
-  //     its own object references. Build once per graph. ---
+  // The renderer receives its own node objects so layout coordinates never
+  // leak back into the immutable graph revision.
   const fgData = useMemo(() => {
     if (!graph) return { nodes: [], links: [] };
     const showLabelAlways = graph.nodes.length <= 120;
@@ -1258,9 +1236,8 @@ export default function App({ appId, token }) {
 
         {status === 'ready' && view === 'graph' && (
           <div ref={wrapRef} style={S.graphWrap} className="mg-graph">
-            {graphRuntime && dims.w > 0 && dims.h > 0 ? (
+            {dims.w > 0 && dims.h > 0 ? (
               <MemoryGraphRenderer
-                runtime={graphRuntime}
                 graphData={fgData}
                 width={dims.w}
                 height={dims.h}
@@ -1276,9 +1253,7 @@ export default function App({ appId, token }) {
             ) : (
               <div style={S.center}>
                 <div className="mg-orbit"><span /><span /><span /></div>
-                <div style={S.centerText}>
-                  {graphRuntime === null ? 'Graph view is offline — try List.' : 'Laying out the graph…'}
-                </div>
+                <div style={S.centerText}>Laying out the graph…</div>
               </div>
             )}
 
@@ -1402,9 +1377,8 @@ export default function App({ appId, token }) {
             )}
 
             {/* Tab toggle replaces the old resizable note/graph split. Only the
-                active tab's pane mounts: keeping the local graph unmounted while
-                reading text means the Pixi renderer is never resized, which was
-                the entire crash class the draggable divider produced. */}
+                active tab's pane mounts, so the local layout does no hidden work
+                while the owner is reading the note. */}
             <div style={S.detailBar}>
               <div style={S.detailContext}>
                 {detailTab === 'graph' ? (
@@ -1500,9 +1474,8 @@ export default function App({ appId, token }) {
                 </div>
               ) : (
                 <div ref={localWrapRef} style={S.localGraphWrap} className="mg-local-graph">
-                  {graphRuntime && localDims.w > 0 && localDims.h > 0 && localGraphData.nodes.length > 0 ? (
+                  {localDims.w > 0 && localDims.h > 0 && localGraphData.nodes.length > 0 ? (
                     <MemoryGraphRenderer
-                      runtime={graphRuntime}
                       graphData={localGraphData}
                       width={localDims.w}
                       height={localDims.h}
@@ -1516,7 +1489,7 @@ export default function App({ appId, token }) {
                     />
                   ) : (
                     <div style={S.localEmpty}>
-                      {graphRuntime === null ? 'Graph view is offline.' : 'Laying out local graph…'}
+                      Laying out local graph…
                     </div>
                   )}
                 </div>

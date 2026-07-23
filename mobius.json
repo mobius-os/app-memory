@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "2.1.8",
+  "version": "2.1.9",
   "description": "Build and retrieve an optional graph of durable facts without injecting it into every chat.",
   "author": "mobius-os",
   "license": "MIT",
@@ -46,10 +46,6 @@
       "react-dom",
       "marked",
       "dompurify"
-    ],
-    "esm_deps": [
-      "d3",
-      "pixi.js"
     ]
   },
   "embeds_agent": false,

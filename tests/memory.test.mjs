@@ -22,8 +22,9 @@ execFileSync(esbuildPath, [
 const {
   buildLocalGraphData,
   computeRendererFitTransform,
+  layoutRendererGraphData,
   normalizeRendererGraphData,
-  updateRendererSelectionPin,
+  rendererLayoutBudget,
   shouldShowScreenLabel,
   renderWikiLinks,
   nodeRadius,
@@ -136,6 +137,8 @@ test('manifest activates Memory only through a system prompt contribution', () =
   ]) {
     assert.ok(manifest.source_files.includes(file), file)
   }
+  assert.deepEqual(manifest.runtime.imports, ['react', 'react-dom', 'marked', 'dompurify'])
+  assert.equal('esm_deps' in manifest.runtime, false)
 })
 
 test('reader returns verified graph-relative file pointers', () => {
@@ -378,24 +381,81 @@ test('computeRendererFitTransform centers finite graph bounds within limits', ()
   assert.equal(Math.round(fit.y), 150)
 })
 
-test('selected graph node stays pinned and the previous selection is released', () => {
-  const nodes = [
-    { id: 'a', x: -42, y: 17, fx: null, fy: null },
-    { id: 'b', x: 63, y: -28, fx: null, fy: null },
-  ]
+test('SVG graph layout is deterministic, finite, and does not mutate input', () => {
+  const input = {
+    nodes: Array.from({ length: 60 }, (_, index) => ({
+      id: `node-${index}`,
+      title: `Node ${index}`,
+      type: index % 15 === 0 ? 'moc' : 'note',
+      importance: (index % 10) + 1,
+    })),
+    links: Array.from({ length: 59 }, (_, index) => ({
+      source: `node-${index}`,
+      target: `node-${index + 1}`,
+      kind: index % 8 === 0 ? 'moc' : 'link',
+    })),
+  }
+  const snapshot = structuredClone(input)
+  const first = layoutRendererGraphData(input, 960, 640, { mode: 'global' })
+  const second = layoutRendererGraphData(input, 960, 640, { mode: 'global' })
 
-  let pinned = updateRendererSelectionPin(nodes, null, 'a')
-  assert.equal(pinned, 'a')
-  assert.deepEqual([nodes[0].fx, nodes[0].fy], [-42, 17])
+  assert.deepEqual(input, snapshot)
+  assert.equal(first.nodes.length, 60)
+  assert.equal(first.links.length, 59)
+  assert.deepEqual(
+    first.nodes.map(({ x, y }) => [x, y]),
+    second.nodes.map(({ x, y }) => [x, y]),
+  )
+  for (const node of first.nodes) {
+    assert.equal(Number.isFinite(node.x), true, `${node.id} x`)
+    assert.equal(Number.isFinite(node.y), true, `${node.id} y`)
+  }
+})
 
-  pinned = updateRendererSelectionPin(nodes, pinned, 'b')
-  assert.equal(pinned, 'b')
-  assert.deepEqual([nodes[0].fx, nodes[0].fy], [null, null])
-  assert.deepEqual([nodes[1].fx, nodes[1].fy], [63, -28])
+test('large SVG graph layout has bounded work instead of quadratic repulsion', () => {
+  const nodeCount = 1200
+  const budget = rendererLayoutBudget(nodeCount, 'global')
 
-  pinned = updateRendererSelectionPin(nodes, pinned, null)
-  assert.equal(pinned, null)
-  assert.deepEqual([nodes[1].fx, nodes[1].fy], [null, null])
+  assert.equal(budget.exactRepulsion, false)
+  assert.ok(budget.iterations >= 36)
+  assert.ok(budget.iterations < 130)
+  assert.ok(budget.peerSpan <= 48)
+  assert.ok(budget.pairCount <= nodeCount * 48)
+})
+
+test('graph normalization drops duplicate ids and their ambiguous links', () => {
+  const graph = normalizeRendererGraphData({
+    nodes: [
+      { id: 'stable', title: 'First' },
+      { id: 'stable', title: 'Duplicate' },
+      { id: 'other', title: 'Other' },
+    ],
+    links: [
+      { source: 'stable', target: 'other' },
+      { source: 'missing', target: 'other' },
+    ],
+  }, 800, 600)
+
+  assert.deepEqual(graph.nodes.map((node) => node.title), ['First', 'Other'])
+  assert.equal(graph.links.length, 1)
+})
+
+test('graph renderer uses accessible SVG without global runtime script loading', () => {
+  const source = readFileSync(new URL('../graph/render.jsx', import.meta.url), 'utf8')
+  const entry = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const constants = readFileSync(new URL('../constants.js', import.meta.url), 'utf8')
+
+  assert.match(source, /<svg/)
+  assert.match(source, /role="button"/)
+  assert.match(source, /aria-pressed=\{isSelected\}/)
+  assert.match(source, /event\.key === 'Enter'/)
+  assert.match(source, /Retry graph/)
+  assert.match(source, /signal\?\.\('error', \{\s*phase: 'graph_layout'/)
+  assert.match(source, /requestAnimationFrame/)
+  assert.match(source, /radius \+ 22 \/ scale/)
+  assert.doesNotMatch(source, /PIXI|WebGL|loadScriptOnce/)
+  assert.doesNotMatch(entry, /graphRuntime|loadScriptOnce|D3_URL|PIXI_URL/)
+  assert.doesNotMatch(constants, /d3@|pixi\.js@/)
 })
 
 test('safeMemoryPath accepts normal markdown note paths and encodes segments', () => {

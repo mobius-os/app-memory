@@ -1,12 +1,5 @@
 export const NOTE_BASE = '/api/storage/shared/memory/';
 export const NOTE_GIT_BASE = '/api/storage/shared-git/memory/repository';
-// Self-hosted under /vendor (frontend/public/vendor/, precached by sw.js).
-// Prod CSP (script-src 'self' 'unsafe-inline' https://esm.sh) blocks
-// cdn.jsdelivr.net, which silently degraded the graph to the list view.
-// Same dist files the jsdelivr URLs served; both expose classic-script
-// globals (window.d3 / window.PIXI).
-export const D3_URL = '/vendor/d3@7.9.0/d3.min.js';
-export const PIXI_URL = '/vendor/pixi.js@8.19.0/pixi.min.js';
 export const MAX_LOCAL_DEPTH = 4;
 export const WIKILINK_RE = /\[\[\s*([^\]|#]+?)\s*(?:#[^\]|]*)?(?:\|\s*([^\]]+?)\s*)?\]\]/g;
 
@@ -200,7 +193,24 @@ export const S = {
   },
 
   graphWrap: { position: 'absolute', inset: 0 },
-  pixiGraph: { position: 'absolute', inset: 0, overflow: 'hidden' },
+  svgGraph: {
+    position: 'absolute', inset: 0, width: '100%', height: '100%',
+    overflow: 'hidden', touchAction: 'none',
+  },
+  graphError: {
+    position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'center', gap: 10, padding: 28,
+    textAlign: 'center',
+  },
+  graphErrorTitle: { color: 'var(--text)', fontSize: 15, fontWeight: 650 },
+  graphErrorText: {
+    color: 'var(--muted)', fontSize: 13, lineHeight: 1.5, maxWidth: 360,
+  },
+  graphRetryBtn: {
+    minHeight: 44, padding: '8px 14px', border: '1px solid var(--border)',
+    borderRadius: 8, background: 'var(--surface)', color: 'var(--text)',
+    font: '600 13px var(--font)', cursor: 'pointer',
+  },
   graphHint: {
     position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
     fontSize: 11, color: 'var(--muted)', background: 'var(--surface)',
@@ -362,7 +372,7 @@ export const S = {
     background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
   },
   // The active tab's pane fills all remaining panel height. The local graph
-  // mounts absolutely-positioned inside it so Pixi always gets the full box.
+  // mounts absolutely-positioned inside it so SVG gets the full box.
   detailBody: { flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' },
   localGraphWrap: { position: 'absolute', inset: 0, overflow: 'hidden' },
   localEmpty: {

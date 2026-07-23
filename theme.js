@@ -55,6 +55,15 @@ export const CSS = `
 
 .mg-graph { cursor: grab; }
 .mg-graph:active { cursor: grabbing; }
+.mg-svg-graph { display: block; user-select: none; -webkit-user-select: none; }
+.mg-svg-node {
+  cursor: pointer;
+  transition: opacity 180ms cubic-bezier(0.22,1,0.36,1);
+}
+.mg-svg-node-focus { opacity: 0; pointer-events: none; }
+.mg-svg-node:focus { outline: none; }
+.mg-svg-node:focus-visible .mg-svg-node-focus { opacity: 1; }
+.mg-svg-label { transition: opacity 180ms cubic-bezier(0.22,1,0.36,1); }
 
 @media (hover: hover) {
   .mg-row:hover { background: var(--surface2); }
@@ -315,6 +324,7 @@ export const CSS = `
 /* mobius-ui:ReducedMotion v1 — keep in sync; library candidate. Diverge below the marker only. */
 @media (prefers-reduced-motion: reduce) {
   .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub { animation: none !important; }
+  .mg-svg-node, .mg-svg-label { transition: none !important; }
 }
 /* /mobius-ui:ReducedMotion */
 
