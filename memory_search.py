@@ -19,6 +19,13 @@ _WORD = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
 _STOP = {
   "the", "and", "for", "that", "this", "with", "what", "when", "where",
   "which", "from", "have", "about", "need", "prior", "memory", "facts",
+  # Request-framing words describe the lookup, not the durable fact. Letting
+  # them rank the catalog made broad prompts ("the partner's relevant app
+  # preferences") select whichever high-usage user/app notes happened to be
+  # popular even when the graph had no answer.
+  "app", "could", "did", "does", "earlier", "especially", "first", "help",
+  "helping", "made", "partner", "personal", "previously", "recommendation",
+  "recommendations", "relevant", "specifically", "user", "version", "were",
 }
 # A focused recall should be a small evidence set, not a second startup
 # context dump. Four files still cover a cross-cutting question while bounding
@@ -30,18 +37,32 @@ MAX_AGENT_CATALOG = 300
 AGENT_TIMEOUT = int(os.environ.get("MEMORY_READER_TIMEOUT", "90"))
 
 
+def _tokens(value: str) -> set[str]:
+  """Exact searchable terms, including the parts of hyphenated compounds.
+
+  Exact tokens avoid the old substring bug where a request for a "plan" could
+  rank every "platform" note. Keeping both ``meal-planning`` and its parts
+  still lets a compound match a naturally-worded title.
+  """
+  found = set(_WORD.findall(value.lower()))
+  for word in tuple(found):
+    if "-" in word or "_" in word:
+      found.update(part for part in re.split(r"[-_]+", word) if len(part) >= 3)
+  return found
+
+
 def _terms(question: str) -> set[str]:
-  return {word for word in _WORD.findall(question.lower()) if word not in _STOP}
+  return {word for word in _tokens(question) if word not in _STOP}
 
 
 def _candidate_score(node: dict, terms: set[str]) -> int:
-  title = str(node.get("title") or "").lower()
-  description = str(node.get("description") or "").lower()
+  title = _tokens(str(node.get("title") or ""))
+  description = _tokens(str(node.get("description") or ""))
   raw_tags = node.get("tags")
-  tags = " ".join(
+  tags = _tokens(" ".join(
     str(item) for item in (raw_tags if isinstance(raw_tags, list) else [])
-  ).lower()
-  node_id = str(node.get("id") or "").lower()
+  ))
+  node_id = _tokens(str(node.get("id") or ""))
   return sum(
     8 * (term in title)
     + 5 * (term in description)
@@ -59,12 +80,19 @@ def _safe_int(value) -> int:
 
 
 def _catalog_for_agent(nodes: list[dict], terms: set[str]) -> list[dict]:
-  """Return a bounded, deterministic catalog for the retrieval subagent."""
+  """Return a bounded catalog with host-verifiable topical candidates.
+
+  The semantic selector may choose among plausible candidates, but it cannot
+  fill its quota from the entire graph when no catalog metadata overlaps the
+  focused request. In that case an empty catalog truthfully yields "No relevant
+  memories" instead of unrelated popular notes.
+  """
   valid = [
     node for node in nodes
     if isinstance(node, dict)
     and isinstance(node.get("path"), str)
     and node.get("path")
+    and _candidate_score(node, terms) > 0
   ]
   ranked = sorted(
     valid,
