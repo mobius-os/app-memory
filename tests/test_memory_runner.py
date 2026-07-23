@@ -637,6 +637,49 @@ class MemoryRunnerTests(unittest.TestCase):
         ["temporarily-unreadable"],
       )
 
+  def test_default_discovery_window_covers_a_full_proposal_batch(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      listing_paths = []
+      ids = [f"chat-{index:03d}" for index in range(75)]
+
+      def fake_api(path):
+        if path.startswith("/api/chat-logs?"):
+          listing_paths.append(path)
+          return {"items": [{"id": chat_id} for chat_id in ids]}
+        chat_id = path.rsplit("/", 1)[-1]
+        return {"title": chat_id, "messages": []}
+
+      runner._api_json = fake_api
+
+      chats = runner._redacted_chats()
+
+      self.assertEqual([chat["id"] for chat in chats], ids)
+      self.assertIn("limit=100", listing_paths[0])
+      self.assertEqual(runner._load_pending_chat_ids(), ids)
+
+  def test_full_discovery_window_still_retries_older_pending_chats(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      pending = [f"pending-{index:03d}" for index in range(70)]
+      latest = [f"latest-{index:03d}" for index in range(100)]
+      runner._remember_pending_chats([{"id": chat_id} for chat_id in pending])
+
+      def fake_api(path):
+        if path.startswith("/api/chat-logs?"):
+          return {"items": [{"id": chat_id} for chat_id in latest]}
+        chat_id = path.rsplit("/", 1)[-1]
+        return {"title": chat_id, "messages": []}
+
+      runner._api_json = fake_api
+
+      chats = runner._redacted_chats()
+
+      self.assertEqual(
+        [chat["id"] for chat in chats],
+        pending + latest[:30],
+      )
+
   def test_semantically_invalid_primary_proposal_uses_configured_fallback(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))

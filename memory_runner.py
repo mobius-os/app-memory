@@ -69,7 +69,15 @@ _ACTIVE_AGENT_GROUPS: set[int] = set()
 _PENDING_CHAT_IDS = STATE / "pending-chat-ids.json"
 _MAX_PENDING_CHAT_IDS = 500
 _MAX_SOURCE_CHATS = 100
-_LATEST_CHAT_LIMIT = 30
+# Discover a full proposal batch on every scheduled run. The old 30-chat
+# window was smaller than a busy day on a real instance; one missed cron tick
+# could then strand older summaries before they were ever added to the durable
+# retry queue.
+_LATEST_CHAT_LIMIT = _MAX_SOURCE_CHATS
+# Once a retry queue exists, reserve room for new arrivals without starving
+# older failed/unoffered chats. With no pending work the full 100 latest chats
+# are still eligible in one run.
+_LATEST_CHAT_RESERVE = 30
 
 
 @dataclass(frozen=True)
@@ -407,7 +415,7 @@ def _agent_choices(app_id: int) -> list[dict]:
   return choices
 
 
-def _redacted_chats(limit: int = 30) -> list[dict]:
+def _redacted_chats(limit: int = _LATEST_CHAT_LIMIT) -> list[dict]:
   listing = _api_json(f"/api/chat-logs?limit={min(limit, 100)}&cursor=0") or {}
   items = listing.get("items") if isinstance(listing.get("items"), list) else []
   recent_ids = [
@@ -421,7 +429,10 @@ def _redacted_chats(limit: int = 30) -> list[dict]:
   # latest-N window. Retry the prior closed set first, then add new arrivals.
   # Keep room for each night's newest ids while draining the durable queue in
   # FIFO order. The queue itself may be larger; unselected ids remain there.
-  pending_budget = max(0, _MAX_SOURCE_CHATS - min(limit, _LATEST_CHAT_LIMIT))
+  pending_budget = max(
+    0,
+    _MAX_SOURCE_CHATS - min(limit, _LATEST_CHAT_RESERVE),
+  )
   chat_ids = list(dict.fromkeys(
     _load_pending_chat_ids()[:pending_budget] + recent_ids
   ))[:_MAX_SOURCE_CHATS]

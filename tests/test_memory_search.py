@@ -109,6 +109,39 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertEqual(files, ["notes/quiet-ui.md"])
       self.assertIn("prefers a quiet interface", answer)
 
+  def test_semantic_selector_never_receives_unrelated_quota_fillers(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(
+        store,
+        title="Forge is the 3D printing tool",
+        body="Forge is used for 3D printing.",
+      )
+      with mock.patch.object(search, "_agent_paths") as select:
+        answer, files, _commit_id = search.retrieve(
+          "What did we previously decide about a Daily Landing that helps "
+          "the partner feel less scattered?",
+        )
+
+      self.assertEqual((answer, files), ("No relevant memories.", []))
+      select.assert_called_once_with(
+        mock.ANY,
+        [],
+      )
+
+  def test_exact_tokens_do_not_treat_plan_as_platform(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(
+        store,
+        title="Möbius platform update",
+        body="The platform update is durable.",
+      )
+      with mock.patch.object(search, "_agent_paths", return_value=[]):
+        answer, files, _commit_id = search.retrieve("meal plan")
+
+      self.assertEqual((answer, files), ("No relevant memories.", []))
+
   def test_returns_only_confined_cited_text_and_records_app_telemetry(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
