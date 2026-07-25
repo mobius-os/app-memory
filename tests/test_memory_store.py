@@ -113,6 +113,26 @@ class MemoryStoreTests(unittest.TestCase):
       self.assertEqual(second["commit"], first["commit"])
       self.assertEqual(store._git("rev-list", "--count", "main", text=True).stdout.strip(), "1")
 
+  def test_missing_pointer_recovers_an_already_committed_initial_graph(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      _, worktree = store.start_staging(seed)
+      (worktree / "graph.json").write_text(
+        '{"nodes":[],"edges":[],"problems":[]}\n',
+        encoding="utf-8",
+      )
+      first = store.publish(worktree)
+      store.READY.unlink()
+
+      _, recovered_worktree = store.start_staging(seed)
+      recovered = store.publish(recovered_worktree)
+
+      self.assertEqual(recovered["commit"], first["commit"])
+      self.assertFalse(recovered["changed"])
+      self.assertEqual(store.ready_pointer()["commit"], first["commit"])
+
   def test_all_published_commits_remain_readable_without_tree_copies(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))

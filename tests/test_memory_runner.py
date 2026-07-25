@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -122,6 +123,87 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertEqual(status["status"], "published")
       self.assertEqual(status["commit"], pointer["commit"])
       self.assertIn("specifically_reachable", status["topology"]["after"])
+
+  def test_first_install_publishes_seed_before_agent_review_finishes(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      runner._redacted_chats = lambda: []
+      proposal_started = threading.Event()
+      finish_proposal = threading.Event()
+
+      def slow_proposal(*_args):
+        proposal_started.set()
+        if not finish_proposal.wait(5):
+          raise TimeoutError("test did not release proposal")
+        return {
+          "summary": "nothing durable yet",
+          "followups": [],
+          "updates": [],
+          "deletes": [],
+        }
+
+      runner._proposal = slow_proposal
+
+      async def exercise():
+        task = asyncio.create_task(runner.run())
+        try:
+          self.assertTrue(
+            await asyncio.to_thread(proposal_started.wait, 5),
+            "agent review never started",
+          )
+          self.assertFalse(task.done())
+          pointer = store.ready_pointer()
+          self.assertIsNotNone(pointer)
+          graph = json.loads(
+            store.read_revision_file(pointer["commit"], "graph.json")
+          )
+          self.assertGreater(len(graph["nodes"]), 0)
+          self.assertFalse([
+            problem for problem in graph["problems"]
+            if problem.get("severity") != "warning"
+          ])
+        finally:
+          finish_proposal.set()
+        self.assertEqual(await task, 0)
+        status = json.loads((store.STATE / "run-status.json").read_text())
+        self.assertIsNone(status["previous_commit"])
+        self.assertTrue(status["new_commit"])
+
+      asyncio.run(exercise())
+
+  def test_first_install_keeps_seed_when_agent_review_is_degraded(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      runner._redacted_chats = lambda: []
+      runner._proposal = lambda *_args: runner.ProposalOutcome(
+        status="degraded",
+        proposal=None,
+        provider=None,
+        model=None,
+        attempted_agents=[],
+      )
+
+      self.assertEqual(asyncio.run(runner.run()), 2)
+      pointer = store.ready_pointer()
+      self.assertIsNotNone(pointer)
+      graph = json.loads(
+        store.read_revision_file(pointer["commit"], "graph.json")
+      )
+      self.assertGreater(len(graph["nodes"]), 0)
+      status = json.loads((store.STATE / "run-status.json").read_text())
+      self.assertEqual(status["status"], "degraded")
+      self.assertIsNone(status["previous_commit"])
+      self.assertEqual(status["commit"], pointer["commit"])
 
   def test_app_owned_docs_require_explicit_frontmatter_ownership(self):
     with tempfile.TemporaryDirectory() as raw:

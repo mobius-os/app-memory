@@ -438,9 +438,24 @@ def publish(staging: Path) -> dict:
   changed = _git("diff", "--cached", "--quiet", check=False).returncode != 0
   prior = ready_pointer()
   if not changed:
-    if prior is None:
+    if prior is not None:
+      return {**prior, "changed": False}
+    # A crash can land after Git durably commits the first graph but before the
+    # atomic .ready write. The next run validates and stages the same complete
+    # tree, so recover by publishing that existing main-branch HEAD instead of
+    # requiring an artificial follow-up change.
+    commit = _head()
+    if commit is None:
       raise ValueError("initial Memory repository has no files to commit")
-    return {**prior, "changed": False}
+    pointer = {
+      "schema": 2,
+      "repository": "repository",
+      "commit": commit,
+      "published_at": datetime.now(UTC).isoformat(),
+      "changed": False,
+    }
+    _atomic_text(READY, json.dumps(pointer, sort_keys=True) + "\n")
+    return pointer
   message = "Consolidate memory " + datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
   _git(
     "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null",

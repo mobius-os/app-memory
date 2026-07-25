@@ -329,6 +329,16 @@ def _topology_counts(graph: dict) -> dict[str, int]:
   }
 
 
+def _assert_publishable_graph(graph: dict) -> None:
+  """Reject structural graph errors while allowing maintenance warnings."""
+  blocking = [
+    problem for problem in graph.get("problems", [])
+    if isinstance(problem, dict) and problem.get("severity") != "warning"
+  ]
+  if blocking:
+    raise ValueError(f"invalid memory graph: {blocking!r}")
+
+
 def _app_id() -> int | None:
   raw = os.environ.get("MEMORY_APP_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
   return int(raw) if str(raw).isdigit() else None
@@ -1025,12 +1035,15 @@ async def run() -> int:
   previous = ready_pointer()
   baseline = None
   outcome = None
+  initial_commit_created = False
+  run_previous_commit = previous.get("commit") if previous else None
   chats: list[dict] = []
   try:
     run_id, staging = start_staging(SEED_DIR)
     # Migration may legitimately advance the pointer before consolidation.
     # Treat that imported commit as this run's immutable source revision.
     previous = ready_pointer()
+    run_previous_commit = previous.get("commit") if previous else None
     _record_run_status({
       "schema": 1,
       "run_id": run_id,
@@ -1038,13 +1051,33 @@ async def run() -> int:
       "started_at": started_at,
       "app_id": app_id,
       "process_uid": os.getuid(),
-      "previous_commit": previous.get("commit") if previous else None,
-      "commit": previous.get("commit") if previous else None,
+      "previous_commit": run_previous_commit,
+      "commit": run_previous_commit,
     })
     baseline = build_graph(staging, usage=load_usage())
     changed, deleted = _reconcile_app_owned_docs(staging, SEED_DIR)
     # Build once so the analyst receives a catalog even on first legacy import.
-    build_graph(staging, usage=load_usage())
+    prepared = build_graph(staging, usage=load_usage())
+    if previous is None:
+      # A brand-new install has no readable commit until publish() advances
+      # .ready. Do the deterministic orphan repair and publish the complete
+      # seed graph before chat discovery or a potentially minutes-long agent
+      # review. The analyst then improves that already-usable graph in a
+      # second atomic commit; degraded/failed reviews leave the seed visible.
+      changed.extend(_repair_orphans(staging, prepared))
+      prepared = build_graph(staging, usage=load_usage())
+      _assert_publishable_graph(prepared)
+      if not _app_active(app_id):
+        raise RuntimeError("Memory app became inactive; initial publication aborted")
+      previous = publish(staging)
+      initial_commit_created = bool(previous.get("changed"))
+      baseline = prepared
+      changed = []
+      deleted = []
+      _log(
+        f"published initial graph {previous['commit']} "
+        f"nodes={len(prepared['nodes'])}"
+      )
     chats = await asyncio.to_thread(_redacted_chats)
     # _redacted_chats queues listing ids before detail reads. Repeat at this
     # integration seam so injected/offline chat sources receive the same
@@ -1070,7 +1103,7 @@ async def run() -> int:
         "finished_at": finished_at,
         "app_id": app_id,
         "process_uid": os.getuid(),
-        "previous_commit": previous.get("commit") if previous else None,
+        "previous_commit": run_previous_commit,
         "commit": previous.get("commit") if previous else None,
         "attempted_agents": outcome.attempted_agents,
         "reason": "no_valid_text_only_proposal",
@@ -1103,12 +1136,7 @@ async def run() -> int:
     # overfull_map, bare_map_entry) are split candidates: they ride along in
     # graph.json and are counted in run-status/update-log so the partner can
     # act on them, but they must not fail an otherwise-valid commit.
-    blocking = [
-      problem for problem in graph.get("problems", [])
-      if isinstance(problem, dict) and problem.get("severity") != "warning"
-    ]
-    if blocking:
-      raise ValueError(f"invalid memory graph: {blocking!r}")
+    _assert_publishable_graph(graph)
     if not _app_active(app_id):
       raise RuntimeError("Memory app became inactive; publication aborted")
     pointer = publish(staging)
@@ -1122,9 +1150,9 @@ async def run() -> int:
       "finished_at": datetime.now(UTC).isoformat(),
       "app_id": app_id,
       "process_uid": os.getuid(),
-      "previous_commit": previous.get("commit") if previous else None,
+      "previous_commit": run_previous_commit,
       "commit": pointer["commit"],
-      "new_commit": bool(pointer.get("changed")),
+      "new_commit": initial_commit_created or bool(pointer.get("changed")),
       "provider": outcome.provider,
       "model": outcome.model,
       "changed_paths": changed,
@@ -1140,7 +1168,7 @@ async def run() -> int:
       _record_run_status(status)
       _append_update_log(
         run_id,
-        previous.get("commit") if previous else None,
+        run_previous_commit,
         pointer,
         proposal,
         changed,
@@ -1158,7 +1186,7 @@ async def run() -> int:
     _log(
       f"published {pointer['commit']} nodes={len(graph['nodes'])} "
       f"changed={len(changed)} deleted={len(deleted)} "
-      f"new_commit={pointer['changed']}"
+      f"new_commit={initial_commit_created or pointer['changed']}"
     )
     return 0
   except Exception as exc:
@@ -1171,7 +1199,7 @@ async def run() -> int:
         "finished_at": datetime.now(UTC).isoformat(),
         "app_id": app_id,
         "process_uid": os.getuid(),
-        "previous_commit": previous.get("commit") if previous else None,
+        "previous_commit": run_previous_commit,
         "commit": previous.get("commit") if previous else None,
         "error_class": type(exc).__name__,
       }
