@@ -49,7 +49,6 @@ import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
 import { EffortStepper } from './ui/EffortStepper.jsx'
 import { BackgroundAgentList } from './ui/BackgroundAgentList.jsx'
-import { ImportWizard } from './ui/ImportWizard.jsx'
 import { agentSlotLabel, canReorderAgentSlots, reorderAgentSlots } from './ui/backgroundAgentOrder.js'
 
 export { makeSharedMemoryStore } from './storage.js'
@@ -135,7 +134,6 @@ export default function App({ appId, token }) {
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
   const [scheduleStatus, setScheduleStatus] = useState('idle'); // idle | loading | ready | error
   const [scheduleCron, setScheduleCron] = useState('30 5 * * *');
   const [scheduleTime, setScheduleTime] = useState('05:30');
@@ -1081,14 +1079,6 @@ export default function App({ appId, token }) {
 
         <div style={S.headerRight}>
           <button
-            style={S.settingsBtn}
-            className="mg-settings-btn"
-            type="button"
-            onClick={() => setImportOpen(true)}
-          >
-            Import
-          </button>
-          <button
             style={{
               ...S.settingsBtn,
               ...(settingsOpen ? S.settingsBtnActive : {}),
@@ -1663,15 +1653,6 @@ export default function App({ appId, token }) {
             </div>
           </aside>
         </>
-      )}
-
-      {importOpen && (
-        <ImportWizard
-          appId={appId}
-          token={token}
-          graph={graph}
-          onClose={() => setImportOpen(false)}
-        />
       )}
     </div>
   );
