@@ -60,6 +60,13 @@ export function timeToDailyCron(value) {
   return `${minute} ${hour} * * *`;
 }
 
+const MEMORY_NOTE_INTENT_RE = /^note:([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/;
+
+export function memoryNoteIntent(value) {
+  if (typeof value !== 'string') return null;
+  return MEMORY_NOTE_INTENT_RE.exec(value.trim())?.[1] || null;
+}
+
 export function nodeRadius(node = {}) {
   const importance = Number(node.importance);
   const accessCount = Number(node.access_count);

@@ -35,6 +35,7 @@ const {
   timeToDailyCron,
   MEMORY_SANITIZE_OPTIONS,
   makeSharedMemoryStore,
+  memoryNoteIntent,
   buildAgentGroups,
 } = await import('./.build/index.mjs')
 
@@ -107,6 +108,32 @@ test('daily cron helpers reject custom or malformed schedules', () => {
   assert.equal(parseDailyCronTime('60 5 * * *'), null)
   assert.equal(timeToDailyCron('5:30'), null)
   assert.equal(timeToDailyCron('25:00'), null)
+})
+
+test('memory note intents accept only one bounded graph node id', () => {
+  assert.equal(memoryNoteIntent('note:quiet-ui'), 'quiet-ui')
+  assert.equal(memoryNoteIntent(' note:node_2.1 '), 'node_2.1')
+  for (const value of [
+    null,
+    '',
+    'setup',
+    'note:',
+    'note:../secret',
+    'note:two words',
+    `note:${'x'.repeat(129)}`,
+  ]) {
+    assert.equal(memoryNoteIntent(value), null)
+  }
+})
+
+test('a shell note intent opens the node without adding a second Back entry', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.match(source, /event\.source !== window\.parent/)
+  assert.match(source, /event\.data\?\.type !== 'moebius:app-intent'/)
+  assert.match(source, /memoryNoteIntent\(event\.data\.intent\)/)
+  assert.match(source, /nodesById\.get\(pendingIntentId\)/)
+  assert.match(source, /ownBackEntry:\s*false/)
+  assert.match(source, /opts\.ownBackEntry !== false/)
 })
 
 test('fetch wrapper passes app id into the Memory runner gate', () => {

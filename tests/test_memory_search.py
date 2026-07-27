@@ -105,9 +105,10 @@ class MemorySearchContractTests(unittest.TestCase):
       store, search = _load(Path(raw))
       _commit(store)
       with mock.patch.object(search, "_agent_paths", return_value=[]):
-        answer, files, _commit_id = search.retrieve("quiet interface")
-      self.assertEqual(files, ["notes/quiet-ui.md"])
-      self.assertIn("prefers a quiet interface", answer)
+        result = search.retrieve("quiet interface")
+      self.assertEqual(result.status, search.RESULT_HIT)
+      self.assertEqual(result.files, ("notes/quiet-ui.md",))
+      self.assertIn("prefers a quiet interface", result.answer)
 
   def test_semantic_selector_never_receives_unrelated_quota_fillers(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -118,12 +119,13 @@ class MemorySearchContractTests(unittest.TestCase):
         body="Forge is used for 3D printing.",
       )
       with mock.patch.object(search, "_agent_paths") as select:
-        answer, files, _commit_id = search.retrieve(
+        result = search.retrieve(
           "What did we previously decide about a Daily Landing that helps "
           "the partner feel less scattered?",
         )
 
-      self.assertEqual((answer, files), ("No relevant memories.", []))
+      self.assertEqual(result.status, search.RESULT_EMPTY)
+      self.assertEqual((result.answer, result.files), ("No relevant memories.", ()))
       select.assert_called_once_with(
         mock.ANY,
         [],
@@ -138,21 +140,23 @@ class MemorySearchContractTests(unittest.TestCase):
         body="The platform update is durable.",
       )
       with mock.patch.object(search, "_agent_paths", return_value=[]):
-        answer, files, _commit_id = search.retrieve("meal plan")
+        result = search.retrieve("meal plan")
 
-      self.assertEqual((answer, files), ("No relevant memories.", []))
+      self.assertEqual(result.status, search.RESULT_EMPTY)
+      self.assertEqual((result.answer, result.files), ("No relevant memories.", ()))
 
   def test_returns_only_confined_cited_text_and_records_app_telemetry(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
       pointer = _commit(store)
 
-      answer, files, commit = search.retrieve("Which quiet UI preferences matter?")
+      result = search.retrieve("Which quiet UI preferences matter?")
 
-      self.assertEqual(commit, pointer["commit"])
-      self.assertEqual(files, ["notes/quiet-ui.md"])
-      self.assertIn("prefers a quiet interface", answer)
-      self.assertIn("[notes/quiet-ui.md]", answer)
+      self.assertEqual(result.status, search.RESULT_HIT)
+      self.assertEqual(result.commit, pointer["commit"])
+      self.assertEqual(result.files, ("notes/quiet-ui.md",))
+      self.assertIn("prefers a quiet interface", result.answer)
+      self.assertIn("[notes/quiet-ui.md]", result.answer)
 
       old_argv = sys.argv
       sys.argv = [str(REPO / "memory_search.py"), "quiet UI preference", "chat-123"]
@@ -163,10 +167,31 @@ class MemorySearchContractTests(unittest.TestCase):
       finally:
         sys.argv = old_argv
       self.assertIn("FILES: notes/quiet-ui.md", out.getvalue())
+      marker = next(
+        line for line in out.getvalue().splitlines()
+        if line.startswith(search.RESULT_PREFIX)
+      )
+      payload = json.loads(marker.removeprefix(search.RESULT_PREFIX))
+      self.assertEqual(payload["status"], search.RESULT_HIT)
+      self.assertEqual(payload["notes"][0]["path"], "notes/quiet-ui.md")
       trace = json.loads((store.STATE / "read-trace" / "chat-123.json").read_text())
       self.assertEqual(trace["commit"], pointer["commit"])
       self.assertEqual(trace["files"], ["notes/quiet-ui.md"])
       self.assertNotIn("quiet UI preference", json.dumps(trace))
+
+  def test_run_requires_the_query_and_chat_id_contract_exactly(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, search = _load(Path(raw))
+      old_argv = sys.argv
+      try:
+        for args in ([], ["query"], ["query", "chat-1", "extra"]):
+          sys.argv = [str(REPO / "memory_search.py"), *args]
+          err = io.StringIO()
+          with contextlib.redirect_stderr(err):
+            self.assertEqual(search.run(), 2)
+          self.assertIn('"<chat_id>"', err.getvalue())
+      finally:
+        sys.argv = old_argv
 
   def test_malformed_pointer_returns_no_memory(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -174,14 +199,15 @@ class MemorySearchContractTests(unittest.TestCase):
       store.ROOT.mkdir(parents=True)
       store.READY.write_text('{"schema":2,"commit":"../../secret"}', encoding="utf-8")
 
-      answer, files, commit = search.retrieve("secret project")
+      result = search.retrieve("secret project")
 
-      self.assertEqual((answer, files, commit), ("No relevant memories.", [], None))
+      self.assertEqual(result.status, search.RESULT_FAILED)
+      self.assertEqual((result.files, result.commit), ((), None))
 
   def test_symlinked_note_is_never_read_or_emitted(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
-      pointer = _commit(store, title="Secret project", body="safe fact")
+      _commit(store, title="Secret project", body="safe fact")
       original_read = search.read_revision_file
 
       def reject_note(commit, rel, **kwargs):
@@ -190,11 +216,10 @@ class MemorySearchContractTests(unittest.TestCase):
         return original_read(commit, rel, **kwargs)
 
       with mock.patch.object(search, "read_revision_file", side_effect=reject_note):
-        answer, files, pinned = search.retrieve("secret project")
+        result = search.retrieve("secret project")
 
-      self.assertEqual(pinned, pointer["commit"])
-      self.assertEqual(files, [])
-      self.assertEqual(answer, "No relevant memories.")
+      self.assertEqual(result.status, search.RESULT_FAILED)
+      self.assertEqual(result.files, ())
 
   def test_pointer_change_mid_read_does_not_mix_commits(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -214,12 +239,61 @@ class MemorySearchContractTests(unittest.TestCase):
         return value
 
       with mock.patch.object(search, "read_revision_file", side_effect=switching_read):
-        answer, files, pinned = search.retrieve("quiet interface")
+        result = search.retrieve("quiet interface")
 
-      self.assertEqual(pinned, old["commit"])
-      self.assertEqual(files, ["notes/quiet-ui.md"])
-      self.assertIn("Old pinned fact", answer)
-      self.assertNotIn("New replacement fact", answer)
+      self.assertEqual(result.commit, old["commit"])
+      self.assertEqual(result.files, ("notes/quiet-ui.md",))
+      self.assertIn("Old pinned fact", result.answer)
+      self.assertNotIn("New replacement fact", result.answer)
+
+  def test_missing_graph_is_an_explicit_failed_result(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, search = _load(Path(raw))
+      old_argv = sys.argv
+      sys.argv = [str(REPO / "memory_search.py"), "quiet interface", "chat-1"]
+      out = io.StringIO()
+      try:
+        with contextlib.redirect_stdout(out):
+          self.assertEqual(search.run(), 1)
+      finally:
+        sys.argv = old_argv
+
+      marker = next(
+        line for line in out.getvalue().splitlines()
+        if line.startswith(search.RESULT_PREFIX)
+      )
+      self.assertEqual(
+        json.loads(marker.removeprefix(search.RESULT_PREFIX)),
+        {"status": search.RESULT_FAILED},
+      )
+
+  def test_corrupt_graph_is_failure_but_valid_no_match_is_empty(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      pointer = _commit(store)
+      original_read = search.read_revision_file
+
+      def corrupt_graph(commit, rel, **kwargs):
+        if rel == "graph.json":
+          return "{not-json"
+        return original_read(commit, rel, **kwargs)
+
+      with mock.patch.object(search, "read_revision_file", side_effect=corrupt_graph):
+        failed = search.retrieve("quiet interface")
+      self.assertEqual(failed.status, search.RESULT_FAILED)
+
+      def malformed_graph(commit, rel, **kwargs):
+        if rel == "graph.json":
+          return '{"nodes":"not-a-list"}'
+        return original_read(commit, rel, **kwargs)
+
+      with mock.patch.object(search, "read_revision_file", side_effect=malformed_graph):
+        malformed = search.retrieve("quiet interface")
+      self.assertEqual(malformed.status, search.RESULT_FAILED)
+
+      empty = search.retrieve("a subject absent from every note")
+      self.assertEqual(empty.status, search.RESULT_EMPTY)
+      self.assertEqual(empty.commit, pointer["commit"])
 
 
 if __name__ == "__main__":

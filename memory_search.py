@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from memory_store import read_revision_file, ready_pointer, record_read
@@ -35,6 +36,35 @@ MAX_FILES = 4
 MAX_EXCERPT = 900
 MAX_AGENT_CATALOG = 300
 AGENT_TIMEOUT = int(os.environ.get("MEMORY_READER_TIMEOUT", "90"))
+
+RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
+RESULT_HIT = "hit"
+RESULT_EMPTY = "empty"
+RESULT_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class RecallResult:
+  """One retrieval outcome, before it is rendered for the shell tool.
+
+  ``answer`` remains the agent-facing prose. ``status`` and ``notes`` are the
+  bounded machine contract consumed by Möbius, so chat observability never has
+  to infer success or citations from presentation text.
+  """
+
+  status: str
+  answer: str
+  files: tuple[str, ...] = ()
+  commit: str | None = None
+  notes: tuple[dict[str, str], ...] = ()
+
+
+def _failed() -> RecallResult:
+  return RecallResult(RESULT_FAILED, "Memory lookup failed.")
+
+
+def _empty(commit: str | None) -> RecallResult:
+  return RecallResult(RESULT_EMPTY, "No relevant memories.", commit=commit)
 
 
 def _tokens(value: str) -> set[str]:
@@ -205,18 +235,19 @@ def _excerpt(markdown: str) -> str:
   return body[:MAX_EXCERPT]
 
 
-def retrieve(question: str) -> tuple[str, list[str], str | None]:
-  """Return cited relevant text, verified paths, and the pinned commit."""
+def retrieve(question: str) -> RecallResult:
+  """Return one explicit hit, empty, or operational-failure outcome."""
   pointer = ready_pointer()
   if pointer is None:
-    return "No relevant memories.", [], None
+    return _failed()
   commit = pointer["commit"]
   try:
     graph = json.loads(read_revision_file(commit, "graph.json"))
   except (OSError, ValueError, json.JSONDecodeError):
-    return "No relevant memories.", [], commit
-  nodes = graph.get("nodes") if isinstance(graph, dict) else []
-  nodes = nodes if isinstance(nodes, list) else []
+    return _failed()
+  if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
+    return _failed()
+  nodes = graph["nodes"]
   terms = _terms(question)
   ranked = sorted(
     (
@@ -242,10 +273,11 @@ def retrieve(question: str) -> tuple[str, list[str], str | None]:
     # selector is deliberately a fallback, not a second automatic context load.
     selected = [node for score, node in ranked if score > 0][:MAX_FILES]
   if not selected:
-    return "No relevant memories.", [], commit
+    return _empty(commit)
 
   sections = []
   files = []
+  notes = []
   for node in selected:
     rel = str(node.get("path") or "")
     try:
@@ -256,30 +288,59 @@ def retrieve(question: str) -> tuple[str, list[str], str | None]:
     if not excerpt:
       continue
     files.append(rel)
+    notes.append({
+      "id": str(node.get("id") or Path(rel).stem),
+      "path": rel,
+      "title": str(node.get("title") or node.get("id") or Path(rel).stem),
+      "excerpt": excerpt,
+    })
     sections.append(
       f"- {node.get('title') or node.get('id')}: {excerpt} [{rel}]"
     )
   if not files:
-    return "No relevant memories.", [], commit
+    # The graph selected relevant nodes but none could be read safely. That is
+    # an operational failure, not evidence that the graph has no answer.
+    return _failed()
   answer = "Relevant memories:\n" + "\n".join(sections)
-  return answer, files, commit
+  return RecallResult(
+    RESULT_HIT,
+    answer,
+    files=tuple(files),
+    commit=commit,
+    notes=tuple(notes),
+  )
+
+
+def _result_payload(result: RecallResult) -> dict:
+  payload = {"status": result.status}
+  if result.status == RESULT_HIT:
+    payload["notes"] = list(result.notes)
+  return payload
 
 
 def run() -> int:
   args = [arg.strip() for arg in sys.argv[1:] if arg.strip()]
-  if not args:
-    sys.stderr.write('usage: memory_search.py "<focused recall prompt>" [chat_id]\n')
+  if len(args) != 2:
+    sys.stderr.write('usage: memory_search.py "<focused recall prompt>" "<chat_id>"\n')
     return 2
   question = args[0]
-  chat_id = args[1] if len(args) > 1 else ""
-  answer, files, commit = retrieve(question)
-  print(answer)
-  if files and commit:
+  chat_id = args[1]
+  result = retrieve(question)
+  print(result.answer)
+  if result.files and result.commit:
     # These pointers were opened by confined Python after the commit was
     # pinned; no model-generated citation is trusted.
-    print("FILES: " + ", ".join(files))
-    record_read(commit, question, files, chat_id)
-  return 0
+    print("FILES: " + ", ".join(result.files))
+    try:
+      record_read(result.commit, question, list(result.files), chat_id)
+    except (OSError, ValueError):
+      # Read-history telemetry is useful but does not change which immutable
+      # notes were successfully opened for this answer.
+      sys.stderr.write("warning: Memory read history could not be recorded\n")
+  print(RESULT_PREFIX + json.dumps(
+    _result_payload(result), ensure_ascii=True, separators=(",", ":"),
+  ))
+  return 1 if result.status == RESULT_FAILED else 0
 
 
 if __name__ == "__main__":
