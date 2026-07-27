@@ -22,6 +22,7 @@ import {
   escapeHtml,
   fmtBytes,
   hashStr,
+  memoryNoteIntent,
   neutralizeMemoryMarkdown,
   nodeRadius,
   parseDailyCronTime,
@@ -51,6 +52,7 @@ export { makeSharedMemoryStore } from './storage.js'
 export {
   MEMORY_SANITIZE_OPTIONS,
   buildLocalGraphData,
+  memoryNoteIntent,
   neutralizeMemoryMarkdown,
   nodeRadius,
   parseDailyCronTime,
@@ -122,6 +124,7 @@ export default function App({ appId, token }) {
   const [errMsg, setErrMsg] = useState('');
   const [view, setView] = useState('graph'); // graph | list
   const [selected, setSelected] = useState(null); // node object
+  const [pendingIntentId, setPendingIntentId] = useState(null);
   const [noteState, setNoteState] = useState({ status: 'idle', md: '', fm: {}, revalidating: false });
   const [hoverId, setHoverId] = useState(null);
   const [sortKey, setSortKey] = useState('access_count');
@@ -479,7 +482,7 @@ export default function App({ appId, token }) {
   const openPanel = useCallback(async (node, opts = {}) => {
     if (!node) return;
     if (!selected) panelOpenerRef.current = document.activeElement;
-    if (!selected && window.mobius?.nav?.open) {
+    if (!selected && opts.ownBackEntry !== false && window.mobius?.nav?.open) {
       try { panelNavRef.current?.close?.(); } catch {}
       const handle = window.mobius.nav.open('memory-note', () => {
         panelNavRef.current = null;
@@ -500,6 +503,32 @@ export default function App({ appId, token }) {
     // graph, list, or legend is counted with the node's kind.
     window.mobius.signal('memory_node_opened', { node_type: node.type === 'moc' ? 'moc' : 'note' });
   }, [selected]);
+
+  useEffect(() => {
+    const onIntent = (event) => {
+      if (event.source !== window.parent) return;
+      if (event.data?.type !== 'moebius:app-intent') return;
+      const id = memoryNoteIntent(event.data.intent);
+      if (id) setPendingIntentId(id);
+    };
+    window.addEventListener('message', onIntent);
+    return () => window.removeEventListener('message', onIntent);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingIntentId || !graph) return;
+    const node = nodesById.get(pendingIntentId);
+    setPendingIntentId(null);
+    if (node) {
+      // The shell intent already owns the outer Back entry that returns to the
+      // citing chat. Adding the panel's ordinary app sentinel here would make
+      // Back stop at Memory's home screen first.
+      void openPanel(node, {
+        ownBackEntry: false,
+        resetLocalDepth: true,
+      });
+    }
+  }, [pendingIntentId, graph, nodesById, openPanel]);
 
   const discuss = useCallback((node) => {
     const title = node.title || node.id;
