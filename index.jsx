@@ -21,11 +21,14 @@ import {
   cssVar,
   escapeHtml,
   fmtBytes,
+  formatUtcOffset,
   hashStr,
   memoryNoteIntent,
   neutralizeMemoryMarkdown,
   nodeRadius,
   parseDailyCronTime,
+  shiftDailyTime,
+  zoneOffsetMinutes,
   parseFrontmatter,
   relDate,
   renderWikiLinks,
@@ -46,6 +49,7 @@ import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
 import { EffortStepper } from './ui/EffortStepper.jsx'
 import { BackgroundAgentList } from './ui/BackgroundAgentList.jsx'
+import { ImportWizard } from './ui/ImportWizard.jsx'
 import { agentSlotLabel, canReorderAgentSlots, reorderAgentSlots } from './ui/backgroundAgentOrder.js'
 
 export { makeSharedMemoryStore } from './storage.js'
@@ -131,9 +135,17 @@ export default function App({ appId, token }) {
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [scheduleStatus, setScheduleStatus] = useState('idle'); // idle | loading | ready | error
   const [scheduleCron, setScheduleCron] = useState('30 5 * * *');
   const [scheduleTime, setScheduleTime] = useState('05:30');
+  // 'server' means "show the time in the server's own timezone" (the default);
+  // otherwise an IANA zone name. The cron itself is always stored server-local.
+  const [scheduleTz, setScheduleTz] = useState('server');
+  const [serverTz, setServerTz] = useState({ name: 'UTC', offsetMinutes: 0 });
+  // Whether the loaded server-time cron has been expressed in the saved
+  // timezone yet (a one-shot conversion after both loaders settle).
+  const scheduleTimeHydratedRef = useRef(false);
   const [scheduleCustom, setScheduleCustom] = useState(false);
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState('');
@@ -574,6 +586,11 @@ export default function App({ appId, token }) {
         ? settings
         : {};
       setAgentSettingsExtra(safeSettings);
+      setScheduleTz(
+        typeof safeSettings.schedule_timezone === 'string' && safeSettings.schedule_timezone.trim()
+          ? safeSettings.schedule_timezone.trim()
+          : 'server',
+      );
 
       let connected = null;
       if (statusRes?.ok) {
@@ -652,6 +669,7 @@ export default function App({ appId, token }) {
   const loadSchedule = useCallback(async () => {
     setScheduleStatus('loading');
     setScheduleMessage('');
+    scheduleTimeHydratedRef.current = false;
     try {
       const res = await fetch('/api/apps/schedules', {
         headers: authHeaders,
@@ -664,6 +682,15 @@ export default function App({ appId, token }) {
       const cron = typeof row?.cron === 'string' && row.cron.trim()
         ? row.cron.trim()
         : '30 5 * * *';
+      // Older backends don't report the server timezone; fall back to UTC,
+      // the conventional container default.
+      const offsetRaw = Number(row?.tz_offset_minutes);
+      setServerTz({
+        name: typeof row?.tz_name === 'string' && row.tz_name.trim()
+          ? row.tz_name.trim()
+          : 'UTC',
+        offsetMinutes: Number.isFinite(offsetRaw) ? offsetRaw : 0,
+      });
       const parsed = parseDailyCronTime(cron);
       setScheduleCron(cron);
       setScheduleCustom(!parsed);
@@ -685,9 +712,53 @@ export default function App({ appId, token }) {
     loadAgentSettings();
   }, [settingsOpen, agentStatus, loadAgentSettings]);
 
+  // Timezone choices for the schedule picker. The device zone is surfaced
+  // first; the full IANA list follows when the runtime can enumerate it.
+  const scheduleZones = useMemo(() => {
+    let zones = [];
+    try {
+      if (typeof Intl.supportedValuesOf === 'function') {
+        zones = Intl.supportedValuesOf('timeZone') || [];
+      }
+    } catch { /* older runtime; device zone below still works */ }
+    let device = '';
+    try { device = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}
+    if (device && !zones.includes(device)) zones = [device, ...zones];
+    return { zones, device };
+  }, []);
+
+  // The time field holds the wall time in the selected timezone; the cron is
+  // stored in the server's timezone. An unresolvable zone falls back to the
+  // server offset so the conversion is never silently wrong.
+  const scheduleTzOffset = useMemo(() => {
+    if (scheduleTz === 'server') return serverTz.offsetMinutes;
+    const offset = zoneOffsetMinutes(scheduleTz);
+    return offset == null ? serverTz.offsetMinutes : offset;
+  }, [scheduleTz, serverTz]);
+
+  // What the entered time means on the server's clock — what actually gets
+  // scheduled, and what the readout shows.
+  const scheduleServerTime = useMemo(
+    () => shiftDailyTime(scheduleTime, serverTz.offsetMinutes - scheduleTzOffset) || scheduleTime,
+    [scheduleTime, scheduleTzOffset, serverTz],
+  );
+
+  // One-shot after both loaders settle: the cron arrives in server time, so
+  // express it once in the saved timezone. After this, the field is the source
+  // of truth — changing the timezone deliberately leaves it untouched.
+  useEffect(() => {
+    if (scheduleStatus !== 'ready') return;
+    if (agentStatus !== 'ready' && agentStatus !== 'error') return;
+    if (scheduleTimeHydratedRef.current) return;
+    scheduleTimeHydratedRef.current = true;
+    setScheduleTime(
+      (prev) => shiftDailyTime(prev, scheduleTzOffset - serverTz.offsetMinutes) || prev,
+    );
+  }, [scheduleStatus, agentStatus, scheduleTzOffset, serverTz]);
+
   const saveSchedule = useCallback(async () => {
     if (scheduleSaving) return;
-    const cron = timeToDailyCron(scheduleTime);
+    const cron = timeToDailyCron(scheduleServerTime);
     if (!cron) {
       setScheduleMessage('Pick a valid time.');
       return;
@@ -711,14 +782,39 @@ export default function App({ appId, token }) {
       setScheduleCron(cron);
       setScheduleCustom(false);
       setScheduleStatus('ready');
-      setScheduleMessage('Saved');
-      setTimeout(() => setScheduleMessage(''), 2200);
+      // Persist the timezone display preference alongside the schedule.
+      // Re-read settings.json first so this merge never clobbers agent
+      // settings saved from another window.
+      let tzSaved = true;
+      try {
+        const settingsUrl = `/api/storage/apps/${encodeURIComponent(appId)}/settings.json`;
+        const currentRes = await fetch(settingsUrl, { headers: authHeaders });
+        const current = currentRes.ok ? await currentRes.json() : {};
+        const base = current && typeof current === 'object' && !Array.isArray(current)
+          ? current
+          : {};
+        const nextSettings = {
+          ...base,
+          schedule_timezone: scheduleTz === 'server' ? null : scheduleTz,
+        };
+        const putRes = await fetch(settingsUrl, {
+          method: 'PUT',
+          headers: { ...authHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify(nextSettings),
+        });
+        if (putRes.ok) setAgentSettingsExtra(nextSettings);
+        else tzSaved = false;
+      } catch {
+        tzSaved = false;
+      }
+      setScheduleMessage(tzSaved ? 'Saved' : 'Time saved; time zone preference did not save.');
+      if (tzSaved) setTimeout(() => setScheduleMessage(''), 2200);
     } catch (err) {
       setScheduleMessage(err.message || 'Could not save schedule.');
     } finally {
       setScheduleSaving(false);
     }
-  }, [appId, authHeaders, scheduleSaving, scheduleTime]);
+  }, [appId, authHeaders, scheduleSaving, scheduleServerTime, scheduleTz]);
 
   const setPrimaryAgentModeChoice = useCallback((mode) => {
     setPrimaryAgentMode(mode);
@@ -985,6 +1081,14 @@ export default function App({ appId, token }) {
 
         <div style={S.headerRight}>
           <button
+            style={S.settingsBtn}
+            className="mg-settings-btn"
+            type="button"
+            onClick={() => setImportOpen(true)}
+          >
+            Import
+          </button>
+          <button
             style={{
               ...S.settingsBtn,
               ...(settingsOpen ? S.settingsBtnActive : {}),
@@ -1061,8 +1165,34 @@ export default function App({ appId, token }) {
                   }}
                 />
               </label>
+              <label style={S.settingsField}>
+                <span style={S.settingsLabel}>Time zone</span>
+                <select
+                  style={{ ...S.timeInput, maxWidth: 300 }}
+                  value={scheduleTz}
+                  onChange={(e) => {
+                    setScheduleTz(e.target.value);
+                    setScheduleMessage('');
+                  }}
+                >
+                  <option value="server">
+                    {`Server — ${serverTz.name}${
+                      formatUtcOffset(serverTz.offsetMinutes) === serverTz.name
+                        ? ''
+                        : ` (${formatUtcOffset(serverTz.offsetMinutes)})`
+                    }`}
+                  </option>
+                  {scheduleZones.zones.map((zone) => (
+                    <option key={zone} value={zone}>
+                      {zone}{zone === scheduleZones.device ? ' (this device)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
               {scheduleCustom && (
-                <div style={S.settingsMeta}>Current cron: {scheduleCron}</div>
+                <div style={S.settingsMeta}>
+                  Current cron: {scheduleCron} ({serverTz.name})
+                </div>
               )}
               {scheduleMessage && (
                 <div
@@ -1533,6 +1663,15 @@ export default function App({ appId, token }) {
             </div>
           </aside>
         </>
+      )}
+
+      {importOpen && (
+        <ImportWizard
+          appId={appId}
+          token={token}
+          graph={graph}
+          onClose={() => setImportOpen(false)}
+        />
       )}
     </div>
   );

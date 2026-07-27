@@ -60,6 +60,51 @@ export function timeToDailyCron(value) {
   return `${minute} ${hour} * * *`;
 }
 
+// Shift a daily "HH:MM" wall time by a number of minutes, wrapping within the
+// 24h day. Used to translate between server-local cron time and a display
+// timezone. Returns null on malformed input.
+export function shiftDailyTime(value, deltaMinutes) {
+  if (typeof value !== 'string' || !Number.isFinite(deltaMinutes)) return null;
+  const m = value.match(/^(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const total = (
+    ((Number(m[1]) * 60 + Number(m[2]) + Math.round(deltaMinutes)) % 1440) + 1440
+  ) % 1440;
+  const hour = Math.floor(total / 60);
+  const minute = total % 60;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+// 0 -> "UTC", 120 -> "UTC+2", -270 -> "UTC-4:30".
+export function formatUtcOffset(minutes) {
+  if (!Number.isFinite(minutes)) return 'UTC';
+  const total = Math.round(minutes);
+  if (total === 0) return 'UTC';
+  const abs = Math.abs(total);
+  const rem = abs % 60;
+  const tail = rem ? `:${String(rem).padStart(2, '0')}` : '';
+  return `UTC${total < 0 ? '-' : '+'}${Math.floor(abs / 60)}${tail}`;
+}
+
+// Current UTC offset in minutes for an IANA timezone name, via Intl.
+// Returns null when the zone is unknown or the runtime cannot resolve it.
+export function zoneOffsetMinutes(timeZone, date = new Date()) {
+  if (typeof timeZone !== 'string' || !timeZone) return null;
+  try {
+    const part = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      timeZoneName: 'longOffset',
+    }).formatToParts(date).find((p) => p.type === 'timeZoneName');
+    const m = /^GMT(?:([+-])(\d{1,2}):?(\d{2})?)?$/.exec(part?.value || '');
+    if (!m) return null;
+    if (!m[1]) return 0;
+    const sign = m[1] === '-' ? -1 : 1;
+    return sign * (Number(m[2]) * 60 + Number(m[3] || 0));
+  } catch {
+    return null;
+  }
+}
+
 const MEMORY_NOTE_INTENT_RE = /^note:([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/;
 
 export function memoryNoteIntent(value) {
