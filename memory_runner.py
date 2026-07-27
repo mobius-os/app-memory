@@ -35,6 +35,11 @@ from memory_store import (
   start_staging,
   write_run_status,
 )
+from memory_text_provider import (
+  codex_agent_text,
+  codex_environment,
+  codex_text_command,
+)
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -707,58 +712,16 @@ def _claude_proposal(choice: dict, prompt: str) -> dict | None:
   return value if isinstance(value, dict) else None
 
 
-def _codex_agent_text(stdout: str) -> str:
-  parts: list[str] = []
-  for raw_line in stdout.splitlines():
-    try:
-      event = json.loads(raw_line)
-    except (TypeError, ValueError):
-      continue
-    if event.get("type") not in ("item.completed", "agent_message"):
-      continue
-    item = event.get("item") if isinstance(event.get("item"), dict) else event
-    if item.get("type") not in ("agent_message", "agentMessage"):
-      continue
-    value = item.get("text") or item.get("content")
-    if isinstance(value, str) and value:
-      parts.append(value)
-  return "".join(parts)
-
-
 def _codex_proposal(choice: dict, prompt: str) -> dict | None:
-  codex = os.environ.get("CODEX_CLI_PATH") or shutil.which("codex")
-  if not codex:
+  cmd = codex_text_command(model=choice.get("model"), effort=choice.get("effort"))
+  if cmd is None:
     return None
-  env = {
-    key: value for key, value in os.environ.items()
-    if key in ("PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME")
-  }
-  cmd = [
-    codex, "exec", "--json", "--ephemeral", "--ignore-user-config",
-    "--ignore-rules", "--strict-config", "--skip-git-repo-check",
-    "--sandbox", "read-only", "--color", "never",
-  ]
-  # Match the platform's reviewed text-only compaction seam: disable every
-  # feature that can expose shell, app, browser, computer, delegation, image,
-  # or goal tools. The read-only sandbox is defense in depth.
-  for feature in (
-    "shell_tool", "unified_exec", "apps", "browser_use",
-    "browser_use_external", "browser_use_full_cdp_access", "computer_use",
-    "multi_agent", "image_generation", "goals",
-  ):
-    cmd.extend(("--disable", feature))
-  if choice.get("model"):
-    cmd.extend(("--model", str(choice["model"])))
-  effort = choice.get("effort")
-  if effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
-    cmd.extend(("--config", f"model_reasoning_effort={json.dumps(effort)}"))
-  cmd.append("-")
   with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
-    result = _run_text_process(cmd, prompt, cwd=cwd, env=env)
+    result = _run_text_process(cmd, prompt, cwd=cwd, env=codex_environment())
   if result is None or result[0] != 0:
     return None
   stdout = result[1]
-  raw = _codex_agent_text(stdout).strip()
+  raw = codex_agent_text(stdout).strip()
   if raw.startswith("```"):
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
   try:
