@@ -411,6 +411,27 @@ class MemoryRunnerTests(unittest.TestCase):
       pending = json.loads(runner._PENDING_CHAT_IDS.read_text())
       self.assertEqual(pending["chat_ids"], ["chat-1"])
 
+  def test_one_bad_provenance_update_does_not_discard_verified_siblings(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      _seed(staging)
+      runner.build_graph(staging, usage={})
+      valid = _proposal("c01")["updates"][0]
+      invalid = {
+        **_proposal("invented-source")["updates"][0],
+        "path": "notes/unverified.md",
+      }
+
+      proposal = runner._normalize_proposal(
+        {"updates": [valid, invalid], "deletes": [], "followups": []},
+        allowed_chat_ids={"chat-1"},
+        source_handles={"c01": "chat-1"},
+      )
+
+      self.assertEqual([row["path"] for row in proposal["updates"]], [valid["path"]])
+      self.assertIn("notes/unverified.md: dropped", proposal["followups"][0])
+
   def test_claude_child_gets_no_platform_or_app_credentials(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))
