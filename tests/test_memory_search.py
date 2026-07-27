@@ -104,11 +104,24 @@ class MemorySearchContractTests(unittest.TestCase):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
       _commit(store)
-      with mock.patch.object(search, "_agent_paths", return_value=[]):
+      with mock.patch.object(search, "_agent_paths", return_value=None):
         result = search.retrieve("quiet interface")
       self.assertEqual(result.status, search.RESULT_HIT)
       self.assertEqual(result.files, ("notes/quiet-ui.md",))
       self.assertIn("prefers a quiet interface", result.answer)
+
+  def test_a_real_empty_semantic_verdict_is_not_padded_by_lexical_results(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      # The lexical ranker has a strong hit, but a selector that actually ran
+      # and returned [] made a semantic judgement. Do not replace that verdict
+      # with the old automatic top-four fallback.
+      with mock.patch.object(search, "_agent_paths", return_value=[]):
+        result = search.retrieve("quiet interface")
+
+      self.assertEqual(result.status, search.RESULT_EMPTY)
+      self.assertEqual(result.files, ())
 
   def test_semantic_selector_never_receives_unrelated_quota_fillers(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -139,11 +152,50 @@ class MemorySearchContractTests(unittest.TestCase):
         title="Möbius platform update",
         body="The platform update is durable.",
       )
-      with mock.patch.object(search, "_agent_paths", return_value=[]):
+      with mock.patch.object(search, "_agent_paths", return_value=None):
         result = search.retrieve("meal plan")
 
       self.assertEqual(result.status, search.RESULT_EMPTY)
       self.assertEqual((result.answer, result.files), ("No relevant memories.", ()))
+
+  def test_codex_selector_is_confined_and_parses_only_agent_messages(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, search = _load(Path(raw))
+      stdout = "\n".join([
+        json.dumps({"type": "item.completed", "item": {
+          "type": "command_execution", "text": "ignore me",
+        }}),
+        json.dumps({"type": "item.completed", "item": {
+          "type": "agent_message", "text": '{"paths":[]}',
+        }}),
+      ])
+      result = mock.Mock(returncode=0, stdout=stdout)
+      with (
+        mock.patch.dict(os.environ, {"CODEX_CLI_PATH": "/usr/bin/codex"}),
+        mock.patch.object(search.subprocess, "run", return_value=result) as run,
+      ):
+        text = search._codex_select_text("choose notes")
+
+      self.assertEqual(text, '{"paths":[]}')
+      command = run.call_args.args[0]
+      self.assertIn("read-only", command)
+      for feature in (
+        "shell_tool", "apps", "browser_use", "computer_use",
+        "multi_agent", "image_generation", "goals",
+      ):
+        self.assertIn(feature, command)
+      self.assertEqual(run.call_args.kwargs["input"], "choose notes")
+      self.assertNotIn("AGENT_TOKEN", run.call_args.kwargs["env"])
+
+  def test_auto_reader_uses_codex_when_claude_is_unavailable(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, search = _load(Path(raw))
+      with (
+        mock.patch.dict(os.environ, {"MEMORY_READER_PROVIDER": "auto"}),
+        mock.patch.object(search, "_claude_available", return_value=False),
+        mock.patch.object(search, "_codex_available", return_value=True),
+      ):
+        self.assertEqual(search._reader_provider(), "codex")
 
   def test_returns_only_confined_cited_text_and_records_app_telemetry(self):
     with tempfile.TemporaryDirectory() as raw:

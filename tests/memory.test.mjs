@@ -160,7 +160,7 @@ test('manifest activates Memory only through a system prompt contribution', () =
   assert.equal(manifest.embeds_agent, false)
   for (const file of [
     'memory-core.md', 'memory.md', 'memory_search.py', 'memory_runner.py',
-    'memory_store.py', 'memory_graph.py',
+    'memory_store.py', 'memory_graph.py', 'memory_text_provider.py',
   ]) {
     assert.ok(manifest.source_files.includes(file), file)
   }
@@ -170,13 +170,21 @@ test('manifest activates Memory only through a system prompt contribution', () =
 
 test('reader returns verified graph-relative file pointers', () => {
   const reader = readFileSync(new URL('../memory_search.py', import.meta.url), 'utf8')
+  const provider = readFileSync(new URL('../memory_text_provider.py', import.meta.url), 'utf8')
   assert.match(reader, /FILES:/)
   assert.match(reader, /ready_pointer\(\)/)
   assert.match(reader, /read_revision_file\(commit, rel\)/)
   assert.match(reader, /retrieval subagent/)
   assert.match(reader, /"--tools", ""/)
   assert.match(reader, /path in allowed/)
-  assert.doesNotMatch(reader, /codex|Glob|Grep/)
+  assert.match(provider, /"--sandbox", "read-only"/)
+  for (const feature of [
+    'shell_tool', 'apps', 'browser_use', 'computer_use', 'multi_agent',
+    'image_generation', 'goals',
+  ]) {
+    assert.ok(provider.includes(`"${feature}"`), feature)
+  }
+  assert.doesNotMatch(provider, /\bGlob\b|\bGrep\b/)
   const prompt = readFileSync(new URL('../memory-core.md', import.meta.url), 'utf8')
   assert.match(prompt, /focused retrieval prompt/)
   assert.match(prompt, /source_dir/)

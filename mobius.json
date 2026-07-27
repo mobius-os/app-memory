@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "2.1.12",
+  "version": "2.1.14",
   "description": "Build and retrieve an optional graph of durable facts without injecting it into every chat.",
   "author": "mobius-os",
   "license": "MIT",
@@ -55,6 +55,7 @@
     "memory_search.py",
     "memory_runner.py",
     "memory_store.py",
+    "memory_text_provider.py",
     "memory_graph.py",
     "constants.js",
     "theme.js",
