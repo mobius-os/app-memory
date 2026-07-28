@@ -569,6 +569,12 @@ def _audit_reads(app_id: int, commit: str, traces: list[dict]) -> list[dict]:
     live_stop_reason = (
       traversal.get("stop_reason") if isinstance(traversal, dict) else None
     )
+    live_frontier = (
+      [item for item in traversal.get("frontier_at_stop", []) if isinstance(item, dict)]
+      if isinstance(traversal, dict)
+      and isinstance(traversal.get("frontier_at_stop"), list)
+      else []
+    )
     host_selection_override = _host_selection_override(traversal, live_files)
     deep_files = [node.path for node in deep.selected]
     audits.append({
@@ -585,6 +591,7 @@ def _audit_reads(app_id: int, commit: str, traces: list[dict]) -> list[dict]:
         "opened": live_opened,
         "selected": live_files,
         "stop_reason": live_stop_reason,
+        "frontier_at_stop": live_frontier,
         "host_selection_override": host_selection_override,
       },
       "deep": {
@@ -602,6 +609,7 @@ def _audit_reads(app_id: int, commit: str, traces: list[dict]) -> list[dict]:
         ],
         "selected": deep_files,
         "stop_reason": deep.stop_reason,
+        "frontier_at_stop": list(deep.frontier_at_stop),
         "selected_nodes": [
           {"path": node.path, "title": node.title, "content": node.content}
           for node in deep.selected
@@ -899,9 +907,16 @@ def _proposal_envelope(
     bounded["source_handle"] = f"chat:{handle}"
     payload["redacted_recent_chats"].append(bounded)
     encoded = json.dumps(payload, ensure_ascii=False)
+    # The graph is useful routing context, but today's learning input owns the
+    # remaining prompt space. Trim the deterministic graph tail before giving
+    # up a chat, then keep trying later chats when one unusually large chat
+    # still cannot fit. Only chats actually present are acknowledged later.
+    while len(encoded) > _MAX_PROMPT_DATA_CHARS and payload["existing_graph"]:
+      payload["existing_graph"].pop()
+      encoded = json.dumps(payload, ensure_ascii=False)
     if len(encoded) > _MAX_PROMPT_DATA_CHARS:
       payload["redacted_recent_chats"].pop()
-      break
+      continue
     included_chats.append(chat)
   encoded = json.dumps(payload, ensure_ascii=False)
   # The graph catalog itself is bounded field-by-field but can still be large
@@ -1485,6 +1500,7 @@ def _record_recall_audits(
   overreach_count = 0
   no_memory_count = 0
   route_miss_count = 0
+  continuation_miss_count = 0
   selection_miss_count = 0
   override_count = 0
   candidate_count = 0
@@ -1504,11 +1520,25 @@ def _record_recall_audits(
         item.get("path") for item in audit.get("live", {}).get("opened", [])
         if isinstance(item, dict) and isinstance(item.get("path"), str)
       }
+      live_frontier_paths = {
+        node.get("path")
+        for parent in audit.get("live", {}).get("frontier_at_stop", [])
+        if isinstance(parent, dict)
+        for node in parent.get("nodes", [])
+        if isinstance(node, dict) and isinstance(node.get("path"), str)
+      }
       missed_nodes = list(verdict.get("missed_nodes") or [])
-      if any(path not in live_opened_paths for path in missed_nodes):
-        route_miss_count += 1
-      else:
+      if any(path in live_opened_paths for path in missed_nodes):
         selection_miss_count += 1
+        miss_class = "selection"
+      elif any(path in live_frontier_paths for path in missed_nodes):
+        continuation_miss_count += 1
+        miss_class = "continuation"
+      else:
+        route_miss_count += 1
+        miss_class = "route"
+    else:
+      miss_class = None
     if overreach:
       overreach_count += 1
     if no_memory:
@@ -1516,7 +1546,7 @@ def _record_recall_audits(
     if audit.get("live", {}).get("host_selection_override") is True:
       override_count += 1
     record = {
-      "schema": 2,
+      "schema": 3,
       "run_id": run_id,
       "read_id": read_id,
       "at": str(audit.get("at") or ""),
@@ -1527,11 +1557,18 @@ def _record_recall_audits(
       "deep_selected": list(audit.get("deep", {}).get("selected") or []),
       "live_stop_reason": audit.get("live", {}).get("stop_reason"),
       "deep_stop_reason": audit.get("deep", {}).get("stop_reason"),
+      "live_frontier_at_stop": list(
+        audit.get("live", {}).get("frontier_at_stop") or []
+      ),
+      "deep_frontier_at_stop": list(
+        audit.get("deep", {}).get("frontier_at_stop") or []
+      ),
       "host_selection_override": audit.get("live", {}).get("host_selection_override") is True,
       "potential_misses": list(potential or []),
       "outcome": outcome,
       "overreach": overreach,
       "missed_nodes": list(verdict.get("missed_nodes") or []),
+      "miss_class": miss_class,
       "overselected_nodes": list(verdict.get("overselected_nodes") or []),
       "reason": str(verdict.get("reason") or ""),
     }
@@ -1541,11 +1578,14 @@ def _record_recall_audits(
   overreach_total = int(prior.get("overreaches", 0) or 0) + overreach_count
   no_memory_total = int(prior.get("no_memory", 0) or 0) + no_memory_count
   route_miss_total = int(prior.get("route_misses", 0) or 0) + route_miss_count
+  continuation_miss_total = (
+    int(prior.get("continuation_misses", 0) or 0) + continuation_miss_count
+  )
   selection_miss_total = int(prior.get("selection_misses", 0) or 0) + selection_miss_count
   override_total = int(prior.get("host_selection_overrides", 0) or 0) + override_count
   candidate_total = int(prior.get("candidate_misses", 0) or 0) + candidate_count
   stats = {
-    "schema": 2,
+    "schema": 3,
     "updated_at": datetime.now(UTC).isoformat(),
     "last_audited_at": max(str(item["at"]) for item in read_audits),
     "reads_audited": total,
@@ -1558,6 +1598,8 @@ def _record_recall_audits(
     "no_memory_rate": no_memory_total / total if total else 0.0,
     "route_misses": route_miss_total,
     "route_miss_rate": route_miss_total / total if total else 0.0,
+    "continuation_misses": continuation_miss_total,
+    "continuation_miss_rate": continuation_miss_total / total if total else 0.0,
     "selection_misses": selection_miss_total,
     "selection_miss_rate": selection_miss_total / total if total else 0.0,
     "host_selection_overrides": override_total,
@@ -1683,6 +1725,7 @@ async def run() -> int:
         "reason": "no_valid_text_only_proposal",
         "source_chat_count": len(proposal_chats),
         "queued_chat_count": len(chats),
+        "chat_input_starved": bool(chats and not proposal_chats),
         "read_audit_count": len(read_audits),
       })
       _log("DEGRADED no configured text-only provider produced a valid proposal")
@@ -1734,6 +1777,7 @@ async def run() -> int:
       "deleted_paths": deleted,
       "source_chat_count": len(proposal_chats),
       "queued_chat_count": len(chats),
+      "chat_input_starved": bool(chats and not proposal_chats),
       "read_audit_count": len(read_audits),
       "topology": {
         "before": _topology_counts(baseline),
@@ -1805,6 +1849,9 @@ async def run() -> int:
         proposal_chats if "proposal_chats" in locals() else []
       )
       failure["queued_chat_count"] = len(chats)
+      failure["chat_input_starved"] = bool(
+        chats and not (proposal_chats if "proposal_chats" in locals() else [])
+      )
       failure["read_audit_count"] = len(read_audits)
       _record_run_status(failure)
     except OSError:
