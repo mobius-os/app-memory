@@ -587,8 +587,15 @@ def _state_lock():
     yield
 
 
-def record_read(commit: str, question: str, files: list[str], chat_id: str = "") -> None:
-  """Atomically record usage counters and one bounded retrieval trace."""
+def record_read(
+  commit: str,
+  question: str,
+  files: list[str],
+  chat_id: str = "",
+  *,
+  traversal: dict | None = None,
+) -> None:
+  """Atomically record selected-node usage and one replayable read trace."""
   clean_ids = [Path(rel).stem for rel in files if rel.startswith(("notes/", "mocs/"))]
   with _state_lock():
     usage_path = STATE / "usage.json"
@@ -601,18 +608,33 @@ def record_read(commit: str, question: str, files: list[str], chat_id: str = "")
     for node_id in clean_ids:
       usage[node_id] = int(usage.get(node_id, 0) or 0) + 1
     _atomic_text(usage_path, json.dumps(usage, indent=2, sort_keys=True) + "\n")
-    trace_id = re.sub(r"[^A-Za-z0-9-]", "", chat_id)[:64] or uuid.uuid4().hex
+    safe_chat_id = re.sub(r"[^A-Za-z0-9_-]", "", chat_id)[:128]
+    read_id = uuid.uuid4().hex
+    at = datetime.now(UTC).isoformat()
     trace = {
-      "schema": 2,
-      "at": datetime.now(UTC).isoformat(),
+      "schema": 3,
+      "read_id": read_id,
+      "at": at,
       "commit": commit,
+      "chat_id": safe_chat_id,
+      "question": question[:8_000],
       "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
       "files": files,
+      "traversal": traversal if isinstance(traversal, dict) else {},
     }
+    # Keep one easy-to-inspect latest trace per chat, while the append-only
+    # log retains every read for the nightly replay.
+    trace_id = safe_chat_id or read_id
     _atomic_text(
       STATE / "read-trace" / f"{trace_id}.json",
       json.dumps(trace, indent=2, sort_keys=True) + "\n",
     )
+    log_path = STATE / "read-log" / f"{at[:10]}.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+      handle.write(json.dumps(trace, ensure_ascii=False, sort_keys=True) + "\n")
+      handle.flush()
+      os.fsync(handle.fileno())
 
 
 def load_usage() -> dict[str, int]:

@@ -176,10 +176,11 @@ test('reader returns verified graph-relative file pointers', () => {
   const provider = readFileSync(new URL('../memory_text_provider.py', import.meta.url), 'utf8')
   assert.match(reader, /FILES:/)
   assert.match(reader, /ready_pointer\(\)/)
-  assert.match(reader, /read_revision_file\(commit, rel\)/)
-  assert.match(reader, /retrieval subagent/)
-  assert.match(reader, /"--tools", ""/)
-  assert.match(reader, /path in allowed/)
+  assert.match(reader, /read_revision_file\(self\.commit, path\)/)
+  assert.match(reader, /graph\.open\("index", 0, None\)/)
+  assert.match(reader, /child_id in allowed\[parent_id\]/)
+  assert.match(reader, /Confined graph traversal/)
+  assert.match(provider, /"--tools", ""/)
   assert.match(provider, /"--sandbox", "read-only"/)
   for (const feature of [
     'shell_tool', 'apps', 'browser_use', 'computer_use', 'multi_agent',

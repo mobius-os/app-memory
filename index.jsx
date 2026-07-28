@@ -12,7 +12,7 @@
 // Only App lives here: it owns top-level graph/note state, persistence wiring,
 // shell navigation state, and mounts the graph, list, and note-panel UI.
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { EFFORT_LEVELS, PALETTE, S, defaultEffort } from './constants.js'
+import { EFFORT_LEVELS, NOTE_BASE, PALETTE, S, defaultEffort } from './constants.js'
 import { CSS } from './theme.js'
 import { makeSharedMemoryStore } from './storage.js'
 import {
@@ -117,6 +117,11 @@ function effortLabel(provider, value) {
   return (EFFORT_LEVELS[provider] || []).find((level) => level.value === value)?.label || value;
 }
 
+function policyNumber(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(12, parsed)) : fallback;
+}
+
 export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
   const [revision, setRevision] = useState(null);
@@ -131,6 +136,7 @@ export default function App({ appId, token }) {
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState('schedule');
   const [scheduleStatus, setScheduleStatus] = useState('idle'); // idle | loading | ready | error
   const [scheduleCron, setScheduleCron] = useState('30 5 * * *');
   const [scheduleTime, setScheduleTime] = useState('05:30');
@@ -151,6 +157,11 @@ export default function App({ appId, token }) {
   const [secondaryAgentEffort, setSecondaryAgentEffort] = useState('');
   const [agentSaving, setAgentSaving] = useState(false);
   const [agentMessage, setAgentMessage] = useState('');
+  const [liveBreadth, setLiveBreadth] = useState(4);
+  const [liveDepth, setLiveDepth] = useState(4);
+  const [nightBreadth, setNightBreadth] = useState(6);
+  const [nightDepth, setNightDepth] = useState(6);
+  const [recallStats, setRecallStats] = useState(null);
   const [localDepth, setLocalDepth] = useState(1);
   // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
   // Defaults to 'text' — the user arrives here from the global graph, so they
@@ -181,6 +192,9 @@ export default function App({ appId, token }) {
   const panelRef = useRef(null);
   const panelCloseRef = useRef(null);
   const panelOpenerRef = useRef(null);
+  const settingsButtonRef = useRef(null);
+  const settingsDialogRef = useRef(null);
+  const settingsCloseRef = useRef(null);
   // One-shot guards for the open-outcome analytics signals: the graph.json
   // subscribe callback re-fires on every revalidation and maintenance rebuild,
   // so without these the open/empty signals would inflate on a single session.
@@ -561,10 +575,11 @@ export default function App({ appId, token }) {
     setAgentMessage('');
     try {
       const headers = authHeaders;
-      const [settingsRes, statusRes, modelsRes] = await Promise.all([
+      const [settingsRes, statusRes, modelsRes, statsRes] = await Promise.all([
         fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, { headers }),
         fetch('/api/auth/providers/status', { headers }).catch(() => null),
         fetch('/api/auth/providers/models', { headers }).catch(() => null),
+        fetch(`${NOTE_BASE}app-state/recall-stats.json`, { headers }).catch(() => null),
       ]);
       if (!settingsRes.ok && settingsRes.status !== 404) {
         throw new Error('Could not load agent settings.');
@@ -574,6 +589,16 @@ export default function App({ appId, token }) {
         ? settings
         : {};
       setAgentSettingsExtra(safeSettings);
+      setLiveBreadth(policyNumber(safeSettings.live_breadth, 4));
+      setLiveDepth(policyNumber(safeSettings.live_depth, 4));
+      setNightBreadth(policyNumber(safeSettings.night_breadth, 6));
+      setNightDepth(policyNumber(safeSettings.night_depth, 6));
+      if (statsRes?.ok) {
+        const value = await statsRes.json();
+        setRecallStats(value && typeof value === 'object' ? value : null);
+      } else {
+        setRecallStats(null);
+      }
 
       let connected = null;
       if (statusRes?.ok) {
@@ -684,6 +709,40 @@ export default function App({ appId, token }) {
     if (!settingsOpen || agentStatus !== 'idle') return;
     loadAgentSettings();
   }, [settingsOpen, agentStatus, loadAgentSettings]);
+
+  useEffect(() => {
+    if (!settingsOpen) return undefined;
+    settingsCloseRef.current?.focus();
+    const onKey = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSettingsOpen(false);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = settingsDialogRef.current?.querySelectorAll(
+        'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusable?.length) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.requestAnimationFrame(() => settingsButtonRef.current?.focus());
+    };
+  }, [settingsOpen]);
 
   const saveSchedule = useCallback(async () => {
     if (scheduleSaving) return;
@@ -804,6 +863,10 @@ export default function App({ appId, token }) {
       fallback_effort: secondaryAgentMode === 'app' && secondaryAgentProvider
         ? effortForProvider(secondaryAgentProvider, secondaryAgentEffort)
         : null,
+      live_breadth: policyNumber(liveBreadth, 4),
+      live_depth: policyNumber(liveDepth, 4),
+      night_breadth: policyNumber(nightBreadth, 6),
+      night_depth: policyNumber(nightDepth, 6),
     };
     try {
       const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, {
@@ -820,7 +883,7 @@ export default function App({ appId, token }) {
         throw new Error(detail || 'Could not save agent settings.');
       }
       setAgentSettingsExtra(payload);
-      setAgentMessage('Agents saved');
+      setAgentMessage('Settings saved');
       setTimeout(() => setAgentMessage(''), 2200);
     } catch (err) {
       setAgentMessage(err.message || 'Could not save agent settings.');
@@ -840,6 +903,10 @@ export default function App({ appId, token }) {
     secondaryAgentProvider,
     secondaryAgentModel,
     secondaryAgentEffort,
+    liveBreadth,
+    liveDepth,
+    nightBreadth,
+    nightDepth,
   ]);
 
   // The detail drawer is modal on phone and desktop (it owns a scrim), so it
@@ -985,6 +1052,7 @@ export default function App({ appId, token }) {
 
         <div style={S.headerRight}>
           <button
+            ref={settingsButtonRef}
             style={{
               ...S.settingsBtn,
               ...(settingsOpen ? S.settingsBtnActive : {}),
@@ -1026,184 +1094,311 @@ export default function App({ appId, token }) {
       </header>
 
       {settingsOpen && (
-        <section style={S.settingsPanel}>
-          <div style={S.settingsCopy}>
-            <div style={S.settingsTitle}>Maintenance</div>
-            <div style={S.settingsSub}>Schedule and Background agents</div>
-          </div>
-
-          {scheduleStatus === 'idle' || scheduleStatus === 'loading' ? (
-            <div style={S.settingsMeta}>Loading schedule...</div>
-          ) : scheduleStatus === 'error' ? (
-            <div style={S.settingsActions}>
-              <span style={S.settingsError}>{scheduleMessage}</span>
-              <button
-                style={S.settingsGhostBtn}
-                type="button"
-                onClick={loadSchedule}
-              >
-                Retry
-              </button>
-            </div>
-          ) : (
-            <>
-              <label style={S.settingsField}>
-                <span style={S.settingsLabel}>Run time</span>
-                <input
-                  style={S.timeInput}
-                  type="time"
-                  step="60"
-                  value={scheduleTime}
-                  onChange={(e) => {
-                    setScheduleTime(e.target.value);
-                    setScheduleCustom(false);
-                    setScheduleMessage('');
-                  }}
-                />
-              </label>
-              {scheduleCustom && (
-                <div style={S.settingsMeta}>Current cron: {scheduleCron}</div>
-              )}
-              {scheduleMessage && (
-                <div
-                  style={
-                    scheduleMessage === 'Saved'
-                      ? S.settingsOk
-                      : S.settingsError
-                  }
-                >
-                  {scheduleMessage}
-                </div>
-              )}
-              <div style={S.settingsActions}>
-                <button
-                  style={S.settingsGhostBtn}
-                  type="button"
-                  onClick={() => setSettingsOpen(false)}
-                >
-                  Close
-                </button>
-                <button
-                  style={{
-                    ...S.settingsSaveBtn,
-                    ...(scheduleSaving ? S.settingsSaveBtnDisabled : {}),
-                  }}
-                  type="button"
-                  onClick={saveSchedule}
-                  disabled={scheduleSaving}
-                >
-                  {scheduleSaving ? 'Saving...' : 'Save'}
-                </button>
-              </div>
-            </>
-          )}
-          <div className="mg-agent-settings">
-            <div className="mg-agent-settings-head">
+        <div
+          className="mg-settings-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSettingsOpen(false);
+          }}
+        >
+          <section
+            ref={settingsDialogRef}
+            className="mg-settings-deck"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mg-settings-title"
+          >
+            <header className="mg-settings-head">
               <div>
-                <div className="mg-agent-settings-title">Background agents</div>
-                <div className="mg-agent-settings-sub">
-                  Tried in order. Drag to change priority. Each row follows Möbius Settings by default, or can use its own model for Memory.
-                </div>
+                <div className="mg-settings-kicker">Memory control</div>
+                <h2 id="mg-settings-title">Memory settings</h2>
+                <p>Shape how Memory searches, reviews itself, and maintains the graph.</p>
               </div>
-              {agentStatus === 'error' && (
-                <button
-                  style={S.settingsGhostBtn}
-                  type="button"
-                  onClick={loadAgentSettings}
-                >
-                  Retry
-                </button>
-              )}
-            </div>
-            {agentStatus === 'idle' || agentStatus === 'loading' ? (
-              <div style={S.settingsMeta}>Loading agent settings...</div>
-            ) : agentStatus === 'error' ? (
-              <div style={S.settingsError}>{agentMessage}</div>
-            ) : (
-              <>
-                <BackgroundAgentList
-                  onMove={reorderAgents}
-                  itemLabels={agentLabels}
-                  reorderDisabled={!canReorderAgents}
-                  reorderDisabledReason="Choose an app override for both rows before changing priority; inherited Settings agents keep their Möbius Settings order."
-                >
-                  <div key="primary">
-                    <ModelPicker
-                      provider={primaryAgentMode === 'system' ? '' : agentProvider}
-                      model={primaryAgentMode === 'system' ? '' : agentModel}
-                      groups={visibleAgentGroups}
-                      connectedProviders={connectedProviders}
-                      title="Memory primary model"
-                      navKey="memory-primary-model"
-                      useSettingsDefault={primaryAgentMode === 'system'}
-                      onSettingsDefault={() => setPrimaryAgentModeChoice('system')}
-                      effortLabel={primaryAgentMode === 'system' ? '' : effortLabel(agentProvider, agentEffort)}
-                      efforts={EFFORT_LEVELS[agentProvider] || []}
-                      effort={agentEffort}
-                      effortControl={primaryAgentMode === 'system' ? null : (
-                        <EffortStepper provider={agentProvider} value={agentEffort} onChange={setAgentEffort} />
-                      )}
-                      onChange={(nextProvider, nextModel) => {
-                        setPrimaryAgentModeChoice('app');
-                        setAgentProvider(nextProvider);
-                        setAgentModel(nextModel);
-                        setAgentEffort(effortForProvider(nextProvider, agentEffort));
-                        setAgentMessage('');
-                      }}
-                    />
-                  </div>
-                  <div key="secondary">
-                    <ModelPicker
-                      provider={secondaryAgentMode === 'system' ? '' : secondaryAgentProvider}
-                      model={secondaryAgentMode === 'system' ? '' : secondaryAgentModel}
-                      groups={visibleAgentGroups}
-                      connectedProviders={connectedProviders}
-                      title="Memory secondary model"
-                      navKey="memory-secondary-model"
-                      useSettingsDefault={secondaryAgentMode === 'system'}
-                      onSettingsDefault={() => setSecondaryAgentModeChoice('system')}
-                      effortLabel={secondaryAgentMode === 'system' ? '' : effortLabel(secondaryAgentProvider, secondaryAgentEffort)}
-                      efforts={EFFORT_LEVELS[secondaryAgentProvider] || []}
-                      effort={secondaryAgentEffort}
-                      effortControl={secondaryAgentMode === 'system' ? null : (
-                        <EffortStepper
-                          provider={secondaryAgentProvider}
-                          value={secondaryAgentEffort}
-                          onChange={setSecondaryAgentEffort}
-                        />
-                      )}
-                      onChange={(nextProvider, nextModel) => {
-                        setSecondaryAgentModeChoice('app');
-                        setSecondaryAgentProvider(nextProvider);
-                        setSecondaryAgentModel(nextModel);
-                        setSecondaryAgentEffort(effortForProvider(nextProvider, secondaryAgentEffort));
-                        setAgentMessage('');
-                      }}
-                    />
-                  </div>
-                </BackgroundAgentList>
-                <div style={S.settingsActions}>
-                  {agentMessage && (
-                    <span style={agentMessage === 'Agents saved' ? S.settingsOk : S.settingsError}>
-                      {agentMessage}
-                    </span>
-                  )}
+              <button
+                ref={settingsCloseRef}
+                className="mg-settings-close"
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                aria-label="Close settings"
+              >
+                ×
+              </button>
+            </header>
+
+            <div className="mg-settings-layout">
+              <nav className="mg-settings-nav" aria-label="Memory settings sections">
+                {[
+                  ['schedule', 'Schedule', 'When nightly review runs'],
+                  ['agents', 'Background agents', 'Models and priority'],
+                  ['retrieval', 'Retrieval', 'Live and nightly search limits'],
+                ].map(([key, label, hint]) => (
                   <button
-                    style={{
-                      ...S.settingsSaveBtn,
-                      ...(agentSaving ? S.settingsSaveBtnDisabled : {}),
-                    }}
+                    key={key}
                     type="button"
-                    onClick={saveAgentSettings}
-                    disabled={agentSaving}
+                    className={`mg-settings-nav-item${settingsSection === key ? ' is-active' : ''}`}
+                    onClick={() => setSettingsSection(key)}
+                    aria-current={settingsSection === key ? 'page' : undefined}
                   >
-                    {agentSaving ? 'Saving...' : 'Save agents'}
+                    <span>{label}</span>
+                    <small>{hint}</small>
                   </button>
-                </div>
-              </>
-            )}
-          </div>
-        </section>
+                ))}
+              </nav>
+
+              <div className="mg-settings-content mg-scroll">
+                {settingsSection === 'retrieval' && (
+                  <div className="mg-settings-section">
+                    <div className="mg-section-intro">
+                      <div>
+                        <div className="mg-settings-kicker">Graph retrieval</div>
+                        <h3>How far Memory can explore</h3>
+                      </div>
+                      <p>
+                        Breadth is the maximum new links considered from each opened note. Depth is how many layers it may follow. The reader can stop early.
+                      </p>
+                    </div>
+
+                    <div className="mg-stat-grid" aria-label="Retrieval quality">
+                      <div className="mg-stat-card">
+                        <span>Audited reads</span>
+                        <strong>{Number(recallStats?.reads_audited || 0)}</strong>
+                      </div>
+                      <div className="mg-stat-card">
+                        <span>Miss rate</span>
+                        <strong>{Math.round(Number(recallStats?.miss_rate ?? recallStats?.important_miss_rate ?? 0) * 100)}%</strong>
+                      </div>
+                      <div className="mg-stat-card">
+                        <span>Overreach</span>
+                        <strong>{Math.round(Number(recallStats?.overreach_rate || 0) * 100)}%</strong>
+                      </div>
+                      <div className="mg-stat-card">
+                        <span>Host overrides</span>
+                        <strong>{Math.round(Number(recallStats?.model_to_host_selection_override_rate || 0) * 100)}%</strong>
+                      </div>
+                    </div>
+
+                    {agentStatus === 'idle' || agentStatus === 'loading' ? (
+                      <div className="mg-settings-loading">Loading retrieval settings…</div>
+                    ) : agentStatus === 'error' ? (
+                      <div className="mg-settings-callout is-error">
+                        <span>{agentMessage}</span>
+                        <button type="button" onClick={loadAgentSettings}>Retry</button>
+                      </div>
+                    ) : (
+                      <div className="mg-policy-grid">
+                        <fieldset className="mg-policy-card">
+                          <legend>Live reads <span>Fast, focused recall</span></legend>
+                          <label>
+                            <span>Breadth <small>Links per open note</small></span>
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              min="1"
+                              max="12"
+                              value={liveBreadth}
+                              onChange={(event) => {
+                                setLiveBreadth(policyNumber(event.target.value, 4));
+                                setAgentMessage('');
+                              }}
+                            />
+                          </label>
+                          <label>
+                            <span>Depth <small>Maximum graph layers</small></span>
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              min="1"
+                              max="12"
+                              value={liveDepth}
+                              onChange={(event) => {
+                                setLiveDepth(policyNumber(event.target.value, 4));
+                                setAgentMessage('');
+                              }}
+                            />
+                          </label>
+                        </fieldset>
+                        <fieldset className="mg-policy-card is-nightly">
+                          <legend>Nightly replay <span>Deeper quality review</span></legend>
+                          <label>
+                            <span>Breadth <small>Links per open note</small></span>
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              min="1"
+                              max="12"
+                              value={nightBreadth}
+                              onChange={(event) => {
+                                setNightBreadth(policyNumber(event.target.value, 6));
+                                setAgentMessage('');
+                              }}
+                            />
+                          </label>
+                          <label>
+                            <span>Depth <small>Maximum graph layers</small></span>
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              min="1"
+                              max="12"
+                              value={nightDepth}
+                              onChange={(event) => {
+                                setNightDepth(policyNumber(event.target.value, 6));
+                                setAgentMessage('');
+                              }}
+                            />
+                          </label>
+                        </fieldset>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {settingsSection === 'schedule' && (
+                  <div className="mg-settings-section">
+                    <div className="mg-section-intro">
+                      <div>
+                        <div className="mg-settings-kicker">Nightly maintenance</div>
+                        <h3>Choose a quiet review time</h3>
+                      </div>
+                      <p>Memory reviews recent learning and recall quality once each day.</p>
+                    </div>
+                    {scheduleStatus === 'idle' || scheduleStatus === 'loading' ? (
+                      <div className="mg-settings-loading">Loading schedule…</div>
+                    ) : scheduleStatus === 'error' ? (
+                      <div className="mg-settings-callout is-error">
+                        <span>{scheduleMessage}</span>
+                        <button type="button" onClick={loadSchedule}>Retry</button>
+                      </div>
+                    ) : (
+                      <div className="mg-schedule-card">
+                        <div className="mg-schedule-orb" aria-hidden="true"><span /></div>
+                        <div className="mg-schedule-copy">
+                          <label htmlFor="mg-run-time">Daily run time</label>
+                          <span>Uses your Möbius timezone.</span>
+                          {scheduleCustom && <small>Current custom schedule: {scheduleCron}</small>}
+                        </div>
+                        <input
+                          id="mg-run-time"
+                          type="time"
+                          step="60"
+                          value={scheduleTime}
+                          onChange={(event) => {
+                            setScheduleTime(event.target.value);
+                            setScheduleCustom(false);
+                            setScheduleMessage('');
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {settingsSection === 'agents' && (
+                  <div className="mg-settings-section">
+                    <div className="mg-section-intro">
+                      <div>
+                        <div className="mg-settings-kicker">Background agents</div>
+                        <h3>Choose who maintains Memory</h3>
+                      </div>
+                      <p>Tried in order. Drag to change priority; each row can follow Möbius Settings or use its own model.</p>
+                    </div>
+                    {agentStatus === 'idle' || agentStatus === 'loading' ? (
+                      <div className="mg-settings-loading">Loading background agents…</div>
+                    ) : agentStatus === 'error' ? (
+                      <div className="mg-settings-callout is-error">
+                        <span>{agentMessage}</span>
+                        <button type="button" onClick={loadAgentSettings}>Retry</button>
+                      </div>
+                    ) : (
+                      <BackgroundAgentList
+                        onMove={reorderAgents}
+                        itemLabels={agentLabels}
+                        reorderDisabled={!canReorderAgents}
+                        reorderDisabledReason="Choose an app override for both rows before changing priority; inherited Settings agents keep their Möbius Settings order."
+                      >
+                        <div key="primary">
+                          <ModelPicker
+                            provider={primaryAgentMode === 'system' ? '' : agentProvider}
+                            model={primaryAgentMode === 'system' ? '' : agentModel}
+                            groups={visibleAgentGroups}
+                            connectedProviders={connectedProviders}
+                            title="Memory primary model"
+                            navKey="memory-primary-model"
+                            useSettingsDefault={primaryAgentMode === 'system'}
+                            onSettingsDefault={() => setPrimaryAgentModeChoice('system')}
+                            effortLabel={primaryAgentMode === 'system' ? '' : effortLabel(agentProvider, agentEffort)}
+                            efforts={EFFORT_LEVELS[agentProvider] || []}
+                            effort={agentEffort}
+                            effortControl={primaryAgentMode === 'system' ? null : (
+                              <EffortStepper provider={agentProvider} value={agentEffort} onChange={setAgentEffort} />
+                            )}
+                            onChange={(nextProvider, nextModel) => {
+                              setPrimaryAgentModeChoice('app');
+                              setAgentProvider(nextProvider);
+                              setAgentModel(nextModel);
+                              setAgentEffort(effortForProvider(nextProvider, agentEffort));
+                              setAgentMessage('');
+                            }}
+                          />
+                        </div>
+                        <div key="secondary">
+                          <ModelPicker
+                            provider={secondaryAgentMode === 'system' ? '' : secondaryAgentProvider}
+                            model={secondaryAgentMode === 'system' ? '' : secondaryAgentModel}
+                            groups={visibleAgentGroups}
+                            connectedProviders={connectedProviders}
+                            title="Memory secondary model"
+                            navKey="memory-secondary-model"
+                            useSettingsDefault={secondaryAgentMode === 'system'}
+                            onSettingsDefault={() => setSecondaryAgentModeChoice('system')}
+                            effortLabel={secondaryAgentMode === 'system' ? '' : effortLabel(secondaryAgentProvider, secondaryAgentEffort)}
+                            efforts={EFFORT_LEVELS[secondaryAgentProvider] || []}
+                            effort={secondaryAgentEffort}
+                            effortControl={secondaryAgentMode === 'system' ? null : (
+                              <EffortStepper
+                                provider={secondaryAgentProvider}
+                                value={secondaryAgentEffort}
+                                onChange={setSecondaryAgentEffort}
+                              />
+                            )}
+                            onChange={(nextProvider, nextModel) => {
+                              setSecondaryAgentModeChoice('app');
+                              setSecondaryAgentProvider(nextProvider);
+                              setSecondaryAgentModel(nextModel);
+                              setSecondaryAgentEffort(effortForProvider(nextProvider, secondaryAgentEffort));
+                              setAgentMessage('');
+                            }}
+                          />
+                        </div>
+                      </BackgroundAgentList>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <footer className="mg-settings-foot">
+              <span className={`mg-settings-message${(
+                settingsSection === 'schedule' ? scheduleMessage === 'Saved' : agentMessage === 'Settings saved'
+              ) ? ' is-ok' : ''}`} role="status" aria-live="polite">
+                {settingsSection === 'schedule' ? scheduleMessage : agentMessage}
+              </span>
+              <button
+                className="mg-settings-save"
+                type="button"
+                onClick={settingsSection === 'schedule' ? saveSchedule : saveAgentSettings}
+                disabled={
+                  settingsSection === 'schedule'
+                    ? scheduleSaving || scheduleStatus !== 'ready'
+                    : agentSaving || agentStatus !== 'ready'
+                }
+              >
+                {(settingsSection === 'schedule' ? scheduleSaving : agentSaving)
+                  ? 'Saving…'
+                  : settingsSection === 'schedule' ? 'Save schedule' : 'Save settings'}
+              </button>
+            </footer>
+          </section>
+        </div>
       )}
 
       {showHealth && problems.length > 0 && (

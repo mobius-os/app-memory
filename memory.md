@@ -13,7 +13,10 @@ repository/mocs/                     maps of content with described [[links]]
 repository/notes/                    one durable claim per note
 repository/graph.json                deterministic viewer index
 repository/.git/                     compact history and rollback data
-app-state/read-trace/                 bounded retrieval observations
+app-state/read-trace/                 latest retrieval observation per chat
+app-state/read-log/YYYY-MM-DD.jsonl   append-only replayable read traces
+app-state/recall-audit/YYYY-MM-DD.jsonl
+app-state/recall-stats.json           miss rate, graph size, search policies
 app-state/update-log/YYYY-MM-DD.jsonl
 app-state/run-status.json             latest scheduled-run outcome
 app-state/run-log/YYYY-MM-DD.jsonl    append-only operational outcomes
@@ -41,6 +44,31 @@ bounded existing graph text so it can reconcile rather than merely append.
 It tries the configured background-agent order through confined, text-only
 Claude and Codex adapters. If none produces valid JSON, the run is recorded as
 degraded and the published commit does not move.
+
+Every successful night completes three duties in one proposal:
+
+1. **Learn.** Review the day's chats for durable, future-useful facts about the
+   partner. Write atomic nodes with chat provenance and place them behind
+   described links reachable from the root. `source: [chat:<id>]` is the
+   backlink to the source chat; do not copy a whole chat into a graph node just
+   to create provenance.
+2. **Audit recall.** Replay every unaudited live read through the same
+   root-linked navigator with the configured larger nightly breadth and depth.
+   Opened routing nodes and selected answer nodes remain separate. Compare the
+   live selection with the deeper selection. When important information was
+   missed, repair the shortest useful route—usually a clearer upper summary or
+   link cue, a better cross-link, or moving the important distinction upward.
+   Record one verdict per replay so the cumulative miss rate can reveal when
+   the graph has outgrown the live search policy.
+3. **Prune.** The nightly navigator checks every full node it opens for stale
+   facts. The writer receives full selected nodes and full stale candidates,
+   then removes or updates facts that are demonstrably stale, obsolete,
+   redundant, or superseded. A stale candidate is a lead to verify, not proof.
+
+The live and nightly traversals have breadth-per-open-node and maximum-depth
+controls. They deliberately have no total-node budget. The navigator expands
+only branches it judges relevant and may stop early.
+
 Promote only durable, future-useful facts; preserve `source` provenance. Merge
 duplicates when the winner is unambiguous; deleting the redundant copy is safe
 because prior published commits remain in Git history. For corrections, update
@@ -75,3 +103,7 @@ Finish by rebuilding `graph.json`, fixing every publish-blocking error,
 committing the complete graph, advancing `.ready`, and appending a compact JSONL update
 record. Per-chat summaries remain base-platform continuity and are neither
 stored nor managed by this app.
+
+Reflection owns qualitative review of the nightly writer. If its interview
+finds weak inclusion, placement, correction, or pruning decisions, improve this
+maintenance prompt rather than adding a parallel write path.

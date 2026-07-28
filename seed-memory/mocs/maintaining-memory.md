@@ -31,5 +31,8 @@ returned text and verified file pointers.
 - **One idea per note.** Title it as the specific claim. Link every note into
   at least one map ([[index]] → maps → notes). No orphans.
 - **Recall deliberately.** The main agent formulates what prior context it
-  needs; Memory's tool-free reader selects paths from one pinned immutable
-  commit, and the host verifies them before opening files.
+  needs; Memory's tool-free navigator follows described links from the root and
+  returns complete selected nodes from one pinned immutable commit.
+- **Learn from misses.** The nightly pass replays every new read with
+  wider/deeper traversal, records important misses, improves the shortest
+  routing path that hid them, and prunes facts proven stale while in view.
