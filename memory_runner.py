@@ -57,7 +57,11 @@ LOG_PATH = Path(
 SOURCE_DIR = Path(__file__).resolve().parent
 SEED_DIR = SOURCE_DIR / "seed-memory"
 SKILL_PATH = SOURCE_DIR / "memory.md"
-TIMEOUT = int(os.environ.get("MEMORY_AGENT_TIMEOUT", "300"))
+# Per-attempt analyst budget. High-effort frontier models over a maxed-out
+# ~200K-char prompt routinely need well over five minutes; 300s killed every
+# real consolidation. fetch.sh caps the whole run at 3600s and at most two
+# analyst attempts run (primary + fallback), so 1500s each fits with margin.
+TIMEOUT = int(os.environ.get("MEMORY_AGENT_TIMEOUT", "1500"))
 _UPDATE_PATH = re.compile(
   r"^(?:index\.md|(?:notes|mocs)/[a-z0-9][a-z0-9._-]*\.md)$"
 )
@@ -1024,9 +1028,14 @@ def _claude_proposal(choice: dict, prompt: str) -> dict | None:
     effort = "xhigh"
   if effort in {"low", "medium", "high", "xhigh", "max"}:
     cmd += ["--effort", effort]
+  model = choice.get("model") or "default"
   with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
     result = _run_text_process(cmd, prompt, cwd=cwd, env=env)
-  if result is None or result[0] != 0:
+  if result is None:
+    _log(f"claude analyst ({model}) timed out after {TIMEOUT}s")
+    return None
+  if result[0] != 0:
+    _log(f"claude analyst ({model}) exited rc={result[0]}")
     return None
   raw = (result[1] or "").strip()
   if raw.startswith("```"):
@@ -1034,6 +1043,7 @@ def _claude_proposal(choice: dict, prompt: str) -> dict | None:
   try:
     value = json.loads(raw)
   except ValueError:
+    _log(f"claude analyst ({model}) returned non-JSON output")
     return None
   return value if isinstance(value, dict) else None
 
@@ -1084,9 +1094,14 @@ def _codex_proposal(choice: dict, prompt: str) -> dict | None:
   if effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
     cmd.extend(("--config", f"model_reasoning_effort={json.dumps(effort)}"))
   cmd.append("-")
+  model = choice.get("model") or "default"
   with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
     result = _run_text_process(cmd, prompt, cwd=cwd, env=env)
-  if result is None or result[0] != 0:
+  if result is None:
+    _log(f"codex analyst ({model}) timed out after {TIMEOUT}s")
+    return None
+  if result[0] != 0:
+    _log(f"codex analyst ({model}) exited rc={result[0]}")
     return None
   stdout = result[1]
   raw = _codex_agent_text(stdout).strip()
@@ -1095,6 +1110,7 @@ def _codex_proposal(choice: dict, prompt: str) -> dict | None:
   try:
     value = json.loads(raw)
   except ValueError:
+    _log(f"codex analyst ({model}) returned non-JSON output")
     return None
   return value if isinstance(value, dict) else None
 
