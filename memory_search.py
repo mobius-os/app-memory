@@ -29,6 +29,8 @@ RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
 RESULT_HIT = "hit"
 RESULT_EMPTY = "empty"
 RESULT_FAILED = "failed"
+RESULT_REASON_NOT_READY = "not_ready"
+RESULT_REASON_READ_FAILED = "read_failed"
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 _WORD = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
@@ -95,6 +97,7 @@ class RecallResult:
   commit: str | None = None
   notes: tuple[dict[str, str], ...] = ()
   traversal: TraversalResult | None = None
+  reason: str | None = None
 
 
 class RevisionGraph:
@@ -620,7 +623,11 @@ def _answer(traversal: TraversalResult) -> RecallResult:
 def retrieve(question: str) -> RecallResult:
   pointer = ready_pointer()
   if pointer is None:
-    return RecallResult(RESULT_FAILED, "Memory lookup failed.")
+    return RecallResult(
+      RESULT_FAILED,
+      "Memory lookup failed.",
+      reason=RESULT_REASON_NOT_READY,
+    )
   commit = pointer["commit"]
   breadth, depth = _live_policy()
   try:
@@ -632,7 +639,11 @@ def retrieve(question: str) -> RecallResult:
       text_call=_live_text_call(),
     )
   except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-    return RecallResult(RESULT_FAILED, "Memory lookup failed.")
+    return RecallResult(
+      RESULT_FAILED,
+      "Memory lookup failed.",
+      reason=RESULT_REASON_READ_FAILED,
+    )
   return _answer(traversal)
 
 
@@ -642,6 +653,13 @@ def _result_payload(result: RecallResult) -> dict:
     # This is a compact product receipt, not the memory transport. Complete
     # selected node contents are already in the human-readable output above.
     payload["notes"] = list(result.notes[:12])
+  elif result.status == RESULT_FAILED and result.reason in {
+    RESULT_REASON_NOT_READY,
+    RESULT_REASON_READ_FAILED,
+  }:
+    # Product-safe enum only. Never expose an exception, path, or provider
+    # response through the receipt that becomes owner-facing chat metadata.
+    payload["reason"] = result.reason
   return payload
 
 

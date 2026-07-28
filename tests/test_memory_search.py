@@ -254,7 +254,10 @@ class MemorySearchContractTests(unittest.TestCase):
       )
       self.assertEqual(
         json.loads(marker.removeprefix(search.RESULT_PREFIX)),
-        {"status": search.RESULT_FAILED},
+        {
+          "status": search.RESULT_FAILED,
+          "reason": search.RESULT_REASON_NOT_READY,
+        },
       )
 
   def test_corrupt_graph_is_failure_but_valid_no_match_is_empty(self):
