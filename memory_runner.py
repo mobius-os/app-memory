@@ -10,6 +10,7 @@ upserts, and atomically advances a pointer after committing a complete graph.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from memory_graph import build as build_graph
+from memory_search import (
+  DEFAULT_LIVE_BREADTH,
+  DEFAULT_LIVE_DEPTH,
+  DEFAULT_NIGHT_BREADTH,
+  DEFAULT_NIGHT_DEPTH,
+  MAX_CONFIGURED_BREADTH,
+  MAX_CONFIGURED_DEPTH,
+  traverse,
+)
 from memory_store import (
   STATE,
   discard_staging,
@@ -35,11 +45,7 @@ from memory_store import (
   start_staging,
   write_run_status,
 )
-from memory_text_provider import (
-  codex_agent_text,
-  codex_environment,
-  codex_text_command,
-)
+from memory_text_provider import run_text
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -72,6 +78,7 @@ _UNFILED_START = "<!-- memory-managed:unfiled:start -->"
 _UNFILED_END = "<!-- memory-managed:unfiled:end -->"
 _ACTIVE_AGENT_GROUPS: set[int] = set()
 _PENDING_CHAT_IDS = STATE / "pending-chat-ids.json"
+_RECALL_STATS = STATE / "recall-stats.json"
 _MAX_PENDING_CHAT_IDS = 500
 _MAX_SOURCE_CHATS = 100
 # Discover a full proposal batch on every scheduled run. The old 30-chat
@@ -389,6 +396,46 @@ def _settings(app_id: int) -> dict:
   return value if isinstance(value, dict) else {}
 
 
+def _positive_int(value: object, fallback: int, maximum: int) -> int:
+  try:
+    parsed = int(value)
+  except (TypeError, ValueError):
+    return fallback
+  return max(1, min(maximum, parsed))
+
+
+def _night_policy(app_id: int) -> tuple[int, int]:
+  settings = _settings(app_id)
+  return (
+    _positive_int(
+      settings.get("night_breadth"),
+      DEFAULT_NIGHT_BREADTH,
+      MAX_CONFIGURED_BREADTH,
+    ),
+    _positive_int(
+      settings.get("night_depth"),
+      DEFAULT_NIGHT_DEPTH,
+      MAX_CONFIGURED_DEPTH,
+    ),
+  )
+
+
+def _live_policy(app_id: int) -> tuple[int, int]:
+  settings = _settings(app_id)
+  return (
+    _positive_int(
+      settings.get("live_breadth"),
+      DEFAULT_LIVE_BREADTH,
+      MAX_CONFIGURED_BREADTH,
+    ),
+    _positive_int(
+      settings.get("live_depth"),
+      DEFAULT_LIVE_DEPTH,
+      MAX_CONFIGURED_DEPTH,
+    ),
+  )
+
+
 def _agent_choices(app_id: int) -> list[dict]:
   context = _api_json(f"/api/apps/{app_id}/job-context") or {}
   settings = _settings(app_id)
@@ -428,6 +475,187 @@ def _agent_choices(app_id: int) -> list[dict]:
     seen.add(identity)
     choices.append(normalized)
   return choices
+
+
+def _navigator_text_call(app_id: int):
+  """Use the same configured confined agents for each graph decision."""
+  choices = _agent_choices(app_id)
+
+  def call(prompt: str) -> str | None:
+    for choice in choices:
+      provider = str(choice.get("provider") or "")
+      if provider not in ("claude", "codex"):
+        continue
+      value = run_text(
+        provider,
+        prompt,
+        model=choice.get("model"),
+        effort=choice.get("effort"),
+        timeout=TIMEOUT,
+      )
+      if value:
+        return value
+    return None
+
+  return call
+
+
+def _recall_stats() -> dict:
+  try:
+    value = json.loads(_RECALL_STATS.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return {}
+  return value if isinstance(value, dict) else {}
+
+
+def _pending_read_traces() -> list[dict]:
+  """Return every completed live read after the last successful audit."""
+  cursor = str(_recall_stats().get("last_audited_at") or "")
+  records: list[dict] = []
+  seen: set[str] = set()
+  for path in sorted((STATE / "read-log").glob("*.jsonl")):
+    try:
+      lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+      continue
+    for line in lines:
+      try:
+        record = json.loads(line)
+      except ValueError:
+        continue
+      if not isinstance(record, dict) or record.get("schema") != 3:
+        continue
+      read_id = record.get("read_id")
+      at = record.get("at")
+      question = record.get("question")
+      if (
+        not isinstance(read_id, str)
+        or read_id in seen
+        or not isinstance(at, str)
+        or at <= cursor
+        or not isinstance(question, str)
+        or not question.strip()
+      ):
+        continue
+      seen.add(read_id)
+      records.append(record)
+  return sorted(records, key=lambda item: (str(item["at"]), str(item["read_id"])))
+
+
+def _audit_reads(app_id: int, commit: str, traces: list[dict]) -> list[dict]:
+  """Replay live reads with the same navigator at the nightly policy."""
+  breadth, depth = _night_policy(app_id)
+  text_call = _navigator_text_call(app_id)
+  audits: list[dict] = []
+  for trace in traces:
+    deep = traverse(
+      str(trace["question"]),
+      commit,
+      breadth=breadth,
+      depth_limit=depth,
+      text_call=text_call,
+      audit=True,
+    )
+    live_files = [
+      path for path in trace.get("files", [])
+      if isinstance(path, str)
+    ] if isinstance(trace.get("files"), list) else []
+    live_opened = []
+    traversal = trace.get("traversal")
+    if isinstance(traversal, dict) and isinstance(traversal.get("opened"), list):
+      live_opened = [
+        item for item in traversal["opened"] if isinstance(item, dict)
+      ]
+    live_stop_reason = (
+      traversal.get("stop_reason") if isinstance(traversal, dict) else None
+    )
+    host_selection_override = _host_selection_override(traversal, live_files)
+    deep_files = [node.path for node in deep.selected]
+    audits.append({
+      "read_id": str(trace["read_id"]),
+      "at": str(trace["at"]),
+      "question": str(trace["question"]),
+      "live": {
+        "breadth": (
+          traversal.get("breadth") if isinstance(traversal, dict) else None
+        ),
+        "depth": (
+          traversal.get("depth_limit") if isinstance(traversal, dict) else None
+        ),
+        "opened": live_opened,
+        "selected": live_files,
+        "stop_reason": live_stop_reason,
+        "host_selection_override": host_selection_override,
+      },
+      "deep": {
+        "breadth": deep.breadth,
+        "depth": deep.depth_limit,
+        "opened": [
+          {
+            "id": node.id,
+            "path": node.path,
+            "depth": node.depth,
+            "parent": node.parent,
+            "title": node.title,
+          }
+          for node in deep.opened
+        ],
+        "selected": deep_files,
+        "stop_reason": deep.stop_reason,
+        "selected_nodes": [
+          {"path": node.path, "title": node.title, "content": node.content}
+          for node in deep.selected
+        ],
+        "decisions": list(deep.decisions),
+        "stale_candidates": [
+          {
+            **candidate,
+            "content": next(
+              (
+                node.content for node in deep.opened
+                if node.id == candidate.get("id")
+              ),
+              "",
+            ),
+          }
+          for candidate in deep.stale_candidates
+        ],
+      },
+      "potential_misses": [
+        path for path in deep_files if path not in live_files
+      ],
+    })
+  return audits
+
+
+def _host_selection_override(traversal: object, selected_paths: list[str]) -> bool:
+  """Whether the host replaced the final valid model selection.
+
+  Lexical fallback owns its own result. This metric catches only the harmful
+  case where a valid final model decision selected one set (including empty)
+  and host traversal returned another.
+  """
+  if not isinstance(traversal, dict):
+    return False
+  decisions = traversal.get("decisions")
+  opened = traversal.get("opened")
+  if not isinstance(decisions, list) or not decisions:
+    return False
+  final = decisions[-1]
+  if not isinstance(final, dict) or final.get("source") != "model":
+    return False
+  chosen = final.get("selected")
+  if not isinstance(chosen, list) or not isinstance(opened, list):
+    return False
+  paths_by_id = {
+    item.get("id"): item.get("path")
+    for item in opened
+    if isinstance(item, dict)
+    and isinstance(item.get("id"), str)
+    and isinstance(item.get("path"), str)
+  }
+  model_paths = [paths_by_id[node_id] for node_id in chosen if node_id in paths_by_id]
+  return list(dict.fromkeys(model_paths)) != list(dict.fromkeys(selected_paths))
 
 
 def _redacted_chats(limit: int = _LATEST_CHAT_LIMIT) -> list[dict]:
@@ -640,12 +868,17 @@ def _bounded_chat(chat: dict) -> dict | None:
   }
 
 
-def _proposal_envelope(staging: Path, chats: list[dict]) -> tuple[str, list[dict]]:
+def _proposal_envelope(
+  staging: Path,
+  chats: list[dict],
+  read_audits: list[dict] | None = None,
+) -> tuple[str, list[dict]]:
   """Encode the prompt envelope and return the exact chats it contains."""
   # maintenance_flags is small and high-value, so it sits ahead of the trimmable
   # existing_graph/redacted_recent_chats and always survives the budget passes.
   payload = {
     "maintenance_flags": _maintenance_flags(staging),
+    "read_audits": read_audits or [],
     "existing_graph": _graph_catalog(staging),
     "redacted_recent_chats": [],
   }
@@ -680,22 +913,34 @@ def _proposal_envelope(staging: Path, chats: list[dict]) -> tuple[str, list[dict
   return encoded, included_chats
 
 
-def _proposal_data(staging: Path, chats: list[dict]) -> str:
+def _proposal_data(
+  staging: Path,
+  chats: list[dict],
+  read_audits: list[dict] | None = None,
+) -> str:
   """Encode a bounded, always-valid JSON data envelope for the analyst."""
-  return _proposal_envelope(staging, chats)[0]
+  return _proposal_envelope(staging, chats, read_audits)[0]
 
 
-def _proposal_batch(staging: Path, chats: list[dict]) -> list[dict]:
+def _proposal_batch(
+  staging: Path,
+  chats: list[dict],
+  read_audits: list[dict] | None = None,
+) -> list[dict]:
   """Choose the FIFO prefix that is actually present in the bounded prompt."""
-  return _proposal_envelope(staging, chats)[1]
+  return _proposal_envelope(staging, chats, read_audits)[1]
 
 
-def _proposal_prompt(staging: Path, chats: list[dict]) -> str:
+def _proposal_prompt(
+  staging: Path,
+  chats: list[dict],
+  read_audits: list[dict] | None = None,
+) -> str:
   try:
     rules = SKILL_PATH.read_text(encoding="utf-8")
   except OSError:
     rules = "Promote only durable user-specific facts with chat provenance."
-  payload = _proposal_data(staging, chats)
+  payload = _proposal_data(staging, chats, read_audits)
   return f"""You are Memory's confined consolidation analyst.
 
 The following maintenance rules are instructions:\n{rules[:24000]}
@@ -726,8 +971,31 @@ or provisional experiment, but never promote “I implemented” into “the app
 supports” unless the partner confirms the outcome or a later independent user
 report corroborates it.
 
+Complete all three nightly duties in one coherent pass:
+1. Learn durable, future-useful user information from the supplied chats and
+   place each atomic fact behind clear described links from the root.
+2. Review EVERY `read_audits` entry. Its `live` section is what the daytime
+   navigator opened and selected; `deep` is the same retrieval protocol replayed
+   with larger breadth/depth. `potential_misses` are candidates, not automatic
+   failures. Decide whether useful memory was genuinely missed. When it was,
+   repair the shortest useful route in the SAME proposal: improve an upper
+   parent summary/link cue, add a better cross-link, or move the important
+   distinction upward so the live navigator can choose the branch next time.
+   Do not merely copy the detailed child into every parent.
+   Classify each replay precisely: `no_memory` only when no durable
+   query-relevant memory fact existed; `miss` when such a fact existed but the
+   live selected evidence was insufficient; otherwise `ok`. Independently set
+   `overreach` true when any live-selected node was materially irrelevant or an
+   unsupported substitute. Adjacent but useful context is not an error. A miss
+   must list the relevant missed nodes; overreach must list only materially
+   overselected nodes.
+3. While reviewing chats and replayed full node contents, update or delete facts
+   that are demonstrably stale, superseded, or obsolete. A navigator's
+   `stale_candidates` is a lead to verify, never proof by itself.
+
 Return ONLY one JSON object with this shape:
-{{"summary":"...","followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"deletes":[]}}
+{{"summary":"...","read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short reason"}}],"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"deletes":[]}}
+Return exactly one verdict for every supplied read audit and no invented ids.
 At most {_MAX_UPDATES} updates and {_MAX_DELETES} deletes. Update paths may be
 index.md, notes/<slug>.md, or mocs/<slug>.md. Delete paths may be notes/<slug>.md
 or mocs/<slug>.md; never index.md. Deletion is appropriate only after a fact was
@@ -770,16 +1038,58 @@ def _claude_proposal(choice: dict, prompt: str) -> dict | None:
   return value if isinstance(value, dict) else None
 
 
+def _codex_agent_text(stdout: str) -> str:
+  parts: list[str] = []
+  for raw_line in stdout.splitlines():
+    try:
+      event = json.loads(raw_line)
+    except (TypeError, ValueError):
+      continue
+    if event.get("type") not in ("item.completed", "agent_message"):
+      continue
+    item = event.get("item") if isinstance(event.get("item"), dict) else event
+    if item.get("type") not in ("agent_message", "agentMessage"):
+      continue
+    value = item.get("text") or item.get("content")
+    if isinstance(value, str) and value:
+      parts.append(value)
+  return "".join(parts)
+
+
 def _codex_proposal(choice: dict, prompt: str) -> dict | None:
-  cmd = codex_text_command(model=choice.get("model"), effort=choice.get("effort"))
-  if cmd is None:
+  codex = os.environ.get("CODEX_CLI_PATH") or shutil.which("codex")
+  if not codex:
     return None
+  env = {
+    key: value for key, value in os.environ.items()
+    if key in ("PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME")
+  }
+  cmd = [
+    codex, "exec", "--json", "--ephemeral", "--ignore-user-config",
+    "--ignore-rules", "--strict-config", "--skip-git-repo-check",
+    "--sandbox", "read-only", "--color", "never",
+  ]
+  # Match the platform's reviewed text-only compaction seam: disable every
+  # feature that can expose shell, app, browser, computer, delegation, image,
+  # or goal tools. The read-only sandbox is defense in depth.
+  for feature in (
+    "shell_tool", "unified_exec", "apps", "browser_use",
+    "browser_use_external", "browser_use_full_cdp_access", "computer_use",
+    "multi_agent", "image_generation", "goals",
+  ):
+    cmd.extend(("--disable", feature))
+  if choice.get("model"):
+    cmd.extend(("--model", str(choice["model"])))
+  effort = choice.get("effort")
+  if effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+    cmd.extend(("--config", f"model_reasoning_effort={json.dumps(effort)}"))
+  cmd.append("-")
   with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
-    result = _run_text_process(cmd, prompt, cwd=cwd, env=codex_environment())
+    result = _run_text_process(cmd, prompt, cwd=cwd, env=env)
   if result is None or result[0] != 0:
     return None
   stdout = result[1]
-  raw = codex_agent_text(stdout).strip()
+  raw = _codex_agent_text(stdout).strip()
   if raw.startswith("```"):
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
   try:
@@ -789,8 +1099,13 @@ def _codex_proposal(choice: dict, prompt: str) -> dict | None:
   return value if isinstance(value, dict) else None
 
 
-def _proposal(app_id: int, staging: Path, chats: list[dict]) -> ProposalOutcome:
-  prompt = _proposal_prompt(staging, chats)
+def _proposal(
+  app_id: int,
+  staging: Path,
+  chats: list[dict],
+  read_audits: list[dict] | None = None,
+) -> ProposalOutcome:
+  prompt = _proposal_prompt(staging, chats, read_audits)
   source_handles = _source_handles(chats)
   allowed_chat_ids = set(source_handles.values()) | _known_chat_sources(staging)
   attempted = []
@@ -815,6 +1130,7 @@ def _proposal(app_id: int, staging: Path, chats: list[dict]) -> ProposalOutcome:
           allowed_chat_ids=allowed_chat_ids,
           source_handles=source_handles,
         )
+        value = _normalize_audit_verdicts(value, read_audits or [])
       except ProposalValidationError as exc:
         # Semantic validation belongs inside provider selection. A tool-free
         # analyst that returns syntactically-valid but unverifiable output must
@@ -835,6 +1151,68 @@ def _proposal(app_id: int, staging: Path, chats: list[dict]) -> ProposalOutcome:
     model=None,
     attempted_agents=attempted,
   )
+
+
+def _normalize_audit_verdicts(
+  proposal: dict,
+  read_audits: list[dict],
+) -> dict:
+  expected = {
+    str(item.get("read_id")) for item in read_audits
+    if isinstance(item, dict) and isinstance(item.get("read_id"), str)
+  }
+  raw = proposal.get("read_audits", [])
+  if not isinstance(raw, list):
+    raise ProposalValidationError(
+      "invalid_read_audits", "read audit verdicts must be a list",
+    )
+  normalized = []
+  seen: set[str] = set()
+  for item in raw:
+    if not isinstance(item, dict):
+      raise ProposalValidationError(
+        "invalid_read_audits", "invalid read audit verdict",
+      )
+    read_id = item.get("read_id")
+    outcome = item.get("outcome")
+    missed_nodes = item.get("missed_nodes", [])
+    overreach = item.get("overreach")
+    overselected_nodes = item.get("overselected_nodes", [])
+    reason = item.get("reason", "")
+    if (
+      not isinstance(read_id, str)
+      or read_id not in expected
+      or read_id in seen
+      or outcome not in {"ok", "miss", "no_memory"}
+      or not isinstance(missed_nodes, list)
+      or any(not isinstance(path, str) for path in missed_nodes)
+      or not isinstance(overreach, bool)
+      or not isinstance(overselected_nodes, list)
+      or any(not isinstance(path, str) for path in overselected_nodes)
+      or (outcome == "miss" and not missed_nodes)
+      or (outcome != "miss" and bool(missed_nodes))
+      or (overreach and not overselected_nodes)
+      or (not overreach and bool(overselected_nodes))
+      or not isinstance(reason, str)
+    ):
+      raise ProposalValidationError(
+        "invalid_read_audits", "invalid or invented read audit verdict",
+      )
+    seen.add(read_id)
+    normalized.append({
+      "read_id": read_id,
+      "outcome": outcome,
+      "overreach": overreach,
+      "missed_nodes": list(dict.fromkeys(missed_nodes))[:100],
+      "overselected_nodes": list(dict.fromkeys(overselected_nodes))[:100],
+      "reason": re.sub(r"\s+", " ", reason).strip()[:1000],
+    })
+  if seen != expected:
+    raise ProposalValidationError(
+      "incomplete_read_audits",
+      "every replayed read needs exactly one audit verdict",
+    )
+  return {**proposal, "read_audits": normalized}
 
 
 def _known_chat_sources(staging: Path) -> set[str]:
@@ -964,9 +1342,9 @@ def _normalize_proposal(
     normalized_updates.append({**update, "content": content})
   if dropped_updates and not normalized_updates and updates:
     # A wholly invalid proposal is a provider failure, not a successful no-op.
-    # Preserve the existing retry/fallback contract so a configured second
-    # provider gets a chance to produce a valid proposal. Per-fact skipping is
-    # for a mixed proposal where useful verified work would otherwise be lost.
+    # Preserve retry/fallback so a configured second provider can return a
+    # verifiable proposal. Per-fact skipping is only for mixed proposals where
+    # valid work would otherwise be lost.
     invalid = first_invalid_provenance or {}
     raise ProposalValidationError(
       "unverified_chat_provenance",
@@ -1064,6 +1442,142 @@ def _append_update_log(
     os.fsync(handle.fileno())
 
 
+def _write_json_atomic(path: Path, value: dict) -> None:
+  path.parent.mkdir(parents=True, exist_ok=True)
+  fd, raw = tempfile.mkstemp(
+    dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
+  )
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+      json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+      handle.write("\n")
+      handle.flush()
+      os.fsync(handle.fileno())
+    os.replace(raw, path)
+  except BaseException:
+    try:
+      os.unlink(raw)
+    except OSError:
+      pass
+    raise
+
+
+def _record_recall_audits(
+  run_id: str,
+  read_audits: list[dict],
+  proposal: dict,
+  graph: dict,
+  *,
+  live_policy: tuple[int, int],
+  night_policy: tuple[int, int],
+) -> None:
+  if not read_audits:
+    return
+  verdicts = {
+    item["read_id"]: item
+    for item in proposal.get("read_audits", [])
+    if isinstance(item, dict) and isinstance(item.get("read_id"), str)
+  }
+  prior = _recall_stats()
+  recent = prior.get("recent") if isinstance(prior.get("recent"), list) else []
+  records = []
+  missed_count = 0
+  overreach_count = 0
+  no_memory_count = 0
+  route_miss_count = 0
+  selection_miss_count = 0
+  override_count = 0
+  candidate_count = 0
+  for audit in read_audits:
+    read_id = str(audit["read_id"])
+    verdict = verdicts[read_id]
+    outcome = verdict.get("outcome")
+    missed = outcome == "miss"
+    overreach = verdict.get("overreach") is True
+    no_memory = outcome == "no_memory"
+    potential = audit.get("potential_misses")
+    if isinstance(potential, list) and potential:
+      candidate_count += 1
+    if missed:
+      missed_count += 1
+      live_opened_paths = {
+        item.get("path") for item in audit.get("live", {}).get("opened", [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+      }
+      missed_nodes = list(verdict.get("missed_nodes") or [])
+      if any(path not in live_opened_paths for path in missed_nodes):
+        route_miss_count += 1
+      else:
+        selection_miss_count += 1
+    if overreach:
+      overreach_count += 1
+    if no_memory:
+      no_memory_count += 1
+    if audit.get("live", {}).get("host_selection_override") is True:
+      override_count += 1
+    record = {
+      "schema": 2,
+      "run_id": run_id,
+      "read_id": read_id,
+      "at": str(audit.get("at") or ""),
+      "question_sha256": hashlib.sha256(
+        str(audit.get("question") or "").encode("utf-8"),
+      ).hexdigest(),
+      "live_selected": list(audit.get("live", {}).get("selected") or []),
+      "deep_selected": list(audit.get("deep", {}).get("selected") or []),
+      "live_stop_reason": audit.get("live", {}).get("stop_reason"),
+      "deep_stop_reason": audit.get("deep", {}).get("stop_reason"),
+      "host_selection_override": audit.get("live", {}).get("host_selection_override") is True,
+      "potential_misses": list(potential or []),
+      "outcome": outcome,
+      "overreach": overreach,
+      "missed_nodes": list(verdict.get("missed_nodes") or []),
+      "overselected_nodes": list(verdict.get("overselected_nodes") or []),
+      "reason": str(verdict.get("reason") or ""),
+    }
+    records.append(record)
+  total = int(prior.get("reads_audited", 0) or 0) + len(records)
+  missed_total = int(prior.get("misses", prior.get("important_misses", 0)) or 0) + missed_count
+  overreach_total = int(prior.get("overreaches", 0) or 0) + overreach_count
+  no_memory_total = int(prior.get("no_memory", 0) or 0) + no_memory_count
+  route_miss_total = int(prior.get("route_misses", 0) or 0) + route_miss_count
+  selection_miss_total = int(prior.get("selection_misses", 0) or 0) + selection_miss_count
+  override_total = int(prior.get("host_selection_overrides", 0) or 0) + override_count
+  candidate_total = int(prior.get("candidate_misses", 0) or 0) + candidate_count
+  stats = {
+    "schema": 2,
+    "updated_at": datetime.now(UTC).isoformat(),
+    "last_audited_at": max(str(item["at"]) for item in read_audits),
+    "reads_audited": total,
+    "candidate_misses": candidate_total,
+    "misses": missed_total,
+    "miss_rate": missed_total / total if total else 0.0,
+    "overreaches": overreach_total,
+    "overreach_rate": overreach_total / total if total else 0.0,
+    "no_memory": no_memory_total,
+    "no_memory_rate": no_memory_total / total if total else 0.0,
+    "route_misses": route_miss_total,
+    "route_miss_rate": route_miss_total / total if total else 0.0,
+    "selection_misses": selection_miss_total,
+    "selection_miss_rate": selection_miss_total / total if total else 0.0,
+    "host_selection_overrides": override_total,
+    "model_to_host_selection_override_rate": override_total / total if total else 0.0,
+    "graph_nodes": len(graph.get("nodes") or []),
+    "graph_edges": len(graph.get("edges") or []),
+    "live_policy": {"breadth": live_policy[0], "depth": live_policy[1]},
+    "night_policy": {"breadth": night_policy[0], "depth": night_policy[1]},
+    "recent": (recent + records)[-50:],
+  }
+  log = STATE / "recall-audit" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
+  log.parent.mkdir(parents=True, exist_ok=True)
+  with log.open("a", encoding="utf-8") as handle:
+    for record in records:
+      handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+  _write_json_atomic(_RECALL_STATS, stats)
+
+
 def _record_run_status(record: dict) -> None:
   """Persist both the current status and an append-only operational event."""
   write_run_status(record)
@@ -1092,6 +1606,8 @@ async def run() -> int:
   initial_commit_created = False
   run_previous_commit = previous.get("commit") if previous else None
   chats: list[dict] = []
+  read_traces: list[dict] = []
+  read_audits: list[dict] = []
   try:
     run_id, staging = start_staging(SEED_DIR)
     # Migration may legitimately advance the pointer before consolidation.
@@ -1137,9 +1653,13 @@ async def run() -> int:
     # integration seam so injected/offline chat sources receive the same
     # durability guarantee.
     _remember_pending_chats(chats)
-    proposal_chats = _proposal_batch(staging, chats)
+    read_traces = _pending_read_traces()
+    read_audits = await asyncio.to_thread(
+      _audit_reads, app_id, str(previous["commit"]), read_traces,
+    )
+    proposal_chats = _proposal_batch(staging, chats, read_audits)
     raw_outcome = await asyncio.to_thread(
-      _proposal, app_id, staging, proposal_chats,
+      _proposal, app_id, staging, proposal_chats, read_audits,
     )
     if isinstance(raw_outcome, ProposalOutcome):
       outcome = raw_outcome
@@ -1163,6 +1683,7 @@ async def run() -> int:
         "reason": "no_valid_text_only_proposal",
         "source_chat_count": len(proposal_chats),
         "queued_chat_count": len(chats),
+        "read_audit_count": len(read_audits),
       })
       _log("DEGRADED no configured text-only provider produced a valid proposal")
       return 2
@@ -1213,6 +1734,7 @@ async def run() -> int:
       "deleted_paths": deleted,
       "source_chat_count": len(proposal_chats),
       "queued_chat_count": len(chats),
+      "read_audit_count": len(read_audits),
       "topology": {
         "before": _topology_counts(baseline),
         "after": _topology_counts(graph),
@@ -1231,6 +1753,14 @@ async def run() -> int:
         graph,
         outcome.provider,
         outcome.model,
+      )
+      _record_recall_audits(
+        run_id,
+        read_audits,
+        proposal,
+        graph,
+        live_policy=_live_policy(app_id),
+        night_policy=_night_policy(app_id),
       )
     except OSError as exc:
       # The graph commit is already durably published. App-owned telemetry
@@ -1275,6 +1805,7 @@ async def run() -> int:
         proposal_chats if "proposal_chats" in locals() else []
       )
       failure["queued_chat_count"] = len(chats)
+      failure["read_audit_count"] = len(read_audits)
       _record_run_status(failure)
     except OSError:
       pass

@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "2.1.14",
+  "version": "2.2.0",
   "description": "Build and retrieve an optional graph of durable facts without injecting it into every chat.",
   "author": "mobius-os",
   "license": "MIT",
@@ -9,7 +9,9 @@
   "entry": "index.jsx",
   "system_app": true,
   "system_prompt": "memory-core.md",
-  "skills": ["memory.md"],
+  "skills": [
+    "memory.md"
+  ],
   "icon": "icon.png",
   "offline_capable": true,
   "offline": {
@@ -31,7 +33,11 @@
       "model": null,
       "secondary_agent_mode": "system",
       "fallback_provider": null,
-      "fallback_model": null
+      "fallback_model": null,
+      "live_breadth": 4,
+      "live_depth": 4,
+      "night_breadth": 6,
+      "night_depth": 6
     }
   },
   "schedule": {
@@ -54,9 +60,9 @@
     "memory-core.md",
     "memory.md",
     "memory_search.py",
+    "memory_text_provider.py",
     "memory_runner.py",
     "memory_store.py",
-    "memory_text_provider.py",
     "memory_graph.py",
     "constants.js",
     "theme.js",
