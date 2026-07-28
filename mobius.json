@@ -45,7 +45,8 @@
       "react",
       "react-dom",
       "marked",
-      "dompurify"
+      "dompurify",
+      "@openai/apps-sdk-ui/components/Icon"
     ]
   },
   "embeds_agent": false,

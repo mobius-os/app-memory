@@ -164,7 +164,10 @@ test('manifest activates Memory only through a system prompt contribution', () =
   ]) {
     assert.ok(manifest.source_files.includes(file), file)
   }
-  assert.deepEqual(manifest.runtime.imports, ['react', 'react-dom', 'marked', 'dompurify'])
+  assert.deepEqual(manifest.runtime.imports, [
+    'react', 'react-dom', 'marked', 'dompurify',
+    '@openai/apps-sdk-ui/components/Icon',
+  ])
   assert.equal('esm_deps' in manifest.runtime, false)
 })
 
