@@ -204,3 +204,41 @@ def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
   assert logged["files"] == ["notes/b.md"]
   assert logged["traversal"]["opened"][1]["path"] == "mocs/a.md"
   assert logged["traversal"]["selected"] == ["notes/b.md"]
+
+
+def test_retrieve_distinguishes_not_ready_from_a_graph_read_failure(monkeypatch):
+  monkeypatch.setattr(memory_search, "ready_pointer", lambda: None)
+  not_ready = memory_search.retrieve("what did we decide")
+  assert not_ready.status == memory_search.RESULT_FAILED
+  assert not_ready.reason == memory_search.RESULT_REASON_NOT_READY
+
+  monkeypatch.setattr(
+    memory_search,
+    "ready_pointer",
+    lambda: {"commit": "0" * 40},
+  )
+  monkeypatch.setattr(memory_search, "_live_policy", lambda: (4, 4))
+
+  def fail_read(*_args, **_kwargs):
+    raise OSError("private internal detail")
+
+  monkeypatch.setattr(memory_search, "traverse", fail_read)
+  read_failed = memory_search.retrieve("what did we decide")
+  assert read_failed.status == memory_search.RESULT_FAILED
+  assert read_failed.reason == memory_search.RESULT_REASON_READ_FAILED
+
+
+def test_failed_receipt_exposes_only_a_safe_reason_enum():
+  assert memory_search._result_payload(memory_search.RecallResult(
+    memory_search.RESULT_FAILED,
+    "Memory lookup failed.",
+    reason=memory_search.RESULT_REASON_NOT_READY,
+  )) == {
+    "status": memory_search.RESULT_FAILED,
+    "reason": memory_search.RESULT_REASON_NOT_READY,
+  }
+  assert memory_search._result_payload(memory_search.RecallResult(
+    memory_search.RESULT_FAILED,
+    "Memory lookup failed.",
+    reason="/private/path",
+  )) == {"status": memory_search.RESULT_FAILED}
