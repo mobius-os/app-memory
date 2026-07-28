@@ -67,6 +67,7 @@ class TraversalResult:
   selected: tuple[OpenedNode, ...]
   decisions: tuple[dict, ...] = ()
   stale_candidates: tuple[dict[str, str], ...] = ()
+  frontier_at_stop: tuple[dict, ...] = ()
 
   def trace(self) -> dict:
     return {
@@ -86,6 +87,7 @@ class TraversalResult:
       "selected": [node.path for node in self.selected],
       "decisions": list(self.decisions),
       "stale_candidates": list(self.stale_candidates),
+      "frontier_at_stop": list(self.frontier_at_stop),
     }
 
 
@@ -254,13 +256,19 @@ Opened nodes and selected nodes are different:
   merely share its topic. Never return a near-neighbor just to avoid an empty
   result. If your rationale says no opened node records the requested fact,
   `selected` MUST be empty.
+- Before stopping, verify that selected nodes explicitly support every material
+  distinction in the request. If one is only inferred, open the most directly
+  related exposed node; if it remains unstated, do not fill the gap with a
+  near-neighbor.
 - Every action must either finish or open at least one valid listed child. If
   no valid child remains, return finish=true. Confirmed absence is success and
   uses selected=[]. IDs mentioned only in `reason` are not expansions.
 
 For each expandable parent you choose, request at most {breadth} linked nodes.
 The maximum path depth is {depth_limit}; the host enforces both limits.
-You may expand several parents in one round. Never invent an id.
+You may expand several parents in one round. A parent can appear again with
+different unopened children after a batch; continue it only when another batch
+is plausibly relevant. Never invent an id.
 
 Return ONLY one JSON object:
 {{"finish":false,"expand":[{{"from":"index","nodes":["child-id"]}}],"selected":[],"reason":"short decision rationale" {stale_shape}}}
@@ -277,17 +285,17 @@ STATE:
 def _frontier(
   graph: RevisionGraph,
   opened: list[OpenedNode],
-  expanded: set[str],
+  exhausted: set[str],
   depth_limit: int,
 ) -> list[dict]:
   opened_ids = {node.id for node in opened}
   result = []
   for node in opened:
-    if node.id in expanded or node.depth >= depth_limit:
+    if node.id in exhausted or node.depth >= depth_limit:
       continue
     links = graph.choices(node, opened_ids)
     if not links:
-      expanded.add(node.id)
+      exhausted.add(node.id)
       continue
     result.append({
       "from": node.id,
@@ -295,6 +303,18 @@ def _frontier(
       "links": links,
     })
   return result
+
+
+def _trace_frontier(graph: RevisionGraph, frontier: list[dict]) -> tuple[dict, ...]:
+  """Compact unopened choices at stop for deterministic miss attribution."""
+  return tuple({
+    "from": item["from"],
+    "depth": item["depth"],
+    "nodes": [
+      {"id": link["id"], "path": str(graph.by_id[link["id"]]["path"])}
+      for link in item["links"]
+    ],
+  } for item in frontier)
 
 
 def _deterministic_action(
@@ -369,15 +389,16 @@ def traverse(
   graph_data = json.loads(read_revision_file(commit, "graph.json"))
   graph = RevisionGraph(commit, graph_data)
   opened = [graph.open("index", 0, None)]
-  expanded: set[str] = set()
+  exhausted: set[str] = set()
   stale: dict[str, str] = {}
   rounds = 0
   stop_reason = "frontier_exhausted"
   selected_ids: list[str] = []
   decisions: list[dict] = []
+  frontier_at_stop: tuple[dict, ...] = ()
 
   while True:
-    available = _frontier(graph, opened, expanded, depth_limit)
+    available = _frontier(graph, opened, exhausted, depth_limit)
     rounds += 1
     raw = text_call(_navigator_prompt(
       question,
@@ -426,6 +447,7 @@ def traverse(
         "reason": re.sub(r"\s+", " ", str(action.get("reason") or "")).strip()[:500],
       })
       stop_reason = "navigator_finished"
+      frontier_at_stop = _trace_frontier(graph, available)
       break
     if not available:
       decisions.append({
@@ -437,6 +459,7 @@ def traverse(
         "reason": re.sub(r"\s+", " ", str(action.get("reason") or "")).strip()[:500],
       })
       stop_reason = "frontier_exhausted"
+      frontier_at_stop = _trace_frontier(graph, available)
       # A valid model decision owns its selection, including an intentional
       # empty result. Lexical selection is only a provider/JSON fallback; it
       # must never turn the navigator's confirmed absence into topic padding.
@@ -466,7 +489,6 @@ def traverse(
       ):
         continue
       parent = opened_by_id[parent_id]
-      expanded.add(parent_id)
       valid = []
       for child_id in child_ids:
         if (
@@ -494,6 +516,7 @@ def traverse(
     })
     if not added:
       stop_reason = "navigator_made_no_progress"
+      frontier_at_stop = _trace_frontier(graph, available)
       if source == "lexical_fallback" and not selected_ids:
         fallback = _deterministic_action(question, opened, [], breadth)
         selected_ids = list(fallback.get("selected") or [])
@@ -517,6 +540,7 @@ def traverse(
     selected=selected,
     decisions=tuple(decisions),
     stale_candidates=stale_candidates,
+    frontier_at_stop=frontier_at_stop,
   )
 
 
@@ -580,12 +604,26 @@ def _live_policy() -> tuple[int, int]:
 
 
 def _live_text_call() -> Callable[[str], str | None] | None:
-  provider = available_provider(os.environ.get("MEMORY_READER_PROVIDER", "auto"))
+  requested = os.environ.get("MEMORY_READER_PROVIDER", "auto")
+  provider = available_provider(requested)
   if provider is None:
     return None
-  return lambda prompt: run_text(
-    provider, prompt, timeout=AGENT_TIMEOUT,
-  )
+  providers = [provider]
+  if requested.strip().lower() == "auto":
+    # Presence is not health: a CLI can be installed and authenticated yet
+    # temporarily unavailable (for example, a provider spend limit). Live
+    # recall should try the other confined text-only provider before falling
+    # back to lexical matching, whose semantic judgment is intentionally weak.
+    providers.extend(name for name in ("claude", "codex") if name != provider)
+
+  def call(prompt: str) -> str | None:
+    for name in providers:
+      value = run_text(name, prompt, timeout=AGENT_TIMEOUT)
+      if value:
+        return value
+    return None
+
+  return call
 
 
 def _answer(traversal: TraversalResult) -> RecallResult:
