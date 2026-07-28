@@ -334,7 +334,7 @@ export const CSS = `
 }
 .mg-schedule-card {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
   gap: 15px;
   padding: 18px;
@@ -366,6 +366,18 @@ export const CSS = `
   height: 44px;
   padding: 0 10px;
   border-radius: 10px;
+  font: 700 13px var(--font);
+}
+.mg-schedule-card select {
+  box-sizing: border-box;
+  width: 230px;
+  max-width: 100%;
+  height: 44px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
   font: 700 13px var(--font);
 }
 .mg-settings-loading,
@@ -589,7 +601,8 @@ export const CSS = `
   .mg-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mg-policy-grid { grid-template-columns: 1fr; }
   .mg-schedule-card { grid-template-columns: auto 1fr; }
-  .mg-schedule-card input { grid-column: 1 / -1; width: 100%; }
+  .mg-schedule-card input,
+  .mg-schedule-card select { grid-column: 1 / -1; width: 100%; }
   .mg-settings-foot { min-height: 66px; padding: 10px 16px max(10px, env(safe-area-inset-bottom)); }
   .mg-scrim { display: none; }
   .mg-panel {

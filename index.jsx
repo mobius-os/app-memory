@@ -140,6 +140,14 @@ export default function App({ appId, token }) {
   const [scheduleStatus, setScheduleStatus] = useState('idle'); // idle | loading | ready | error
   const [scheduleCron, setScheduleCron] = useState('30 5 * * *');
   const [scheduleTime, setScheduleTime] = useState('05:30');
+  // 'server' means the schedule is owned in the server's own timezone (the
+  // default); otherwise an IANA zone name. The scheduler stores the zone
+  // durably and converts to its own clock — the app never does offset math.
+  const [scheduleTz, setScheduleTz] = useState('server');
+  const [serverTzName, setServerTzName] = useState('UTC');
+  // Older backends don't accept timezone-owned schedules; the picker only
+  // renders when the schedule data declares support.
+  const [scheduleTzSupported, setScheduleTzSupported] = useState(false);
   const [scheduleCustom, setScheduleCustom] = useState(false);
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState('');
@@ -689,7 +697,24 @@ export default function App({ appId, token }) {
       const cron = typeof row?.cron === 'string' && row.cron.trim()
         ? row.cron.trim()
         : '30 5 * * *';
-      const parsed = parseDailyCronTime(cron);
+      const supported = Boolean(row) && 'server_timezone' in row;
+      setScheduleTzSupported(supported);
+      setServerTzName(
+        typeof row?.server_timezone === 'string' && row.server_timezone.trim()
+          ? row.server_timezone.trim()
+          : 'UTC',
+      );
+      // A zone-owned schedule reports its durable identity: the wall time in
+      // its own zone. Otherwise the time field is server-local, as always.
+      const zone = supported && typeof row?.timezone === 'string' && row.timezone.trim()
+        ? row.timezone.trim()
+        : null;
+      const zoneCron = zone && typeof row?.zone_cron === 'string' && row.zone_cron.trim()
+        ? row.zone_cron.trim()
+        : null;
+      setScheduleTz(zone || 'server');
+      const displayCron = zoneCron || cron;
+      const parsed = parseDailyCronTime(displayCron);
       setScheduleCron(cron);
       setScheduleCustom(!parsed);
       if (parsed) setScheduleTime(parsed);
@@ -744,8 +769,25 @@ export default function App({ appId, token }) {
     };
   }, [settingsOpen]);
 
+  // Timezone choices for the schedule picker. The device zone is surfaced
+  // first; the full IANA list follows when the runtime can enumerate it.
+  const scheduleZones = useMemo(() => {
+    let zones = [];
+    try {
+      if (typeof Intl.supportedValuesOf === 'function') {
+        zones = Intl.supportedValuesOf('timeZone') || [];
+      }
+    } catch { /* older runtime; device zone below still works */ }
+    let device = '';
+    try { device = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}
+    if (device && !zones.includes(device)) zones = [device, ...zones];
+    return { zones, device };
+  }, []);
+
   const saveSchedule = useCallback(async () => {
     if (scheduleSaving) return;
+    // The time field is the wall time in the selected zone; the scheduler
+    // owns the zone durably and converts to its own clock.
     const cron = timeToDailyCron(scheduleTime);
     if (!cron) {
       setScheduleMessage('Pick a valid time.');
@@ -754,20 +796,29 @@ export default function App({ appId, token }) {
     setScheduleSaving(true);
     setScheduleMessage('');
     try {
+      const timezone = scheduleTzSupported && scheduleTz !== 'server'
+        ? scheduleTz
+        : null;
       const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/schedule`, {
         method: 'POST',
         headers: {
           ...authHeaders,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ cron, job: 'fetch.sh' }),
+        body: JSON.stringify({ cron, job: 'fetch.sh', timezone }),
       });
       if (!res.ok) {
         let detail = '';
         try { detail = (await res.json())?.detail || ''; } catch {}
         throw new Error(detail || 'Could not save schedule.');
       }
-      setScheduleCron(cron);
+      let saved = null;
+      try { saved = await res.json(); } catch {}
+      setScheduleCron(
+        typeof saved?.cron === 'string' && saved.cron.trim()
+          ? saved.cron.trim()
+          : cron,
+      );
       setScheduleCustom(false);
       setScheduleStatus('ready');
       setScheduleMessage('Saved');
@@ -777,7 +828,7 @@ export default function App({ appId, token }) {
     } finally {
       setScheduleSaving(false);
     }
-  }, [appId, authHeaders, scheduleSaving, scheduleTime]);
+  }, [appId, authHeaders, scheduleSaving, scheduleTime, scheduleTz, scheduleTzSupported]);
 
   const setPrimaryAgentModeChoice = useCallback((mode) => {
     setPrimaryAgentMode(mode);
@@ -1273,8 +1324,16 @@ export default function App({ appId, token }) {
                         <div className="mg-schedule-orb" aria-hidden="true"><span /></div>
                         <div className="mg-schedule-copy">
                           <label htmlFor="mg-run-time">Daily run time</label>
-                          <span>Uses your Möbius timezone.</span>
-                          {scheduleCustom && <small>Current custom schedule: {scheduleCron}</small>}
+                          <span>
+                            {scheduleTzSupported
+                              ? 'In the time zone picked here.'
+                              : 'Uses the server clock.'}
+                          </span>
+                          {scheduleCustom && (
+                            <small>
+                              Current custom schedule: {scheduleCron} ({serverTzName})
+                            </small>
+                          )}
                         </div>
                         <input
                           id="mg-run-time"
@@ -1287,6 +1346,24 @@ export default function App({ appId, token }) {
                             setScheduleMessage('');
                           }}
                         />
+                        {scheduleTzSupported && (
+                          <select
+                            id="mg-run-tz"
+                            aria-label="Time zone"
+                            value={scheduleTz}
+                            onChange={(event) => {
+                              setScheduleTz(event.target.value);
+                              setScheduleMessage('');
+                            }}
+                          >
+                            <option value="server">Server — {serverTzName}</option>
+                            {scheduleZones.zones.map((zone) => (
+                              <option key={zone} value={zone}>
+                                {zone}{zone === scheduleZones.device ? ' (this device)' : ''}
+                              </option>
+                            ))}
+                          </select>
+                        )}
                       </div>
                     )}
                   </div>
