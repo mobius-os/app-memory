@@ -242,3 +242,13 @@ def test_failed_receipt_exposes_only_a_safe_reason_enum():
     "Memory lookup failed.",
     reason="/private/path",
   )) == {"status": memory_search.RESULT_FAILED}
+
+
+def test_empty_receipt_is_an_explicit_no_relevant_result():
+  assert memory_search._result_payload(memory_search.RecallResult(
+    memory_search.RESULT_EMPTY,
+    "No relevant memories.",
+  )) == {
+    "status": memory_search.RESULT_EMPTY,
+    "reason": memory_search.RESULT_REASON_NO_RELEVANT_RESULT,
+  }

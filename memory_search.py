@@ -29,6 +29,7 @@ RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
 RESULT_HIT = "hit"
 RESULT_EMPTY = "empty"
 RESULT_FAILED = "failed"
+RESULT_REASON_NO_RELEVANT_RESULT = "no_relevant_result"
 RESULT_REASON_NOT_READY = "not_ready"
 RESULT_REASON_READ_FAILED = "read_failed"
 
@@ -691,6 +692,8 @@ def _result_payload(result: RecallResult) -> dict:
     # This is a compact product receipt, not the memory transport. Complete
     # selected node contents are already in the human-readable output above.
     payload["notes"] = list(result.notes[:12])
+  elif result.status == RESULT_EMPTY:
+    payload["reason"] = RESULT_REASON_NO_RELEVANT_RESULT
   elif result.status == RESULT_FAILED and result.reason in {
     RESULT_REASON_NOT_READY,
     RESULT_REASON_READ_FAILED,
