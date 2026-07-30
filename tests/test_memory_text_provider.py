@@ -32,7 +32,8 @@ class MemoryTextProviderTests(unittest.TestCase):
         "codex", "choose notes", model="gpt-test", effort="high",
       )
 
-    self.assertEqual(text, "first second")
+    self.assertEqual(text.text, "first second")
+    self.assertIsNone(text.failure)
     command = run.call_args.args[0]
     self.assertIn("read-only", command)
     self.assertEqual(command[-1], "-")
@@ -58,7 +59,8 @@ class MemoryTextProviderTests(unittest.TestCase):
     ):
       text = provider.run_text("claude", "navigate", effort="high")
 
-    self.assertEqual(text, "answer")
+    self.assertEqual(text.text, "answer")
+    self.assertIsNone(text.failure)
     command = run.call_args.args[0]
     self.assertIn("--tools", command)
     self.assertEqual(command[command.index("--tools") + 1], "")

@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import memory_search
+from memory_text_provider import TextResult
 
 
 def _revision():
@@ -129,7 +130,7 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
 
     def run_text(provider, _prompt, **_kwargs):
       calls.append(provider)
-      return None if provider == "claude" else '{"finish":true}'
+      return TextResult(None) if provider == "claude" else TextResult('{"finish":true}')
 
     with (
       mock.patch.object(
@@ -142,7 +143,7 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
     ):
       text_call = memory_search._live_text_call()
       self.assertIsNotNone(text_call)
-      self.assertEqual(text_call("navigate"), '{"finish":true}')
+      self.assertEqual(text_call("navigate").text, '{"finish":true}')
 
     self.assertEqual(calls, ["claude", "codex"])
 

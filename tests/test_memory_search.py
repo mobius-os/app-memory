@@ -228,7 +228,10 @@ class MemorySearchContractTests(unittest.TestCase):
           store._atomic_text(store.READY, json.dumps(new))
         return value
 
-      with mock.patch.object(search, "read_revision_file", side_effect=switching_read):
+      with (
+        mock.patch.object(search, "read_revision_file", side_effect=switching_read),
+        mock.patch.dict(os.environ, {"MEMORY_READER_PROVIDER": "none"}),
+      ):
         result = search.retrieve("quiet interface")
 
       self.assertEqual(result.commit, old["commit"])
