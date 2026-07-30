@@ -936,24 +936,30 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertIsNone(store.ready_pointer())
       self.assertFalse((store.REPOSITORY / ".git" / "index.lock").exists())
 
-  def test_liveness_uses_reviewed_system_capabilities_not_slug(self):
+  def test_liveness_accepts_authority_schema_rollout(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))
+      contract = {
+        "schema": 3,
+        "data": {"shared_memory": "write"},
+        "background": {
+          "job": "fetch.sh", "mode": "scheduled", "authority": "scoped",
+        },
+      }
       runner._api_json = lambda _path: {
         "id": 7,
         "slug": "memory-2",
         "system_app": True,
-          "capability_contract": {
-            "schema": 3,
-            "data": {"shared_memory": "write"},
-            "background": {
-              "job": "fetch.sh", "mode": "scheduled", "authority": "scoped",
-            },
-        },
+        "capability_contract": contract,
       }
 
       self.assertTrue(runner._app_active(7))
       self.assertFalse(runner._app_active(8))
+      contract["schema"] = 4
+      contract["background"].pop("authority")
+      self.assertTrue(runner._app_active(7))
+      contract["schema"] = 2
+      self.assertFalse(runner._app_active(7))
 
   def test_agent_choices_apply_canonical_and_legacy_app_overrides(self):
     with tempfile.TemporaryDirectory() as raw:

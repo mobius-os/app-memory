@@ -2,7 +2,7 @@
 # fetch.sh — scheduled Memory maintenance wrapper.
 #
 # The Memory app UI remains a read-only graph browser. This cron job is the
-# scoped maintenance path: the platform wrapper supplies a short-lived app
+# maintenance path: the platform wrapper supplies a short-lived app
 # token, this script serializes runs, and the Python runner publishes one
 # commit-addressed graph update. It never reads or forwards an owner/service token.
 set -uo pipefail
@@ -37,7 +37,7 @@ if ! flock -n 9; then
 fi
 
 if [[ -z "${APP_TOKEN:-}" ]]; then
-  log "ERROR scoped APP_TOKEN was not supplied by the platform job wrapper"
+  log "ERROR APP_TOKEN was not supplied by the platform job wrapper"
   exit 3
 fi
 

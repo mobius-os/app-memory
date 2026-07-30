@@ -454,13 +454,12 @@ def _app_active(app_id: int) -> bool:
     and value.get("id") == app_id
     and value.get("system_app") is True
     and isinstance(contract, dict)
-    and contract.get("schema") == 3
+    and contract.get("schema") in {3, 4}
     and isinstance(data, dict)
     and data.get("shared_memory") == "write"
     and isinstance(background, dict)
     and background.get("job") == "fetch.sh"
     and background.get("mode") == "scheduled"
-    and background.get("authority") == "scoped"
     and "agent" not in background
   )
 
@@ -2129,7 +2128,7 @@ async def run() -> int:
   if app_id is None:
     preflight_error = "missing_app_id"
   elif not APP_TOKEN:
-    preflight_error = "missing_scoped_token"
+    preflight_error = "missing_app_token"
   elif not _app_active(app_id):
     preflight_error = "inactive_capability_contract"
   if preflight_error is not None:

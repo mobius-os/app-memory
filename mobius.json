@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "Build and retrieve an optional graph of durable facts without injecting it into every chat.",
   "author": "mobius-os",
   "license": "MIT",
@@ -23,8 +23,7 @@
     "cross_app_access": "none",
     "share_with_apps": "none",
     "shared_memory": "write",
-    "chat_log_access": "summary",
-    "job_authority": "scoped"
+    "chat_log_access": "summary"
   },
   "storage_seeds": {
     "settings.json": {
