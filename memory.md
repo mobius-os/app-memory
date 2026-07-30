@@ -40,12 +40,25 @@ question without opening the child.
 The Memory app's confined runner owns consolidation. It receives only
 structurally redacted chat logs through its declared capability and may propose
 bounded root-map, note, or MOC upserts and bounded deletions. It receives
-bounded existing graph text so it can reconcile rather than merely append.
+the complete current root/MOC text and compact metadata for every note so it
+cannot trade away routing truth to fit more chats. Full note bodies are useful
+but optional prompt context and may be trimmed; an existing note may be
+replaced only when its full current text is present.
 It tries the configured background-agent order through confined, text-only
 Claude and Codex adapters. If none produces valid JSON, the run is recorded as
 degraded and the published commit does not move.
+Within one run, a terminal provider failure (usage limit, authentication, or an
+unavailable configured model) is remembered so later batches go straight to a
+healthy fallback. Timeouts and malformed output remain attempt-scoped and may
+be retried on a later batch.
 
-Every successful night completes three duties in one proposal:
+Busy nights use several bounded FIFO proposals against one private staging
+graph, then publish once. Each proposal is transactional: if it would demote a
+specifically routed node into Unfiled, only that proposal is rolled back and
+its chats remain queued. Earlier accepted proposals can still publish
+atomically without acknowledging the rejected batch.
+
+Every successful night completes three duties across those proposals:
 
 1. **Learn.** Review the day's chats for durable, future-useful facts about the
    partner. Write atomic nodes with chat provenance and place them behind

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from memory_store import read_revision_file, ready_pointer, record_read
-from memory_text_provider import available_provider, run_text
+from memory_text_provider import RunProviderHealth, available_provider, run_text
 
 
 DEFAULT_LIVE_BREADTH = 4
@@ -57,6 +58,14 @@ class OpenedNode:
 
 
 @dataclass(frozen=True)
+class NavigatorCall:
+  """One navigation decision plus bounded provider-attempt evidence."""
+
+  text: str | None
+  attempts: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True)
 class TraversalResult:
   status: str
   commit: str
@@ -69,6 +78,7 @@ class TraversalResult:
   decisions: tuple[dict, ...] = ()
   stale_candidates: tuple[dict[str, str], ...] = ()
   frontier_at_stop: tuple[dict, ...] = ()
+  elapsed_ms: int = 0
 
   def trace(self) -> dict:
     return {
@@ -89,6 +99,7 @@ class TraversalResult:
       "decisions": list(self.decisions),
       "stale_candidates": list(self.stale_candidates),
       "frontier_at_stop": list(self.frontier_at_stop),
+      "elapsed_ms": self.elapsed_ms,
     }
 
 
@@ -381,10 +392,11 @@ def traverse(
   *,
   breadth: int,
   depth_limit: int,
-  text_call: Callable[[str], str | None] | None,
+  text_call: Callable[[str], NavigatorCall | str | None] | None,
   audit: bool = False,
 ) -> TraversalResult:
   """Navigate from the root, then return a selected subset of opened nodes."""
+  traversal_started = time.monotonic()
   breadth = max(1, min(MAX_CONFIGURED_BREADTH, int(breadth)))
   depth_limit = max(1, min(MAX_CONFIGURED_DEPTH, int(depth_limit)))
   graph_data = json.loads(read_revision_file(commit, "graph.json"))
@@ -401,7 +413,8 @@ def traverse(
   while True:
     available = _frontier(graph, opened, exhausted, depth_limit)
     rounds += 1
-    raw = text_call(_navigator_prompt(
+    decision_started = time.monotonic()
+    reply = text_call(_navigator_prompt(
       question,
       opened,
       available,
@@ -409,6 +422,13 @@ def traverse(
       depth_limit=depth_limit,
       audit=audit,
     )) if text_call else None
+    elapsed_ms = max(0, round((time.monotonic() - decision_started) * 1000))
+    if isinstance(reply, NavigatorCall):
+      raw = reply.text
+      attempts = list(reply.attempts)
+    else:
+      raw = reply
+      attempts = []
     action = _json_object(raw)
     source = "model"
     if action is None:
@@ -446,6 +466,8 @@ def traverse(
         "expanded": [],
         "selected": list(selected_ids),
         "reason": re.sub(r"\s+", " ", str(action.get("reason") or "")).strip()[:500],
+        "elapsed_ms": elapsed_ms,
+        "attempts": attempts,
       })
       stop_reason = "navigator_finished"
       frontier_at_stop = _trace_frontier(graph, available)
@@ -458,6 +480,8 @@ def traverse(
         "expanded": [],
         "selected": list(selected_ids),
         "reason": re.sub(r"\s+", " ", str(action.get("reason") or "")).strip()[:500],
+        "elapsed_ms": elapsed_ms,
+        "attempts": attempts,
       })
       stop_reason = "frontier_exhausted"
       frontier_at_stop = _trace_frontier(graph, available)
@@ -514,6 +538,8 @@ def traverse(
       "expanded": actual_expansions,
       "selected": list(selected_ids),
       "reason": re.sub(r"\s+", " ", str(action.get("reason") or "")).strip()[:500],
+      "elapsed_ms": elapsed_ms,
+      "attempts": attempts,
     })
     if not added:
       stop_reason = "navigator_made_no_progress"
@@ -542,6 +568,7 @@ def traverse(
     decisions=tuple(decisions),
     stale_candidates=stale_candidates,
     frontier_at_stop=frontier_at_stop,
+    elapsed_ms=max(0, round((time.monotonic() - traversal_started) * 1000)),
   )
 
 
@@ -604,7 +631,7 @@ def _live_policy() -> tuple[int, int]:
   return breadth, depth
 
 
-def _live_text_call() -> Callable[[str], str | None] | None:
+def _live_text_call() -> Callable[[str], NavigatorCall] | None:
   requested = os.environ.get("MEMORY_READER_PROVIDER", "auto")
   provider = available_provider(requested)
   if provider is None:
@@ -616,13 +643,35 @@ def _live_text_call() -> Callable[[str], str | None] | None:
     # recall should try the other confined text-only provider before falling
     # back to lexical matching, whose semantic judgment is intentionally weak.
     providers.extend(name for name in ("claude", "codex") if name != provider)
+  health = RunProviderHealth()
 
-  def call(prompt: str) -> str | None:
+  def call(prompt: str) -> NavigatorCall:
+    attempts = []
     for name in providers:
-      value = run_text(name, prompt, timeout=AGENT_TIMEOUT)
-      if value:
-        return value
-    return None
+      unavailable = health.unavailable(name)
+      if unavailable is not None:
+        attempts.append({
+          "provider": name,
+          "outcome": unavailable.code,
+          "skipped": True,
+          "elapsed_ms": 0,
+        })
+        continue
+      started = time.monotonic()
+      result = run_text(name, prompt, timeout=AGENT_TIMEOUT)
+      elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+      health.observe(name, None, result.failure)
+      attempts.append({
+        "provider": name,
+        "outcome": "ok" if result.text else (
+          result.failure.code if result.failure else "empty_output"
+        ),
+        "skipped": False,
+        "elapsed_ms": elapsed_ms,
+      })
+      if result.text:
+        return NavigatorCall(result.text, tuple(attempts))
+    return NavigatorCall(None, tuple(attempts))
 
   return call
 
@@ -693,6 +742,8 @@ def _result_payload(result: RecallResult) -> dict:
     # selected node contents are already in the human-readable output above.
     payload["notes"] = list(result.notes[:12])
   elif result.status == RESULT_EMPTY:
+    # Empty is a successful, explicit retrieval outcome. Carry a stable enum so
+    # tool adapters do not have to infer "nothing relevant" from blank stdout.
     payload["reason"] = RESULT_REASON_NO_RELEVANT_RESULT
   elif result.status == RESULT_FAILED and result.reason in {
     RESULT_REASON_NOT_READY,

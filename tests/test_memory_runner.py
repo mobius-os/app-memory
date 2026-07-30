@@ -65,8 +65,19 @@ def _seed(path: Path):
   )
 
 
-def _proposal(chat_id="chat-1"):
+def _reviewed(proposal):
   return {
+    **proposal,
+    "self_review": {
+      "hardest_decision": "Which detail was durable.",
+      "possibly_missed": "none",
+      "prompt_change": "none",
+    },
+  }
+
+
+def _proposal(chat_id="chat-1"):
+  return _reviewed({
     "summary": "promoted one preference",
     "followups": [],
     "deletes": [],
@@ -77,7 +88,7 @@ def _proposal(chat_id="chat-1"):
         f"source: [chat:{chat_id}]\n---\nThe user prefers quiet interfaces.\n"
       ),
     }],
-  }
+  })
 
 
 class MemoryRunnerTests(unittest.TestCase):
@@ -107,7 +118,9 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       runner._redacted_chats = lambda: [{"id": "chat-1", "messages": []}]
-      runner._proposal = lambda *_args: _proposal()
+      runner._proposal = lambda *_args: runner.ProposalOutcome(
+        "ok", _proposal(), "test", None, [],
+      )
 
       self.assertEqual(asyncio.run(runner.run()), 0)
 
@@ -140,12 +153,14 @@ class MemoryRunnerTests(unittest.TestCase):
         proposal_started.set()
         if not finish_proposal.wait(5):
           raise TimeoutError("test did not release proposal")
-        return {
+        proposal = {
           "summary": "nothing durable yet",
           "followups": [],
           "updates": [],
           "deletes": [],
+          "self_review": _proposal()["self_review"],
         }
+        return runner.ProposalOutcome("ok", proposal, "test", None, [])
 
       runner._proposal = slow_proposal
 
@@ -398,7 +413,9 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       runner._redacted_chats = lambda: [{"id": "chat-1", "messages": []}]
-      runner._proposal = lambda *_args: _proposal("unseen-chat")
+      runner._proposal = lambda *_args: runner.ProposalOutcome(
+        "ok", _proposal("unseen-chat"), "test", None, [],
+      )
 
       self.assertEqual(asyncio.run(runner.run()), 1)
 
@@ -424,7 +441,7 @@ class MemoryRunnerTests(unittest.TestCase):
       }
 
       proposal = runner._normalize_proposal(
-        {"updates": [valid, invalid], "deletes": [], "followups": []},
+        _reviewed({"updates": [valid, invalid], "deletes": [], "followups": []}),
         allowed_chat_ids={"chat-1"},
         source_handles={"c01": "chat-1"},
       )
@@ -452,7 +469,8 @@ class MemoryRunnerTests(unittest.TestCase):
       with mock.patch.object(runner.subprocess, "Popen", FakePopen):
         value = runner._claude_proposal({"provider": "claude", "effort": "ultracode"}, "prompt")
 
-      self.assertEqual(value, {"updates": []})
+      self.assertEqual(value.proposal, {"updates": []})
+      self.assertIsNone(value.failure)
       self.assertIn("--tools", captured["cmd"])
       self.assertEqual(captured["cmd"][captured["cmd"].index("--tools") + 1], "")
       self.assertEqual(captured["cmd"][captured["cmd"].index("--effort") + 1], "xhigh")
@@ -511,7 +529,8 @@ class MemoryRunnerTests(unittest.TestCase):
           ["agent"], "prompt", cwd=raw, env={"PATH": "/usr/bin"},
         )
 
-      self.assertIsNone(result)
+      self.assertTrue(result.timed_out)
+      self.assertIsNone(result.returncode)
       killpg.assert_called_once_with(123456, runner.signal.SIGKILL)
       self.assertEqual(runner._ACTIVE_AGENT_GROUPS, set())
 
@@ -561,7 +580,8 @@ class MemoryRunnerTests(unittest.TestCase):
           "prompt",
         )
 
-      self.assertEqual(value, {"updates": []})
+      self.assertEqual(value.proposal, {"updates": []})
+      self.assertIsNone(value.failure)
       self.assertEqual(captured["input"], "prompt")
       self.assertIn("--ephemeral", captured["cmd"])
       self.assertIn("--ignore-user-config", captured["cmd"])
@@ -615,16 +635,16 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       runner._redacted_chats = lambda: []
-      runner._proposal = lambda *_args: {
+      runner._proposal = lambda *_args: runner.ProposalOutcome("ok", _reviewed({
         "summary": "replace the root", "followups": [], "deletes": [],
         "updates": [{"path": "index.md", "content": "# Empty root\n"}],
-      }
+      }), "test", None, [])
 
-      self.assertEqual(asyncio.run(runner.run()), 1)
+      self.assertEqual(asyncio.run(runner.run()), 2)
       self.assertEqual(store.ready_pointer()["commit"], old["commit"])
       status = json.loads((store.STATE / "run-status.json").read_text())
-      self.assertEqual(status["status"], "failed")
-      self.assertEqual(status["error_class"], "ValueError")
+      self.assertEqual(status["status"], "degraded")
+      self.assertEqual(status["reason"], "topology_regression")
 
   def test_proposal_data_is_bounded_valid_json(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -671,7 +691,9 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_active = lambda _app_id: True
       canonical = "1f905105-a3a6-4a67-a6e3-1b34ea6963d8"
       runner._redacted_chats = lambda: [{"id": canonical, "messages": []}]
-      runner._proposal = lambda *_args: _proposal("c01")
+      runner._proposal = lambda *_args: runner.ProposalOutcome(
+        "ok", _proposal("c01"), "test", None, [],
+      )
       runner._remember_pending_chats([{"id": canonical}])
 
       self.assertEqual(asyncio.run(runner.run()), 0)
@@ -794,8 +816,12 @@ class MemoryRunnerTests(unittest.TestCase):
         {"provider": "claude", "model": "primary"},
         {"provider": "codex", "model": "fallback"},
       ]
-      runner._claude_proposal = lambda *_args: _proposal("invented-source")
-      runner._codex_proposal = lambda *_args: _proposal("c01")
+      runner._claude_proposal = lambda *_args: runner.AnalystResult(
+        _proposal("invented-source"),
+      )
+      runner._codex_proposal = lambda *_args: runner.AnalystResult(
+        _proposal("c01"),
+      )
 
       outcome = runner._proposal(7, staging, [{"id": canonical, "messages": []}])
 
@@ -819,7 +845,9 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._agent_choices = lambda _app_id: [
         {"provider": "claude", "model": "only"},
       ]
-      runner._claude_proposal = lambda *_args: _proposal("invented-source")
+      runner._claude_proposal = lambda *_args: runner.AnalystResult(
+        _proposal("invented-source"),
+      )
 
       outcome = runner._proposal(7, staging, [{"id": "chat-1", "messages": []}])
 
@@ -843,14 +871,17 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.build_graph(staging, usage={})
 
       data = json.loads(runner._proposal_data(staging, []))
-      old_row = next(row for row in data["existing_graph"] if row["path"] == "notes/old.md")
+      old_row = next(
+        row for row in data["existing_note_contents"]
+        if row["path"] == "notes/old.md"
+      )
       self.assertIn("durable old detail", old_row["content"])
       changed, deleted = runner._apply_proposal(
         staging,
-        {
+        _reviewed({
           "updates": [{"path": "notes/old.md", "content": old.replace("detail", "detail, aligned")}],
           "deletes": [],
-        },
+        }),
         allowed_chat_ids=runner._known_chat_sources(staging),
       )
       self.assertEqual((changed, deleted), (["notes/old.md"], []))
@@ -864,25 +895,25 @@ class MemoryRunnerTests(unittest.TestCase):
       duplicate.write_text("old duplicate", encoding="utf-8")
 
       changed, deleted = runner._apply_proposal(
-        staging, {"updates": [], "deletes": ["notes/duplicate.md"]},
+        staging, _reviewed({"updates": [], "deletes": ["notes/duplicate.md"]}),
         allowed_chat_ids=set(),
       )
       self.assertEqual((changed, deleted), ([], ["notes/duplicate.md"]))
       self.assertFalse(duplicate.exists())
       with self.assertRaisesRegex(ValueError, "deletion"):
         runner._apply_proposal(
-          staging, {"updates": [], "deletes": ["index.md"]},
+          staging, _reviewed({"updates": [], "deletes": ["index.md"]}),
           allowed_chat_ids=set(),
         )
       with self.assertRaisesRegex(ValueError, "deletion"):
         runner._apply_proposal(
-          staging, {"updates": [], "deletes": ["mocs/memory-unfiled.md"]},
+          staging, _reviewed({"updates": [], "deletes": ["mocs/memory-unfiled.md"]}),
           allowed_chat_ids=set(),
         )
       with self.assertRaisesRegex(ValueError, "deletion"):
         runner._apply_proposal(
           staging,
-          {"updates": [], "deletes": ["mocs/maintaining-memory.md"]},
+          _reviewed({"updates": [], "deletes": ["mocs/maintaining-memory.md"]}),
           allowed_chat_ids=set(),
         )
 
@@ -897,9 +928,9 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       runner._redacted_chats = lambda: []
-      runner._proposal = lambda *_args: {
+      runner._proposal = lambda *_args: runner.ProposalOutcome("ok", _reviewed({
         "summary": "no provider", "followups": [], "updates": [], "deletes": [],
-      }
+      }), "test", None, [])
 
       self.assertEqual(asyncio.run(runner.run()), 1)
       self.assertIsNone(store.ready_pointer())
@@ -912,9 +943,12 @@ class MemoryRunnerTests(unittest.TestCase):
         "id": 7,
         "slug": "memory-2",
         "system_app": True,
-        "capability_contract": {
-          "data": {"shared_memory": "write"},
-          "background": {"agent": True},
+          "capability_contract": {
+            "schema": 3,
+            "data": {"shared_memory": "write"},
+            "background": {
+              "job": "fetch.sh", "mode": "scheduled", "authority": "scoped",
+            },
         },
       }
 

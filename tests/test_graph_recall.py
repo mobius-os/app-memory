@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import memory_search
+from memory_text_provider import ProviderFailure, TextResult
 import memory_store
 
 
@@ -122,10 +123,72 @@ def test_navigator_prompt_forbids_adjacent_nodes_as_empty_padding():
     audit=False,
   )
   assert "specific claim or predicate" in prompt
+  assert "explicitly support every material" in prompt
   assert "Never return a near-neighbor" in prompt
   assert "`selected` MUST be empty" in prompt
   assert "Confirmed absence is success" in prompt
   assert "IDs mentioned only in `reason` are not expansions" in prompt
+  assert "A parent can appear again" in prompt
+
+
+def test_parent_can_be_expanded_again_for_another_relevant_batch(monkeypatch):
+  bodies = _revision()
+  monkeypatch.setattr(
+    memory_search,
+    "read_revision_file",
+    lambda _commit, path: bodies[path],
+  )
+  actions = iter([
+    {"finish": False, "expand": [{"from": "index", "nodes": ["a"]}]},
+    {"finish": False, "expand": [{"from": "a", "nodes": ["b"]}]},
+    {"finish": False, "expand": [{"from": "a", "nodes": ["a-two"]}]},
+    {"finish": True, "expand": [], "selected": ["b", "a-two"]},
+  ])
+
+  result = memory_search.traverse(
+    "Both A details",
+    "0" * 40,
+    breadth=1,
+    depth_limit=2,
+    text_call=lambda _prompt: json.dumps(next(actions)),
+  )
+
+  assert [node.id for node in result.opened] == ["index", "a", "b", "a-two"]
+  assert [item["expanded"] for item in result.decisions[:3]] == [
+    [{"from": "index", "nodes": ["a"]}],
+    [{"from": "a", "nodes": ["b"]}],
+    [{"from": "a", "nodes": ["a-two"]}],
+  ]
+
+
+def test_trace_records_unopened_frontier_when_navigator_stops(monkeypatch):
+  bodies = _revision()
+  monkeypatch.setattr(
+    memory_search,
+    "read_revision_file",
+    lambda _commit, path: bodies[path],
+  )
+  actions = iter([
+    {"finish": False, "expand": [{"from": "index", "nodes": ["a"]}]},
+    {"finish": False, "expand": [{"from": "a", "nodes": ["b"]}]},
+    {"finish": True, "expand": [], "selected": ["b"]},
+  ])
+
+  result = memory_search.traverse(
+    "The complete detailed answer",
+    "0" * 40,
+    breadth=1,
+    depth_limit=2,
+    text_call=lambda _prompt: json.dumps(next(actions)),
+  )
+
+  paths = {
+    node["path"]
+    for parent in result.frontier_at_stop
+    for node in parent["nodes"]
+  }
+  assert "notes/a-two.md" in paths
+  assert result.trace()["frontier_at_stop"] == list(result.frontier_at_stop)
 
 
 def test_valid_model_no_progress_preserves_intentional_empty_selection(monkeypatch):
@@ -172,6 +235,61 @@ def test_invalid_model_output_still_uses_lexical_fallback(monkeypatch):
 
   assert result.selected
   assert result.decisions[-1]["source"] == "lexical_fallback"
+
+
+def test_live_reader_auto_fails_over_before_lexical_fallback(monkeypatch):
+  calls = []
+  monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
+  monkeypatch.setattr(
+    memory_search,
+    "run_text",
+    lambda provider, _prompt, **_kwargs: (
+      calls.append(provider)
+      or (
+        TextResult(None, ProviderFailure("timeout"))
+        if provider == "claude"
+        else TextResult('{"finish":true}')
+      )
+    ),
+  )
+  monkeypatch.setenv("MEMORY_READER_PROVIDER", "auto")
+
+  text_call = memory_search._live_text_call()
+
+  assert text_call is not None
+  result = text_call("navigate")
+  assert result.text == '{"finish":true}'
+  assert [attempt["outcome"] for attempt in result.attempts] == [
+    "timeout", "ok",
+  ]
+  assert all(attempt["elapsed_ms"] >= 0 for attempt in result.attempts)
+  assert calls == ["claude", "codex"]
+
+
+def test_live_reader_remembers_terminal_provider_failure(monkeypatch):
+  calls = []
+  monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
+
+  def run(provider, _prompt, **_kwargs):
+    calls.append(provider)
+    if provider == "claude":
+      return TextResult(
+        None, ProviderFailure("usage_limit", terminal=True, scope="provider"),
+      )
+    return TextResult('{"finish":true}')
+
+  monkeypatch.setattr(memory_search, "run_text", run)
+  monkeypatch.setenv("MEMORY_READER_PROVIDER", "auto")
+  text_call = memory_search._live_text_call()
+
+  assert text_call is not None
+  first = text_call("first")
+  second = text_call("second")
+  assert first.text == second.text == '{"finish":true}'
+  assert first.attempts[0]["outcome"] == "usage_limit"
+  assert second.attempts[0]["skipped"] is True
+  assert second.attempts[0]["outcome"] == "usage_limit"
+  assert calls == ["claude", "codex", "codex"]
 
 
 def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
