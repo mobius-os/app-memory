@@ -32,6 +32,13 @@ jobs:
           cache: npm
           cache-dependency-path: .mobius/frontend/package-lock.json
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
       - name: Install mobius frontend deps
         run: cd .mobius/frontend && npm ci
 
