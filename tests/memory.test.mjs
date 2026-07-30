@@ -155,7 +155,7 @@ test('manifest activates Memory only through a system prompt contribution', () =
   assert.equal('extensions' in manifest, false)
   assert.equal(manifest.permissions.shared_memory, 'write')
   assert.equal(manifest.permissions.chat_log_access, 'summary')
-  assert.equal(manifest.permissions.job_authority, 'scoped')
+  assert.equal('job_authority' in manifest.permissions, false)
   assert.equal(manifest.schedule.initialize_on_install, true)
   assert.equal(manifest.embeds_agent, false)
   for (const file of [

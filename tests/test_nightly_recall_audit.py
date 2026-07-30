@@ -81,7 +81,7 @@ def test_preflight_failure_replaces_stale_run_status(monkeypatch):
   assert asyncio.run(memory_runner.run()) == 1
   assert len(recorded) == 1
   assert recorded[0]["status"] == "failed"
-  assert recorded[0]["error_code"] == "missing_scoped_token"
+  assert recorded[0]["error_code"] == "missing_app_token"
   assert recorded[0]["commit"] == "ready-commit"
   assert recorded[0]["run_id"].startswith("preflight-")
 
