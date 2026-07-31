@@ -138,8 +138,8 @@ export const S = {
   },
 
   toggle: {
-    display: 'flex', background: 'var(--surface2)', borderRadius: 9, padding: 3,
-    border: '1px solid var(--border)', gap: 2,
+    display: 'flex', height: 44, background: 'var(--surface2)', borderRadius: 9,
+    boxShadow: 'inset 0 0 0 1px var(--border)', gap: 2,
   },
   toggleBtn: {
     display: 'flex', alignItems: 'center', border: 'none', background: 'transparent',
@@ -342,8 +342,8 @@ export const S = {
     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
   },
   depthToggle: {
-    display: 'flex', alignItems: 'center', gap: 3, padding: 3, borderRadius: 8,
-    background: 'var(--surface2)', border: '1px solid var(--border)', flexShrink: 0,
+    display: 'flex', alignItems: 'center', gap: 2, height: 44, borderRadius: 8,
+    background: 'var(--surface2)', boxShadow: 'inset 0 0 0 1px var(--border)', flexShrink: 0,
   },
   depthBtn: {
     minWidth: 44, height: 44, border: 'none', borderRadius: 6, background: 'transparent',
@@ -354,7 +354,7 @@ export const S = {
     background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
   },
   tabToggle: {
-    display: 'flex', gap: 2, height: 44, borderRadius: 8, overflow: 'hidden',
+    display: 'flex', gap: 2, height: 44, borderRadius: 8,
     background: 'var(--surface2)', boxShadow: 'inset 0 0 0 1px var(--border)', flexShrink: 0,
   },
   tabBtn: {
