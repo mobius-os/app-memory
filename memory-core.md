@@ -22,11 +22,12 @@ Formulate a focused retrieval prompt that states exactly what you need and why,
 naming the specific people, projects, and apps from the request verbatim (an
 app's own name is usually the strongest routing cue). Then run this read-only
 background lookup. A confined navigator starts at `index.md`, opens only linked
-nodes, and decides after each step whether to stop or expand up to the configured
-breadth for each opened node. The configured depth is a maximum, not a target.
-There is no total-node quota: relevance and the graph's branching determine how
-much is opened. If the text provider is unavailable, the same traversal falls
-back to local lexical choices:
+nodes, and decides after each step whether to stop or expand the newly active
+frontier up to the configured breadth. Unchosen siblings are pruned from that
+read but retained in its audit trace. The fourth live decision is selection-only;
+the configured depth is a maximum, not a target. There is no total-node quota:
+relevance and the graph's branching determine how much is opened. If the text
+provider is unavailable, the same traversal falls back to local lexical choices:
 
 ```bash
 python3 <this installed system app's source_dir>/memory_search.py "<focused description of the facts or prior context needed>" "$CHAT_ID"

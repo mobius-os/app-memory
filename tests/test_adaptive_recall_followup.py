@@ -48,7 +48,7 @@ def _revision():
 
 
 class AdaptiveRecallFollowupTests(unittest.TestCase):
-  def test_prompt_requires_explicit_support_and_resumable_parent_batches(self):
+  def test_prompt_requires_explicit_support_and_active_frontier_pruning(self):
     prompt = memory_search._navigator_prompt(
       "specific lifecycle failure",
       [],
@@ -58,15 +58,14 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
       audit=False,
     )
     self.assertIn("explicitly support every material", prompt)
-    self.assertIn("A parent can appear again", prompt)
+    self.assertIn("a parent is not offered again", prompt)
 
-  def test_parent_can_be_expanded_again_for_another_relevant_batch(self):
+  def test_unselected_sibling_is_retained_for_audit_not_reopened(self):
     bodies = _revision()
     actions = iter([
       {"finish": False, "expand": [{"from": "index", "nodes": ["a"]}]},
       {"finish": False, "expand": [{"from": "a", "nodes": ["b"]}]},
-      {"finish": False, "expand": [{"from": "a", "nodes": ["a-two"]}]},
-      {"finish": True, "expand": [], "selected": ["b", "a-two"]},
+      {"finish": True, "expand": [], "selected": ["b"]},
     ])
     with mock.patch.object(
       memory_search,
@@ -74,7 +73,7 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
       side_effect=lambda _commit, path: bodies[path],
     ):
       result = memory_search.traverse(
-        "Both A details",
+        "The first A detail",
         "0" * 40,
         breadth=1,
         depth_limit=2,
@@ -83,16 +82,21 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
 
     self.assertEqual(
       [node.id for node in result.opened],
-      ["index", "a", "b", "a-two"],
+      ["index", "a", "b"],
     )
     self.assertEqual(
-      [item["expanded"] for item in result.decisions[:3]],
+      [item["expanded"] for item in result.decisions[:2]],
       [
         [{"from": "index", "nodes": ["a"]}],
         [{"from": "a", "nodes": ["b"]}],
-        [{"from": "a", "nodes": ["a-two"]}],
       ],
     )
+    paths = {
+      node["path"]
+      for parent in result.frontier_at_stop
+      for node in parent["nodes"]
+    }
+    self.assertIn("notes/a-two.md", paths)
 
   def test_trace_records_unopened_frontier_when_navigator_stops(self):
     bodies = _revision()
@@ -137,6 +141,11 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
         memory_search,
         "available_provider",
         return_value="claude",
+      ),
+      mock.patch.object(
+        memory_search,
+        "_live_capacity",
+        side_effect=lambda providers: (providers, []),
       ),
       mock.patch.object(memory_search, "run_text", side_effect=run_text),
       mock.patch.dict(os.environ, {"MEMORY_READER_PROVIDER": "auto"}),
