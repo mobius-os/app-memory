@@ -55,6 +55,12 @@ export const CSS = `
 
 .mg-graph { cursor: grab; }
 .mg-graph:active { cursor: grabbing; }
+.mg-hint-touch { display: none; }
+@media (pointer: coarse), (max-width: 640px) {
+  .mg-hint-pointer { display: none; }
+  .mg-hint-touch { display: inline; }
+}
+.mg-settings-icon { display: none; }
 .mg-svg-graph { display: block; user-select: none; -webkit-user-select: none; }
 .mg-svg-node {
   cursor: pointer;
@@ -64,6 +70,75 @@ export const CSS = `
 .mg-svg-node:focus { outline: none; }
 .mg-svg-node:focus-visible .mg-svg-node-focus { opacity: 1; }
 .mg-svg-label { transition: opacity 180ms cubic-bezier(0.22,1,0.36,1); }
+.mg-graph-controls {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 24%);
+  backdrop-filter: blur(7px);
+}
+.mg-graph-control {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: 700 11px var(--font);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.mg-graph-control:last-child { border-right: 0; }
+.mg-graph-control svg { width: 18px; height: 18px; }
+.mg-graph-control:disabled { color: var(--muted); opacity: .45; cursor: default; }
+.mg-graph-reset { width: 54px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mg-legend-toggle {
+  width: 100%;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px 0 13px;
+  border: 0;
+  background: color-mix(in srgb, var(--surface2) 56%, transparent);
+  color: var(--text);
+  font: 700 11.5px var(--font);
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.mg-legend-toggle > span:first-child { flex: 1; }
+.mg-legend-count {
+  min-width: 23px;
+  height: 23px;
+  display: grid;
+  place-items: center;
+  padding-inline: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.mg-legend-chevron { width: 16px; height: 16px; color: var(--muted); transition: transform 160ms ease; }
+.mg-legend.is-open .mg-legend-chevron { transform: rotate(180deg); }
+.mg-legend-body {
+  max-height: calc(62vh - 44px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 3px 8px 8px;
+  border-top: 1px solid var(--border);
+}
+.mg-legend:not(.is-open) .mg-legend-body { display: none; }
 
 @media (hover: hover) {
   .mg-row:hover { background: var(--surface2); }
@@ -74,6 +149,7 @@ export const CSS = `
   .mg-tab:hover { color: var(--text); }
   .mg-close:hover { background: var(--border); color: var(--text); }
   .mg-discuss:hover { filter: brightness(0.94); }
+  .mg-graph-control:not(:disabled):hover { background: var(--surface2); }
 }
 /* Keyboard-focus ring for the now-focusable list rows + sort-header buttons,
    so the keyboard affordance these gained is actually visible. */
@@ -576,6 +652,31 @@ export const CSS = `
   .mg-agent-mode-btn:not(.is-active):hover { color: var(--text); }
 }
 @media (max-width: 640px) {
+  .mg-app-header {
+    gap: 7px !important;
+    padding-left: max(12px, env(safe-area-inset-left)) !important;
+    padding-right: max(12px, env(safe-area-inset-right)) !important;
+  }
+  .mg-header-right { gap: 6px !important; }
+  .mg-settings-btn {
+    width: 44px;
+    display: grid;
+    place-items: center;
+    padding: 0 !important;
+  }
+  .mg-settings-icon { display: block; width: 18px; height: 18px; }
+  .mg-settings-label { display: none; }
+  .mg-tgl {
+    width: 44px;
+    justify-content: center;
+    padding-inline: 0 !important;
+  }
+  .mg-tgl-label { display: none; }
+  .mg-legend:not(.is-open) { width: min(174px, calc(100% - 178px)) !important; }
+  .mg-legend.is-open { width: min(238px, calc(100% - 24px)) !important; }
+  .mg-graph:has(.mg-legend.is-open) .mg-graph-controls { bottom: 68px; }
+  .mg-graph-hint { top: 10px !important; }
+  .mg-graph-controls { right: 12px; bottom: 12px; }
   .mg-agent-stack { grid-template-columns: 1fr; }
   .mg-settings-backdrop { padding: 0; place-items: stretch; }
   .mg-settings-deck {
@@ -641,10 +742,14 @@ export const CSS = `
     padding-right: 10px !important;
   }
 }
+@media (max-width: 350px) {
+  .mg-brand > div:last-child { display: none; }
+  .mg-legend:not(.is-open) .mg-legend-count { display: none; }
+}
 /* mobius-ui:ReducedMotion v1 — keep in sync; library candidate. Diverge below the marker only. */
 @media (prefers-reduced-motion: reduce) {
   .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub, .mg-settings-deck, .mg-settings-backdrop { animation: none !important; }
-  .mg-svg-node, .mg-svg-label { transition: none !important; }
+  .mg-svg-node, .mg-svg-label, .mg-legend-chevron { transition: none !important; }
 }
 /* /mobius-ui:ReducedMotion */
 
