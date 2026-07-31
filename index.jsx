@@ -1663,12 +1663,59 @@ export default function App({ appId, token }) {
                     <span>{selected.type === 'moc' ? 'Hub' : 'Note'}</span>
                     <span>Weight <ImportanceDots value={selected.importance || 1} /></span>
                     <span>{selected.access_count || 0} reads</span>
-                    <span>{fmtBytes(selected.size_bytes)}</span>
+                    {noteState.status === 'ready' && (
+                      <span>{Array.from(noteState.md).length.toLocaleString()} characters</span>
+                    )}
                     {selectedUpdated && <span>{selectedUpdated}</span>}
                   </div>
                 </div>
               </div>
-              <button ref={panelCloseRef} type="button" style={S.closeBtn} className="mg-close" onClick={closePanel} aria-label="Close">×</button>
+              <div style={S.panelHeadActions}>
+                <div style={S.tabToggle} role="tablist" aria-label="Note or local graph">
+                  <button
+                    id="mg-tab-text"
+                    type="button"
+                    ref={(node) => { detailTabRefs.current[0] = node; }}
+                    className="mg-tab"
+                    style={{ ...S.tabBtn, ...(detailTab === 'text' ? S.tabBtnActive : {}) }}
+                    onClick={() => selectDetailTab('text')}
+                    onKeyDown={(event) => onDetailTabKeyDown(event, 0)}
+                    role="tab"
+                    aria-selected={detailTab === 'text'}
+                    aria-controls="mg-detail-panel"
+                    tabIndex={detailTab === 'text' ? 0 : -1}
+                    aria-label="Show note text"
+                    title="Note text"
+                  >
+                    <TextGlyph />
+                  </button>
+                  <button
+                    id="mg-tab-graph"
+                    type="button"
+                    ref={(node) => { detailTabRefs.current[1] = node; }}
+                    className="mg-tab"
+                    style={{ ...S.tabBtn, ...(detailTab === 'graph' ? S.tabBtnActive : {}) }}
+                    onClick={() => selectDetailTab('graph')}
+                    onKeyDown={(event) => onDetailTabKeyDown(event, 1)}
+                    role="tab"
+                    aria-selected={detailTab === 'graph'}
+                    aria-controls="mg-detail-panel"
+                    tabIndex={detailTab === 'graph' ? 0 : -1}
+                    aria-label="Show local graph"
+                    title="Local graph"
+                  >
+                    <NetworkGlyph />
+                  </button>
+                </div>
+                <button
+                  ref={panelCloseRef}
+                  type="button"
+                  style={S.closeBtn}
+                  className="mg-close"
+                  onClick={closePanel}
+                  aria-label="Close"
+                >×</button>
+              </div>
             </div>
 
             {Array.isArray(selected.tags) && selected.tags.length > 0 && (
@@ -1677,24 +1724,13 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            {/* Tab toggle replaces the old resizable note/graph split. Only the
-                active tab's pane mounts, so the local layout does no hidden work
-                while the owner is reading the note. */}
-            <div style={S.detailBar}>
-              <div style={S.detailContext}>
-                {detailTab === 'graph' ? (
-                  <>
-                    <span style={S.paneHead}>Local graph</span>
-                    <span style={S.localCount}>
-                      {localGraphData.nodes.length} nodes · {localGraphData.links.length} links
-                    </span>
-                  </>
-                ) : (
-                  <span style={S.paneHead}>Note</span>
-                )}
-              </div>
-
-              {detailTab === 'graph' && (
+            {/* Only the active pane mounts, so the local graph does no hidden
+                layout work while the owner is reading the note. */}
+            {detailTab === 'graph' && (
+              <div style={S.detailBar}>
+                <span style={S.localCount}>
+                  {localGraphData.nodes.length} nodes · {localGraphData.links.length} links
+                </span>
                 <div style={S.depthToggle} aria-label="Local graph depth">
                   {[1, 2, 3, 4].map((d) => (
                     <button
@@ -1708,45 +1744,8 @@ export default function App({ appId, token }) {
                     </button>
                   ))}
                 </div>
-              )}
-
-              <div style={S.tabToggle} role="tablist" aria-label="Note or local graph">
-                <button
-                  id="mg-tab-text"
-                  type="button"
-                  ref={(node) => { detailTabRefs.current[0] = node; }}
-                  className="mg-tab"
-                  style={{ ...S.tabBtn, ...(detailTab === 'text' ? S.tabBtnActive : {}) }}
-                  onClick={() => selectDetailTab('text')}
-                  onKeyDown={(event) => onDetailTabKeyDown(event, 0)}
-                  role="tab"
-                  aria-selected={detailTab === 'text'}
-                  aria-controls="mg-detail-panel"
-                  tabIndex={detailTab === 'text' ? 0 : -1}
-                  aria-label="Show note text"
-                  title="Note text"
-                >
-                  <TextGlyph />
-                </button>
-                <button
-                  id="mg-tab-graph"
-                  type="button"
-                  ref={(node) => { detailTabRefs.current[1] = node; }}
-                  className="mg-tab"
-                  style={{ ...S.tabBtn, ...(detailTab === 'graph' ? S.tabBtnActive : {}) }}
-                  onClick={() => selectDetailTab('graph')}
-                  onKeyDown={(event) => onDetailTabKeyDown(event, 1)}
-                  role="tab"
-                  aria-selected={detailTab === 'graph'}
-                  aria-controls="mg-detail-panel"
-                  tabIndex={detailTab === 'graph' ? 0 : -1}
-                  aria-label="Show local graph"
-                  title="Local graph"
-                >
-                  <NetworkGlyph />
-                </button>
               </div>
-            </div>
+            )}
 
             <div id="mg-detail-panel" role="tabpanel" aria-labelledby={detailTab === 'text' ? 'mg-tab-text' : 'mg-tab-graph'} style={S.detailBody}>
               {detailTab === 'text' ? (
