@@ -309,6 +309,9 @@ export const S = {
     padding: '15px 16px 10px', gap: 10,
   },
   panelHeadMain: { display: 'flex', gap: 11, minWidth: 0, alignItems: 'flex-start' },
+  panelHeadActions: {
+    display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+  },
   panelTitle: { fontSize: 18, fontWeight: 700, lineHeight: 1.18, letterSpacing: 0 },
   panelMetaLine: {
     display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
@@ -327,20 +330,12 @@ export const S = {
     fontSize: 11.5, color: 'var(--accent)', background: 'var(--accent-dim, rgba(167,139,250,0.12))',
     borderRadius: 999, padding: '2px 9px', fontWeight: 500,
   },
-  // Thin tab strip: context label (left) + depth control (graph tab only) +
-  // the icon toggle (right). Minimal chrome — one row, no full-width tab bar.
+  // The view toggle lives in the note header. This row only mounts for the
+  // graph-specific count and depth controls, so note text gets the space back.
   detailBar: {
-    display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px 8px',
-    borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)',
-    flexShrink: 0,
-  },
-  detailContext: {
-    display: 'flex', alignItems: 'baseline', gap: 8, flex: 1, minWidth: 0,
-    overflow: 'hidden',
-  },
-  paneHead: {
-    fontSize: 11, fontWeight: 650, textTransform: 'none', letterSpacing: 0,
-    color: 'var(--muted)', whiteSpace: 'nowrap',
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    gap: 10, padding: '7px 12px', borderTop: '1px solid var(--border)',
+    borderBottom: '1px solid var(--border)', flexShrink: 0,
   },
   localCount: {
     fontSize: 11, color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
@@ -359,8 +354,8 @@ export const S = {
     background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
   },
   tabToggle: {
-    display: 'flex', gap: 2, padding: 3, borderRadius: 8,
-    background: 'var(--surface2)', border: '1px solid var(--border)', flexShrink: 0,
+    display: 'flex', gap: 2, height: 44, borderRadius: 8, overflow: 'hidden',
+    background: 'var(--surface2)', boxShadow: 'inset 0 0 0 1px var(--border)', flexShrink: 0,
   },
   tabBtn: {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
