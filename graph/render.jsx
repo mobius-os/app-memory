@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Minus, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import { S } from '../constants.js'
 import {
   clamp,
@@ -8,9 +9,15 @@ import {
   nodeRadius,
   shouldShowScreenLabel,
 } from '../domain.js'
+import {
+  MAX_ZOOM,
+  MIN_ZOOM,
+  midpoint,
+  pinchRendererTransform,
+  pointDistance,
+  scaleRendererTransformAt,
+} from './viewport.mjs'
 
-const MIN_ZOOM = 0.22;
-const MAX_ZOOM = 4.6;
 const EXACT_REPULSION_NODE_LIMIT = 220;
 const SAMPLED_REPULSION_SPAN = 48;
 
@@ -30,6 +37,7 @@ export function MemoryGraphRenderer({
   const svgRef = useRef(null);
   const nodeRefs = useRef(new Map());
   const interactionRef = useRef(null);
+  const activePointersRef = useRef(new Map());
   const transformRef = useRef({ x: width / 2, y: height / 2, k: 1 });
   const pendingFrameRef = useRef({ transform: null, position: null });
   const renderFrameRef = useRef(0);
@@ -62,6 +70,12 @@ export function MemoryGraphRenderer({
       }
     });
   }, []);
+
+  const queueTransform = useCallback((next) => {
+    transformRef.current = next;
+    pendingFrameRef.current.transform = next;
+    scheduleRenderFrame();
+  }, [scheduleRenderFrame]);
 
   useEffect(() => () => {
     if (renderFrameRef.current) cancelAnimationFrame(renderFrameRef.current);
@@ -102,6 +116,7 @@ export function MemoryGraphRenderer({
     setTransform(initialTransform);
     setPositionOverrides(new Map());
     interactionRef.current = null;
+    activePointersRef.current.clear();
   }, [initialTransform]);
 
   useEffect(() => {
@@ -148,20 +163,11 @@ export function MemoryGraphRenderer({
         MAX_ZOOM,
       );
       if (nextScale === current.k) return;
-      const graphX = (point.x - current.x) / current.k;
-      const graphY = (point.y - current.y) / current.k;
-      const next = {
-        x: point.x - graphX * nextScale,
-        y: point.y - graphY * nextScale,
-        k: nextScale,
-      };
-      transformRef.current = next;
-      pendingFrameRef.current.transform = next;
-      scheduleRenderFrame();
+      queueTransform(scaleRendererTransformAt(current, point, nextScale));
     };
     svg.addEventListener('wheel', handleWheel, { passive: false });
     return () => svg.removeEventListener('wheel', handleWheel);
-  }, [width, height, sceneResult.error, scheduleRenderFrame]);
+  }, [width, height, sceneResult.error, queueTransform]);
 
   const positionedGraph = useMemo(() => {
     const nodes = sceneResult.graph.nodes.map((node) => {
@@ -234,42 +240,78 @@ export function MemoryGraphRenderer({
     try { svg.releasePointerCapture(pointerId); } catch {}
   };
 
-  const beginPan = (event) => {
-    if (event.button !== 0 || !svgRef.current) return;
+  const beginPointerInteraction = (event, node = null) => {
+    if ((event.pointerType === 'mouse' && event.button !== 0) || !svgRef.current) return;
+    if (activePointersRef.current.size >= 2) return;
+    event.preventDefault();
     const point = pointFromEvent(event);
-    svgRef.current.setPointerCapture?.(event.pointerId);
+    try { svgRef.current.setPointerCapture?.(event.pointerId); } catch {}
+    activePointersRef.current.set(event.pointerId, {
+      point,
+    });
+
+    if (activePointersRef.current.size >= 2) {
+      const pointers = [...activePointersRef.current.entries()].slice(0, 2);
+      const first = pointers[0][1].point;
+      const second = pointers[1][1].point;
+      interactionRef.current = {
+        kind: 'pinch',
+        pointerIds: pointers.map(([pointerId]) => pointerId),
+        startCenter: midpoint(first, second),
+        startDistance: Math.max(1, pointDistance(first, second)),
+        startTransform: transformRef.current,
+      };
+      return;
+    }
+
     interactionRef.current = {
-      kind: 'pan',
+      kind: node ? 'node' : 'pan',
       pointerId: event.pointerId,
+      nodeId: node?.id,
       startPoint: point,
       startTransform: transformRef.current,
-      moved: false,
-    };
-  };
-
-  const beginNodeInteraction = (event, node) => {
-    if (event.button !== 0 || !svgRef.current) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.focus?.();
-    setKeyboardFocusId(node.id);
-    latestRef.current.onNodeHover?.(node);
-    const point = pointFromEvent(event);
-    svgRef.current.setPointerCapture?.(event.pointerId);
-    interactionRef.current = {
-      kind: 'node',
-      pointerId: event.pointerId,
-      nodeId: node.id,
-      startPoint: point,
       startedAt: Date.now(),
       moved: false,
     };
   };
 
+  const beginPan = (event) => beginPointerInteraction(event);
+
+  const beginNodeInteraction = (event, node) => {
+    if ((event.pointerType === 'mouse' && event.button !== 0) || !svgRef.current) return;
+    event.stopPropagation();
+    event.currentTarget.focus?.();
+    setKeyboardFocusId(node.id);
+    latestRef.current.onNodeHover?.(node);
+    beginPointerInteraction(event, node);
+  };
+
   const handlePointerMove = (event) => {
-    const interaction = interactionRef.current;
-    if (!interaction || interaction.pointerId !== event.pointerId) return;
+    const activePointer = activePointersRef.current.get(event.pointerId);
+    if (!activePointer) return;
+    event.preventDefault();
     const point = pointFromEvent(event);
+    activePointersRef.current.set(event.pointerId, {
+      ...activePointer,
+      point,
+    });
+    const interaction = interactionRef.current;
+    if (!interaction) return;
+
+    if (interaction.kind === 'pinch') {
+      const first = activePointersRef.current.get(interaction.pointerIds[0])?.point;
+      const second = activePointersRef.current.get(interaction.pointerIds[1])?.point;
+      if (!first || !second) return;
+      queueTransform(pinchRendererTransform(
+        interaction.startTransform,
+        interaction.startCenter,
+        midpoint(first, second),
+        pointDistance(first, second) / interaction.startDistance,
+      ));
+      return;
+    }
+
+    if (interaction.pointerId !== event.pointerId) return;
     const distance = Math.hypot(
       point.x - interaction.startPoint.x,
       point.y - interaction.startPoint.y,
@@ -282,9 +324,7 @@ export function MemoryGraphRenderer({
         x: interaction.startTransform.x + point.x - interaction.startPoint.x,
         y: interaction.startTransform.y + point.y - interaction.startPoint.y,
       };
-      transformRef.current = next;
-      pendingFrameRef.current.transform = next;
-      scheduleRenderFrame();
+      queueTransform(next);
       return;
     }
 
@@ -301,10 +341,27 @@ export function MemoryGraphRenderer({
   };
 
   const finishPointerInteraction = (event, cancelled = false) => {
-    const interaction = interactionRef.current;
-    if (!interaction || interaction.pointerId !== event.pointerId) return;
-    interactionRef.current = null;
+    if (!activePointersRef.current.has(event.pointerId)) return;
+    activePointersRef.current.delete(event.pointerId);
     releasePointer(event.pointerId);
+    const interaction = interactionRef.current;
+    if (!interaction) return;
+
+    if (interaction.kind === 'pinch') {
+      const remaining = [...activePointersRef.current.entries()][0];
+      interactionRef.current = remaining ? {
+        kind: 'pan',
+        pointerId: remaining[0],
+        startPoint: remaining[1].point,
+        startTransform: transformRef.current,
+        startedAt: Date.now(),
+        moved: true,
+      } : null;
+      return;
+    }
+
+    if (interaction.pointerId !== event.pointerId) return;
+    interactionRef.current = null;
     if (cancelled) return;
 
     if (interaction.kind === 'pan') {
@@ -321,17 +378,11 @@ export function MemoryGraphRenderer({
     const current = transformRef.current;
     const nextScale = clamp(current.k * factor, MIN_ZOOM, MAX_ZOOM);
     if (nextScale === current.k) return;
-    const graphX = (point.x - current.x) / current.k;
-    const graphY = (point.y - current.y) / current.k;
-    const next = {
-      x: point.x - graphX * nextScale,
-      y: point.y - graphY * nextScale,
-      k: nextScale,
-    };
-    transformRef.current = next;
-    pendingFrameRef.current.transform = next;
-    scheduleRenderFrame();
+    queueTransform(scaleRendererTransformAt(current, point, nextScale));
   };
+
+  const resetTransform = () => queueTransform(initialTransform);
+  const zoomPercent = Math.round((transform.k / Math.max(0.001, initialTransform.k)) * 100);
 
   const focusNodeAt = (index) => {
     const count = positionedNodes.length;
@@ -364,7 +415,8 @@ export function MemoryGraphRenderer({
   };
 
   return (
-    <svg
+    <>
+      <svg
       ref={svgRef}
       style={S.svgGraph}
       className="mg-svg-graph"
@@ -506,7 +558,39 @@ export function MemoryGraphRenderer({
           );
         })}
       </g>
-    </svg>
+      </svg>
+      <div className="mg-graph-controls" role="group" aria-label="Graph zoom controls">
+        <button
+          type="button"
+          className="mg-graph-control"
+          aria-label="Zoom out"
+          title="Zoom out"
+          onClick={() => zoomAtPoint({ x: width / 2, y: height / 2 }, 1 / 1.35)}
+          disabled={transform.k <= MIN_ZOOM}
+        >
+          <Minus aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="mg-graph-control mg-graph-reset"
+          aria-label={`Reset graph zoom. Current zoom ${zoomPercent}%`}
+          title="Reset view"
+          onClick={resetTransform}
+        >
+          {zoomPercent}%
+        </button>
+        <button
+          type="button"
+          className="mg-graph-control"
+          aria-label="Zoom in"
+          title="Zoom in"
+          onClick={() => zoomAtPoint({ x: width / 2, y: height / 2 }, 1.35)}
+          disabled={transform.k >= MAX_ZOOM}
+        >
+          <Plus aria-hidden="true" />
+        </button>
+      </div>
+    </>
   );
 }
 

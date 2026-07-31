@@ -12,6 +12,7 @@
 // Only App lives here: it owns top-level graph/note state, persistence wiring,
 // shell navigation state, and mounts the graph, list, and note-panel UI.
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { ChevronDown, SettingsCog } from '@openai/apps-sdk-ui/components/Icon'
 import { EFFORT_LEVELS, NOTE_BASE, PALETTE, S, defaultEffort } from './constants.js'
 import { CSS } from './theme.js'
 import { makeSharedMemoryStore } from './storage.js'
@@ -135,6 +136,9 @@ export default function App({ appId, token }) {
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(() => (
+    typeof window === 'undefined' || window.matchMedia('(min-width: 720px)').matches
+  ));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState('schedule');
   const [scheduleStatus, setScheduleStatus] = useState('idle'); // idle | loading | ready | error
@@ -213,6 +217,13 @@ export default function App({ appId, token }) {
   const localWrapRef = useRef(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const [localDims, setLocalDims] = useState({ w: 0, h: 0 });
+
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 720px)');
+    const followViewport = (event) => setLegendOpen(event.matches);
+    media.addEventListener?.('change', followViewport);
+    return () => media.removeEventListener?.('change', followViewport);
+  }, []);
 
   // Read-through, offline-capable, subscribe-driven store over the SHARED
   // /api/storage/shared/memory/ route (see makeSharedMemoryStore). One per
@@ -1075,8 +1086,11 @@ export default function App({ appId, token }) {
       <style>{CSS}</style>
       <h1 className="mg-sr-only">Memory</h1>
 
-      <header style={S.header}>
-        <div style={S.brand}>
+      <header
+        style={S.header}
+        className="mg-app-header"
+      >
+        <div style={S.brand} className="mg-brand">
           {/* The app's own glossy icon as the brand mark; falls back to the
               accent dot if this install has no custom icon (the route 404s). */}
           <img
@@ -1101,7 +1115,7 @@ export default function App({ appId, token }) {
           </div>
         </div>
 
-        <div style={S.headerRight}>
+        <div style={S.headerRight} className="mg-header-right">
           <button
             ref={settingsButtonRef}
             style={{
@@ -1112,33 +1126,44 @@ export default function App({ appId, token }) {
             type="button"
             onClick={() => setSettingsOpen((v) => !v)}
             aria-expanded={settingsOpen}
+            aria-label="Memory settings"
           >
-            Settings
+            <SettingsCog className="mg-settings-icon" aria-hidden="true" />
+            <span className="mg-settings-label">Settings</span>
           </button>
           {problems.length > 0 && (
             <button
+              type="button"
               style={{ ...S.healthBadge, ...(errCount ? S.healthErr : S.healthWarn) }}
               onClick={() => setShowHealth((v) => !v)}
               title="Graph health"
+              aria-label={`${problems.length} graph health ${problems.length === 1 ? 'issue' : 'issues'}`}
+              aria-expanded={showHealth}
             >
               <span style={{ ...S.healthDot, background: errCount ? 'var(--danger)' : 'var(--accent-hover, #f0c674)' }} />
               {problems.length}
             </button>
           )}
-          <div style={S.toggle}>
+          <div style={S.toggle} className="mg-view-toggle" role="group" aria-label="Memory view">
             <button
+              type="button"
               className="mg-tgl"
               style={{ ...S.toggleBtn, ...(view === 'graph' ? S.toggleActive : {}) }}
               onClick={() => selectView('graph')}
+              aria-pressed={view === 'graph'}
+              aria-label="Graph view"
             >
-              <GraphGlyph /> Graph
+              <GraphGlyph /> <span className="mg-tgl-label">Graph</span>
             </button>
             <button
+              type="button"
               className="mg-tgl"
               style={{ ...S.toggleBtn, ...(view === 'list' ? S.toggleActive : {}) }}
               onClick={() => selectView('list')}
+              aria-pressed={view === 'list'}
+              aria-label="List view"
             >
-              <ListGlyph /> List
+              <ListGlyph /> <span className="mg-tgl-label">List</span>
             </button>
           </div>
         </div>
@@ -1558,31 +1583,47 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            <div style={S.graphHint}>Drag to pan · scroll to zoom · tap a node to read it</div>
+            <div style={S.graphHint} className="mg-graph-hint">
+              <span className="mg-hint-pointer">Drag to pan · scroll or use the buttons to zoom · select a node</span>
+              <span className="mg-hint-touch">Drag · pinch or buttons to zoom · tap a node</span>
+            </div>
 
             {legendItems.length > 0 && (
-              <div style={S.legend} className="mg-scroll">
-                <div style={S.legendTitle}>Maps of Content</div>
-                <div style={S.legendRow}>
-                  <span style={{ ...S.legendSwatch, background: cssVar('--accent', '#a78bfa') }} />
-                  <span style={S.legendLabel}>Hub (MOC)</span>
+              <div style={S.legend} className={`mg-legend${legendOpen ? ' is-open' : ''}`}>
+                <button
+                  type="button"
+                  className="mg-legend-toggle"
+                  onClick={() => setLegendOpen((open) => !open)}
+                  aria-expanded={legendOpen}
+                  aria-controls="mg-legend-body"
+                >
+                  <span>Map colors</span>
+                  <span className="mg-legend-count">{Math.min(12, legendItems.length) + 1}</span>
+                  <ChevronDown className="mg-legend-chevron" aria-hidden="true" />
+                </button>
+                <div id="mg-legend-body" className="mg-legend-body mg-scroll">
+                  <div style={S.legendRow}>
+                    <span style={{ ...S.legendSwatch, background: cssVar('--accent', '#a78bfa') }} />
+                    <span style={S.legendLabel}>Hub (MOC)</span>
+                  </div>
+                  {legendItems.slice(0, 12).map((it) => (
+                    <button
+                      type="button"
+                      key={it.slug}
+                      style={S.legendRow}
+                      className="mg-legend-row"
+                      onMouseEnter={() => setHoverId(it.slug)}
+                      onMouseLeave={() => setHoverId(null)}
+                      onClick={() => {
+                        const n = graph.nodes.find((x) => x.id === it.slug);
+                        if (n) openPanel(n);
+                      }}
+                    >
+                      <span style={{ ...S.legendSwatch, background: it.color }} />
+                      <span style={S.legendLabel}>{it.label}</span>
+                    </button>
+                  ))}
                 </div>
-                {legendItems.slice(0, 12).map((it) => (
-                  <button
-                    key={it.slug}
-                    style={S.legendRow}
-                    className="mg-legend-row"
-                    onMouseEnter={() => setHoverId(it.slug)}
-                    onMouseLeave={() => setHoverId(null)}
-                    onClick={() => {
-                      const n = graph.nodes.find((x) => x.id === it.slug);
-                      if (n) openPanel(n);
-                    }}
-                  >
-                    <span style={{ ...S.legendSwatch, background: it.color }} />
-                    <span style={S.legendLabel}>{it.label}</span>
-                  </button>
-                ))}
               </div>
             )}
           </div>

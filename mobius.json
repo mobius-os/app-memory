@@ -68,6 +68,7 @@
     "domain.js",
     "storage.js",
     "graph/render.jsx",
+    "graph/viewport.mjs",
     "ui/Th.jsx",
     "ui/ImportanceDots.jsx",
     "ui/EmptyConstellation.jsx",

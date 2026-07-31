@@ -53,7 +53,7 @@ export const S = {
     borderBottom: '1px solid var(--border)',
     background: 'var(--surface)', flexShrink: 0, gap: 12, position: 'relative', zIndex: 5,
   },
-  brand: { display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 },
+  brand: { display: 'flex', alignItems: 'center', gap: 11, minWidth: 0, flex: '1 1 auto' },
   brandDot: {
     width: 34, height: 34, borderRadius: 8, flexShrink: 0,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -72,7 +72,7 @@ export const S = {
     fontSize: 11.5, color: 'var(--muted)', marginTop: 2, whiteSpace: 'nowrap',
     overflow: 'hidden', textOverflow: 'ellipsis', fontVariantNumeric: 'tabular-nums',
   },
-  headerRight: { display: 'flex', alignItems: 'center', gap: 8 },
+  headerRight: { display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 },
   settingsBtn: {
     minHeight: 44, border: '1px solid var(--border)', borderRadius: 8,
     background: 'var(--surface2)', color: 'var(--muted)', cursor: 'pointer',
@@ -220,13 +220,9 @@ export const S = {
   },
   legend: {
     position: 'absolute', left: 12, bottom: 12, background: 'var(--surface)',
-    border: '1px solid var(--border)', borderRadius: 12, padding: '11px 12px',
-    maxWidth: 210, maxHeight: '58%', overflowY: 'auto',
+    border: '1px solid var(--border)', borderRadius: 12, padding: 0,
+    width: 230, maxWidth: 'calc(100% - 24px)', maxHeight: '62%', overflow: 'hidden',
     boxShadow: '0 8px 28px rgba(0,0,0,0.3)', backdropFilter: 'blur(4px)',
-  },
-  legendTitle: {
-    fontSize: 11, fontWeight: 650, textTransform: 'none', letterSpacing: 0,
-    color: 'var(--muted)', marginBottom: 8,
   },
   legendRow: {
     display: 'flex', alignItems: 'center', gap: 9, padding: '8px 4px', minHeight: 44, width: '100%',
