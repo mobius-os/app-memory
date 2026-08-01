@@ -177,6 +177,7 @@ class ChatIntake:
   chats: list[dict]
   discovered_count: int = 0
   tombstone_count: int = 0
+  tombstone_ids: tuple[str, ...] = ()
   detail_failure_count: int = 0
   discovery_complete: bool = True
   queue_write_ok: bool = True
@@ -923,6 +924,7 @@ def _collect_chat_intake(limit: int = _MAX_SOURCE_CHATS) -> ChatIntake:
     chats=chats,
     discovered_count=len(discovered),
     tombstone_count=len(tombstones),
+    tombstone_ids=tuple(tombstones),
     detail_failure_count=detail_failures,
     discovery_complete=discovery_complete,
     queue_write_ok=queue_ok,
@@ -1326,6 +1328,55 @@ def _archived_active_chat_ids(staging: Path) -> set[str]:
     if isinstance(chat_id, str) and chat_id:
       found.add(chat_id)
   return found
+
+
+def _collect_archived_source_lifecycle(
+  staging: Path,
+  already_checked: set[str],
+) -> tuple[list[dict], set[str]]:
+  """Find retained sources that became deleted after leaving intake.
+
+  Chat discovery is incremental, while a source archive can remain active for
+  years. Polling the small local source catalog closes the gap where Memory is
+  offline for the whole recovery window and the platform has already purged a
+  deleted chat before the next run.
+  """
+  deleted: list[dict] = []
+  unavailable: set[str] = set()
+  for chat_id in sorted(_archived_active_chat_ids(staging) - already_checked):
+    chat, status = _fetch_chat_detail(chat_id)
+    if chat is not None and chat.get("deleted_at"):
+      deleted.append(chat)
+    elif chat is None and status == 404:
+      unavailable.add(chat_id)
+  return deleted, unavailable
+
+
+def _retire_unavailable_chat_source(
+  staging: Path,
+  chat_id: str,
+) -> tuple[str, bool]:
+  """Remove the reversible backlink when a retained chat has been purged."""
+  source_id = _source_archive_id(chat_id)
+  path = _source_archive_path(staging, source_id)
+  try:
+    record = json.loads(path.read_text(encoding="utf-8"))
+  except FileNotFoundError:
+    return source_id, False
+  except (OSError, UnicodeError, ValueError) as exc:
+    raise ValueError(f"invalid Memory source archive: {path.name}") from exc
+  if (
+    not isinstance(record, dict)
+    or record.get("source_id") != source_id
+  ):
+    raise ValueError(f"invalid Memory source archive: {path.name}")
+  if record.get("chat_id") != chat_id:
+    return source_id, False
+  next_record = dict(record)
+  next_record.pop("chat_id", None)
+  next_record["source_unavailable_at"] = datetime.now(UTC).isoformat()
+  _write_json_atomic(path, next_record)
+  return source_id, True
 
 
 def _proposal_envelope(
@@ -2749,6 +2800,18 @@ async def run() -> int:
       for chat in chats
       if isinstance(chat, dict) and isinstance(chat.get("id"), str)
     }
+    lifecycle_deleted, lifecycle_unavailable = await asyncio.to_thread(
+      _collect_archived_source_lifecycle,
+      staging,
+      set(intake_by_id) | set(intake.tombstone_ids),
+    )
+    lifecycle_by_id = {
+      str(chat["id"]): chat
+      for chat in lifecycle_deleted
+      if isinstance(chat.get("id"), str)
+    }
+    intake_by_id.update(lifecycle_by_id)
+    unavailable_source_ids = set(intake.tombstone_ids) | lifecycle_unavailable
     deleted_known_sources = {
       chat_id for chat_id, chat in intake_by_id.items()
       if chat_id in known_source_chats and chat.get("deleted_at")
@@ -2758,7 +2821,11 @@ async def run() -> int:
     ):
       source_chat = intake_by_id.get(chat_id)
       if source_chat is None:
-        source_chat, _ = await asyncio.to_thread(_fetch_chat_detail, chat_id)
+        source_chat, source_status = await asyncio.to_thread(
+          _fetch_chat_detail, chat_id,
+        )
+        if source_chat is None and source_status == 404:
+          unavailable_source_ids.add(chat_id)
       if source_chat is None:
         continue
       source_id, source_changed = _archive_chat_source(
@@ -2766,12 +2833,18 @@ async def run() -> int:
       )
       if source_changed:
         source_changes.append(f"sources/{source_id}.json")
+    for chat_id in sorted(unavailable_source_ids):
+      source_id, source_changed = _retire_unavailable_chat_source(
+        staging, chat_id,
+      )
+      if source_changed:
+        source_changes.append(f"sources/{source_id}.json")
     anonymized = _anonymize_deleted_chat_sources(
       staging,
-      {
+      unavailable_source_ids | {
         str(chat["id"]) for chat in chats
         if chat.get("deleted_at") and isinstance(chat.get("id"), str)
-      },
+      } | set(lifecycle_by_id),
     )
     if source_changes or anonymized:
       changed.extend(source_changes)

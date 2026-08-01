@@ -214,6 +214,7 @@ def test_chat_intake_prunes_404s_but_retries_transient_failures(
   assert [chat["id"] for chat in intake.chats] == ["good", "recent"]
   assert intake.chats[-1]["deleted_at"] == "2026-07-30T01:00:00"
   assert intake.tombstone_count == 1
+  assert intake.tombstone_ids == ("gone",)
   assert intake.detail_failure_count == 1
   assert memory_runner._load_pending_chat_ids() == [
     "transient", "good", "recent",
@@ -424,6 +425,86 @@ def test_source_archive_retains_reviewed_text_and_scrubs_deleted_chat_id(
   assert "chat-source-one" not in path.read_text()
   assert record["deleted_at"] == "2026-07-31T00:00:00"
   assert len(record["snapshots"]) == 2
+
+
+def test_purged_source_retirement_scrubs_chat_id_without_a_detail_record(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(
+    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
+  )
+  staging = tmp_path / "repository"
+  (staging / "sources").mkdir(parents=True)
+  chat = {
+    "id": "purged-source",
+    "title": "A retained source",
+    "updated_at": "2026-07-30T00:00:00",
+    "deleted_at": None,
+    "messages": [{"role": "user", "text": "A durable fact."}],
+  }
+  source_id, _ = memory_runner._archive_chat_source(
+    staging, chat, reviewed=True, capture_kind="analyst",
+  )
+
+  next_source_id, changed = memory_runner._retire_unavailable_chat_source(
+    staging, "purged-source",
+  )
+
+  assert next_source_id == source_id
+  assert changed is True
+  record = json.loads(
+    (staging / "sources" / f"{source_id}.json").read_text(),
+  )
+  assert "chat_id" not in record
+  assert record["source_unavailable_at"]
+  assert "purged-source" not in json.dumps(record)
+
+
+def test_archived_source_lifecycle_detects_deleted_and_purged_chats(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(
+    memory_runner,
+    "_archived_active_chat_ids",
+    lambda _staging: {"active", "deleted", "purged", "already-checked"},
+  )
+
+  def detail(chat_id):
+    if chat_id == "purged":
+      return None, 404
+    return ({
+      "id": chat_id,
+      "deleted_at": "2026-08-01T00:00:00" if chat_id == "deleted" else None,
+    }, 200)
+
+  monkeypatch.setattr(memory_runner, "_fetch_chat_detail", detail)
+
+  deleted, unavailable = memory_runner._collect_archived_source_lifecycle(
+    tmp_path, {"already-checked"},
+  )
+
+  assert deleted == [{
+    "id": "deleted", "deleted_at": "2026-08-01T00:00:00",
+  }]
+  assert unavailable == {"purged"}
+
+
+def test_source_catalog_marks_a_scrubbed_archive_deleted(tmp_path):
+  (tmp_path / "sources").mkdir()
+  source_id = "c" * 32
+  (tmp_path / "sources" / f"{source_id}.json").write_text(json.dumps({
+    "schema": 1,
+    "source_id": source_id,
+    "title": "Purged source",
+    "deleted_at": None,
+    "source_unavailable_at": "2026-08-01T00:00:00+00:00",
+    "snapshots": [],
+  }))
+
+  by_id, by_chat_id = memory_graph._source_catalog(tmp_path)
+
+  assert by_id[source_id]["kind"] == "deleted"
+  assert by_chat_id == {}
 
 
 def test_deleted_source_handle_expands_to_opaque_retained_source():
