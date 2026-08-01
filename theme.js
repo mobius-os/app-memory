@@ -300,6 +300,8 @@ export const CSS = `
   font: 300 25px/1 var(--font);
   cursor: pointer;
 }
+.mg-settings-close svg,
+.mg-close svg { display: block; margin: auto; }
 .mg-settings-layout {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
