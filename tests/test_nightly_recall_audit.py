@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import urllib.parse
+from pathlib import Path
 
 import pytest
 
 import memory_graph
 import memory_runner
+from memory_text_provider import TextResult, classify_process_failure
 
 
 def _self_review():
@@ -17,31 +21,32 @@ def _self_review():
   }
 
 
-def _scoped_contract():
+def _memory_contract():
   return {
-    "schema": 3,
+    "schema": 4,
     "data": {"shared_memory": "write"},
     "background": {
       "job": "fetch.sh",
       "mode": "scheduled",
-      "authority": "scoped",
     },
   }
 
 
-def test_app_active_requires_current_scoped_authority_receipt(monkeypatch):
+def test_app_active_requires_current_memory_permissions_and_scheduled_job(
+  monkeypatch,
+):
   app = {
     "id": 57,
     "system_app": True,
-    "capability_contract": _scoped_contract(),
+    "capability_contract": _memory_contract(),
   }
   monkeypatch.setattr(memory_runner, "_api_json", lambda _path: app)
   assert memory_runner._app_active(57) is True
 
-  legacy = {
+  legacy_receipt = {
     **app,
     "capability_contract": {
-      **_scoped_contract(),
+      **_memory_contract(),
       "schema": 2,
       "background": {
         "job": "fetch.sh",
@@ -51,20 +56,17 @@ def test_app_active_requires_current_scoped_authority_receipt(monkeypatch):
       },
     },
   }
-  monkeypatch.setattr(memory_runner, "_api_json", lambda _path: legacy)
+  monkeypatch.setattr(memory_runner, "_api_json", lambda _path: legacy_receipt)
   assert memory_runner._app_active(57) is False
 
-  contradictory = {
+  wrong_permission = {
     **app,
     "capability_contract": {
-      **_scoped_contract(),
-      "background": {
-        **_scoped_contract()["background"],
-        "agent": True,
-      },
+      **_memory_contract(),
+      "data": {"shared_memory": "read"},
     },
   }
-  monkeypatch.setattr(memory_runner, "_api_json", lambda _path: contradictory)
+  monkeypatch.setattr(memory_runner, "_api_json", lambda _path: wrong_permission)
   assert memory_runner._app_active(57) is False
 
 
@@ -85,6 +87,410 @@ def test_preflight_failure_replaces_stale_run_status(monkeypatch):
   assert recorded[0]["error_code"] == "missing_app_token"
   assert recorded[0]["commit"] == "ready-commit"
   assert recorded[0]["run_id"].startswith("preflight-")
+
+
+def test_orphaned_running_status_is_closed_before_the_next_run(
+  monkeypatch, tmp_path,
+):
+  state = tmp_path / "app-state"
+  state.mkdir()
+  (state / "run-status.json").write_text(json.dumps({
+    "schema": 1,
+    "run_id": "orphaned-run",
+    "status": "running",
+    "started_at": "2026-07-29T05:30:00+00:00",
+    "commit": "ready-before",
+  }))
+  recorded = []
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(
+    memory_runner, "_record_run_status", lambda item: recorded.append(item),
+  )
+
+  memory_runner._reconcile_interrupted_run("2026-07-30T05:30:00+00:00")
+
+  assert recorded == [{
+    "schema": 1,
+    "run_id": "orphaned-run",
+    "status": "abandoned",
+    "started_at": "2026-07-29T05:30:00+00:00",
+    "finished_at": "2026-07-30T05:30:00+00:00",
+    "commit": "ready-before",
+    "error_code": "previous_run_interrupted",
+  }]
+
+
+def test_chat_discovery_pages_to_the_durable_marker(monkeypatch, tmp_path):
+  state = tmp_path / "app-state"
+  pending = state / "pending-chat-ids.json"
+  discovery = state / "chat-discovery.json"
+  state.mkdir()
+  pending.write_text(json.dumps({"schema": 1, "chat_ids": ["backlog"]}))
+  discovery.write_text(json.dumps({
+    "schema": 1,
+    "newest": {"recency_at": "2026-07-28T01:00:00", "id": "seen"},
+  }))
+  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
+  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", discovery)
+  calls = []
+
+  def api(path):
+    calls.append(path)
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+    if "before_id" not in query:
+      return memory_runner.ApiResult({
+        "items": [
+          {"id": "new-2", "recency_at": "2026-07-30T02:00:00"},
+          {"id": "new-1", "recency_at": "2026-07-29T02:00:00"},
+        ],
+        "next_before": {
+          "recency_at": "2026-07-29T02:00:00", "id": "new-1",
+        },
+      }, 200)
+    return memory_runner.ApiResult({
+      "items": [
+        {"id": "seen", "recency_at": "2026-07-28T01:00:00"},
+        {"id": "older", "recency_at": "2026-07-27T01:00:00"},
+      ],
+      "next_before": None,
+    }, 200)
+
+  monkeypatch.setattr(memory_runner, "_api_result", api)
+
+  ids, complete, queue_ok = memory_runner._discover_chat_ids()
+
+  assert ids == ["new-2", "new-1"]
+  assert complete is queue_ok is True
+  assert len(calls) == 2
+  assert all(
+    urllib.parse.parse_qs(urllib.parse.urlsplit(call).query).get(
+      "include_deleted"
+    ) == ["true"]
+    for call in calls
+  )
+  assert memory_runner._load_pending_chat_ids() == [
+    "backlog", "new-2", "new-1",
+  ]
+  assert json.loads(discovery.read_text())["newest"] == {
+    "recency_at": "2026-07-30T02:00:00", "id": "new-2",
+  }
+
+
+def test_chat_intake_prunes_404s_but_retries_transient_failures(
+  monkeypatch, tmp_path,
+):
+  pending = tmp_path / "pending-chat-ids.json"
+  pending.write_text(json.dumps({
+    "schema": 1,
+    "chat_ids": ["gone", "transient", "good", "recent"],
+  }))
+  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
+  monkeypatch.setattr(
+    memory_runner, "_discover_chat_ids", lambda: (["recent"], True, True),
+  )
+
+  def api(path):
+    split = urllib.parse.urlsplit(path)
+    chat_id = urllib.parse.unquote(split.path.rsplit("/", 1)[-1])
+    assert urllib.parse.parse_qs(split.query)["include_deleted"] == ["true"]
+    if chat_id == "gone":
+      return memory_runner.ApiResult(None, 404, "http_error")
+    if chat_id == "transient":
+      return memory_runner.ApiResult(None, 503, "http_error")
+    return memory_runner.ApiResult({
+      "id": chat_id,
+      "title": chat_id,
+      "updated_at": "2026-07-30T00:00:00",
+      "deleted_at": (
+        "2026-07-30T01:00:00" if chat_id == "recent" else None
+      ),
+      "messages": [],
+    }, 200)
+
+  monkeypatch.setattr(memory_runner, "_api_result", api)
+
+  intake = memory_runner._collect_chat_intake()
+
+  assert [chat["id"] for chat in intake.chats] == ["good", "recent"]
+  assert intake.chats[-1]["deleted_at"] == "2026-07-30T01:00:00"
+  assert intake.tombstone_count == 1
+  assert intake.detail_failure_count == 1
+  assert memory_runner._load_pending_chat_ids() == [
+    "transient", "good", "recent",
+  ]
+
+
+def test_pending_chat_queue_preserves_more_than_the_old_fixed_window(
+  monkeypatch, tmp_path,
+):
+  pending = tmp_path / "pending-chat-ids.json"
+  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
+  ids = [f"chat-{index}" for index in range(700)]
+
+  assert memory_runner._remember_pending_chat_ids(ids) is True
+  assert memory_runner._load_pending_chat_ids() == ids
+
+
+def test_deleted_chat_prompt_uses_non_linking_provenance(tmp_path):
+  chat = {
+    "id": "deleted-chat-id",
+    "title": "A deleted conversation",
+    "updated_at": "2026-07-30T00:00:00",
+    "deleted_at": "2026-07-30T01:00:00",
+    "messages": [{"role": "user", "text": "I prefer concise reports."}],
+  }
+  encoded, included = memory_runner._proposal_envelope(tmp_path, [chat], [])
+  payload = json.loads(encoded)
+
+  assert included == [chat]
+  staged = payload["redacted_recent_chats"][0]
+  assert staged["source_handle"] == "deleted:d01"
+  assert "deleted-chat-id" not in encoded
+  assert memory_runner._source_handles([chat]) == {}
+
+
+def test_deleted_chat_source_is_accepted_only_when_available():
+  proposal = {
+    "updates": [{
+      "path": "notes/concise.md",
+      "content": (
+        "---\n"
+        "type: note\n"
+        "title: Concise reports are preferred\n"
+        "source: [deleted-chat]\n"
+        "---\n"
+        "Concise reports are preferred.\n"
+      ),
+    }],
+    "deletes": [],
+    "followups": [],
+    "read_audits": [],
+    "self_review": _self_review(),
+  }
+
+  normalized = memory_runner._normalize_proposal(
+    proposal,
+    allowed_chat_ids=set(),
+    source_handles={},
+    allow_deleted_source=True,
+  )
+  assert normalized["updates"] == proposal["updates"]
+
+  with pytest.raises(memory_runner.ProposalValidationError) as raised:
+    memory_runner._normalize_proposal(
+      proposal,
+      allowed_chat_ids=set(),
+      source_handles={},
+      allow_deleted_source=False,
+    )
+  assert raised.value.code == "unverified_chat_provenance"
+
+  leaked_body = {
+    **proposal,
+    "updates": [{
+      **proposal["updates"][0],
+      "content": proposal["updates"][0]["content"].replace(
+        "Concise reports are preferred.",
+        "Concise reports are preferred (deleted-chat-id).",
+      ),
+    }],
+  }
+  with pytest.raises(memory_runner.ProposalValidationError) as raised:
+    memory_runner._normalize_proposal(
+      leaked_body,
+      allowed_chat_ids=set(),
+      source_handles={},
+      allow_deleted_source=True,
+      forbidden_chat_ids={"deleted-chat-id"},
+    )
+  assert raised.value.code == "deleted_chat_identifier"
+
+  raw_id = {
+    **proposal,
+    "updates": [{
+      **proposal["updates"][0],
+      "content": proposal["updates"][0]["content"].replace(
+        "deleted-chat", "chat:deleted-chat-id",
+      ),
+    }],
+  }
+  with pytest.raises(memory_runner.ProposalValidationError) as raised:
+    memory_runner._normalize_proposal(
+      raw_id,
+      allowed_chat_ids=set(),
+      source_handles={},
+      allow_deleted_source=True,
+    )
+  assert raised.value.code == "unverified_chat_provenance"
+
+  marker_outside_source = {
+    **proposal,
+    "updates": [{
+      **proposal["updates"][0],
+      "content": (
+        "---\n"
+        "type: note\n"
+        "description: learned from deleted-chat\n"
+        "source: []\n"
+        "---\n"
+        "Concise reports are preferred.\n"
+      ),
+    }],
+  }
+  with pytest.raises(memory_runner.ProposalValidationError) as raised:
+    memory_runner._normalize_proposal(
+      marker_outside_source,
+      allowed_chat_ids=set(),
+      source_handles={},
+      allow_deleted_source=True,
+    )
+  assert raised.value.code == "unverified_chat_provenance"
+
+
+def test_deleted_chat_backlinks_are_anonymized_and_deduplicated(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(
+    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
+  )
+  notes = tmp_path / "notes"
+  notes.mkdir()
+  note = notes / "preference.md"
+  note.write_text(
+    "---\n"
+    "type: note\n"
+    "source: [chat:deleted-one, chat:active, chat:deleted-two]\n"
+    "---\n"
+    "A durable preference.\n",
+    encoding="utf-8",
+  )
+
+  changed = memory_runner._anonymize_deleted_chat_sources(
+    tmp_path, {"deleted-one", "deleted-two"},
+  )
+
+  assert changed == ["notes/preference.md"]
+  text = note.read_text(encoding="utf-8")
+  assert "chat:deleted-one" not in text
+  assert "chat:deleted-two" not in text
+  assert re.search(
+    r"source: \[deleted-chat:[0-9a-f]{32}, chat:active, "
+    r"deleted-chat:[0-9a-f]{32}\]",
+    text,
+  )
+  assert memory_runner._known_deleted_source(tmp_path) is True
+
+
+def test_source_archive_retains_reviewed_text_and_scrubs_deleted_chat_id(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(
+    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
+  )
+  staging = tmp_path / "repository"
+  (staging / "sources").mkdir(parents=True)
+  active = {
+    "id": "chat-source-one",
+    "title": "A useful conversation",
+    "updated_at": "2026-07-30T00:00:00",
+    "deleted_at": None,
+    "messages": [
+      {"role": "user", "text": "I prefer concise reports."},
+      {"role": "assistant", "text": "Understood."},
+    ],
+  }
+
+  source_id, changed = memory_runner._archive_chat_source(
+    staging, active, reviewed=True, capture_kind="analyst",
+  )
+  assert changed is True
+  path = staging / "sources" / f"{source_id}.json"
+  record = json.loads(path.read_text())
+  assert record["chat_id"] == "chat-source-one"
+  assert record["snapshots"][0]["reviewed"] is True
+  assert record["snapshots"][0]["input"]["messages"] == active["messages"]
+
+  deleted = {
+    **active,
+    "deleted_at": "2026-07-31T00:00:00",
+  }
+  next_source_id, changed = memory_runner._archive_chat_source(
+    staging, deleted, reviewed=False, capture_kind="retention",
+  )
+  assert next_source_id == source_id
+  assert changed is True
+  record = json.loads(path.read_text())
+  assert "chat_id" not in record
+  assert "chat-source-one" not in path.read_text()
+  assert record["deleted_at"] == "2026-07-31T00:00:00"
+  assert len(record["snapshots"]) == 2
+
+
+def test_deleted_source_handle_expands_to_opaque_retained_source():
+  source_id = "a" * 32
+  proposal = {
+    "updates": [{
+      "path": "notes/concise.md",
+      "content": (
+        "---\n"
+        "type: note\n"
+        "title: Concise reports are preferred\n"
+        "source: [deleted:d01]\n"
+        "---\n"
+        "Concise reports are preferred.\n"
+      ),
+    }],
+    "deletes": [],
+    "followups": [],
+    "read_audits": [],
+    "self_review": _self_review(),
+  }
+
+  normalized = memory_runner._normalize_proposal(
+    proposal,
+    allowed_chat_ids=set(),
+    deleted_source_handles={"d01": source_id},
+    allowed_deleted_source_ids={source_id},
+    allow_deleted_source=True,
+  )
+  assert f"source: [deleted-chat:{source_id}]" in (
+    normalized["updates"][0]["content"]
+  )
+
+
+def test_graph_catalog_links_note_to_source_archive(tmp_path):
+  (tmp_path / "mocs").mkdir()
+  (tmp_path / "notes").mkdir()
+  (tmp_path / "sources").mkdir()
+  (tmp_path / "index.md").write_text(
+    "---\ntype: moc\ntitle: Memory\n---\n[[topic]]\n",
+  )
+  (tmp_path / "mocs" / "topic.md").write_text(
+    "---\ntype: moc\ntitle: Topic\n---\n[[fact]]\n",
+  )
+  (tmp_path / "notes" / "fact.md").write_text(
+    "---\ntype: note\ntitle: A fact\nsource: [chat:active-chat]\n"
+    "mocs: [topic]\n---\nA fact.\n",
+  )
+  source_id = "b" * 32
+  (tmp_path / "sources" / f"{source_id}.json").write_text(json.dumps({
+    "schema": 1,
+    "source_id": source_id,
+    "chat_id": "active-chat",
+    "title": "Source conversation",
+    "deleted_at": None,
+    "snapshots": [{"hash": "x"}],
+  }))
+
+  graph = memory_graph.build(tmp_path)
+  fact = next(node for node in graph["nodes"] if node["id"] == "fact")
+  assert fact["source_refs"] == [{
+    "source_id": source_id,
+    "file": f"sources/{source_id}.json",
+    "kind": "active",
+    "title": "Source conversation",
+    "snapshot_count": 1,
+  }]
 
 
 def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
@@ -223,24 +629,16 @@ def test_terminal_provider_failure_is_skipped_for_later_proposal_batches(
   }
   monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
   monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
-  monkeypatch.setattr(
-    memory_runner,
-    "_claude_proposal",
-    lambda *_args: (
-      calls.append("claude")
-      or memory_runner.AnalystResult(
+  def text(provider, _prompt, **_kwargs):
+    calls.append(provider)
+    if provider == "claude":
+      return TextResult(
         None,
         memory_runner.ProviderFailure("usage_limit", True, "provider"),
       )
-    ),
-  )
-  monkeypatch.setattr(
-    memory_runner,
-    "_codex_proposal",
-    lambda *_args: (
-      calls.append("codex") or memory_runner.AnalystResult(proposal)
-    ),
-  )
+    return TextResult(json.dumps(proposal))
+
+  monkeypatch.setattr(memory_runner, "run_text", text)
 
   first = memory_runner._proposal(57, tmp_path, [], [], providers)
   second = memory_runner._proposal(57, tmp_path, [], [], providers)
@@ -265,23 +663,13 @@ def test_transient_provider_failure_is_retried_on_the_next_batch(
   }
   monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
   monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
-  monkeypatch.setattr(
-    memory_runner,
-    "_claude_proposal",
-    lambda *_args: (
-      calls.append("claude")
-      or memory_runner.AnalystResult(
-        None, memory_runner.ProviderFailure("timeout"),
-      )
-    ),
-  )
-  monkeypatch.setattr(
-    memory_runner,
-    "_codex_proposal",
-    lambda *_args: (
-      calls.append("codex") or memory_runner.AnalystResult(proposal)
-    ),
-  )
+  def text(provider, _prompt, **_kwargs):
+    calls.append(provider)
+    if provider == "claude":
+      return TextResult(None, memory_runner.ProviderFailure("timeout"))
+    return TextResult(json.dumps(proposal))
+
+  monkeypatch.setattr(memory_runner, "run_text", text)
 
   memory_runner._proposal(57, tmp_path, [], [], providers)
   memory_runner._proposal(57, tmp_path, [], [], providers)
@@ -312,24 +700,16 @@ def test_batch_coordinator_combines_terminal_fallback_and_topology_rollback(
     "_proposal_batch",
     lambda _staging, remaining, _audits: remaining[:2],
   )
-  monkeypatch.setattr(
-    memory_runner,
-    "_claude_proposal",
-    lambda *_args: (
-      calls.append("claude")
-      or memory_runner.AnalystResult(
+  def text(provider, _prompt, **_kwargs):
+    calls.append(provider)
+    if provider == "claude":
+      return TextResult(
         None,
         memory_runner.ProviderFailure("usage_limit", True, "provider"),
       )
-    ),
-  )
-  monkeypatch.setattr(
-    memory_runner,
-    "_codex_proposal",
-    lambda *_args: (
-      calls.append("codex") or memory_runner.AnalystResult(proposal)
-    ),
-  )
+    return TextResult(json.dumps(proposal))
+
+  monkeypatch.setattr(memory_runner, "run_text", text)
 
   def apply(_staging, value, **_kwargs):
     nonlocal apply_count
@@ -365,7 +745,7 @@ def test_batch_coordinator_combines_terminal_fallback_and_topology_rollback(
   ],
 )
 def test_terminal_provider_errors_have_typed_scope(message, code, scope):
-  failure = memory_runner.classify_process_failure(1, stderr=message)
+  failure = classify_process_failure(1, stderr=message)
 
   assert failure.code == code
   assert failure.terminal is True
@@ -373,12 +753,52 @@ def test_terminal_provider_errors_have_typed_scope(message, code, scope):
 
 
 def test_rate_limit_is_not_cached_as_a_terminal_failure():
-  failure = memory_runner.classify_process_failure(
+  failure = classify_process_failure(
     1, stderr="Temporary rate limit; retry later",
   )
 
   assert failure.code == "process_exit_1"
   assert failure.terminal is False
+
+
+def test_provider_summary_keeps_failures_skips_and_successes_from_all_batches():
+  outcomes = [
+    memory_runner.ProposalOutcome(
+      "ok", {}, "codex", "gpt-test", [
+        {
+          "provider": "claude", "model": "opus", "supported": True,
+          "failure_code": "usage_limit", "disabled_for_run": True,
+        },
+        {
+          "provider": "codex", "model": "gpt-test", "supported": True,
+          "outcome": "accepted",
+        },
+      ],
+    ),
+    memory_runner.ProposalOutcome(
+      "ok", {}, "codex", "gpt-test", [
+        {
+          "provider": "claude", "model": "opus", "supported": True,
+          "skipped_reason": "usage_limit",
+        },
+        {
+          "provider": "codex", "model": "gpt-test", "supported": True,
+          "outcome": "accepted",
+        },
+      ],
+    ),
+  ]
+
+  summary = {
+    (item["provider"], item["model"]): item
+    for item in memory_runner._provider_summary(outcomes)
+  }
+
+  assert summary[("claude", "opus")]["failures"] == {"usage_limit": 1}
+  assert summary[("claude", "opus")]["skips"] == {"usage_limit": 1}
+  assert summary[("claude", "opus")]["invoked"] == 1
+  assert summary[("codex", "gpt-test")]["accepted"] == 2
+  assert summary[("codex", "gpt-test")]["invoked"] == 2
 
 
 def test_rejected_batch_restores_files_and_derived_graph(monkeypatch, tmp_path):
@@ -440,6 +860,9 @@ def test_run_reaches_consolidation_with_a_bounded_recall_audit_batch(
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
+  monkeypatch.setattr(
+    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
+  )
   monkeypatch.setattr(memory_runner, "_app_active", lambda _app_id: True)
   monkeypatch.setattr(
     memory_runner, "ready_pointer", lambda: {"commit": "ready"},
@@ -452,8 +875,9 @@ def test_run_reaches_consolidation_with_a_bounded_recall_audit_batch(
   monkeypatch.setattr(
     memory_runner, "_reconcile_app_owned_docs", lambda *_args: ([], []),
   )
-  monkeypatch.setattr(memory_runner, "_redacted_chats", lambda: [])
-  monkeypatch.setattr(memory_runner, "_remember_pending_chats", lambda _chats: None)
+  monkeypatch.setattr(
+    memory_runner, "_collect_chat_intake", lambda: memory_runner.ChatIntake([]),
+  )
   monkeypatch.setattr(memory_runner, "_pending_read_traces", lambda: traces)
 
   def audit(_app_id, _commit, selected, _staging=None):
@@ -527,6 +951,9 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
+  monkeypatch.setattr(
+    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
+  )
   monkeypatch.setattr(memory_runner, "_app_active", lambda _app_id: True)
   monkeypatch.setattr(
     memory_runner, "ready_pointer", lambda: {"commit": "ready"},
@@ -539,8 +966,11 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
   monkeypatch.setattr(
     memory_runner, "_reconcile_app_owned_docs", lambda *_args: ([], []),
   )
-  monkeypatch.setattr(memory_runner, "_redacted_chats", lambda: chats)
-  monkeypatch.setattr(memory_runner, "_remember_pending_chats", lambda _chats: None)
+  monkeypatch.setattr(
+    memory_runner,
+    "_collect_chat_intake",
+    lambda: memory_runner.ChatIntake(chats, pending_count=len(chats)),
+  )
   monkeypatch.setattr(memory_runner, "_pending_read_traces", lambda: [])
   monkeypatch.setattr(memory_runner, "_audit_reads", lambda *_args: [])
   monkeypatch.setattr(
@@ -618,6 +1048,9 @@ def test_run_publishes_accepted_batches_and_defers_topology_rejection(
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
+  monkeypatch.setattr(
+    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
+  )
   monkeypatch.setattr(memory_runner, "_app_active", lambda _app_id: True)
   monkeypatch.setattr(
     memory_runner, "ready_pointer", lambda: {"commit": "ready"},
@@ -630,8 +1063,11 @@ def test_run_publishes_accepted_batches_and_defers_topology_rejection(
   monkeypatch.setattr(
     memory_runner, "_reconcile_app_owned_docs", lambda *_args: ([], []),
   )
-  monkeypatch.setattr(memory_runner, "_redacted_chats", lambda: chats)
-  monkeypatch.setattr(memory_runner, "_remember_pending_chats", lambda _chats: None)
+  monkeypatch.setattr(
+    memory_runner,
+    "_collect_chat_intake",
+    lambda: memory_runner.ChatIntake(chats, pending_count=len(chats)),
+  )
   monkeypatch.setattr(memory_runner, "_pending_read_traces", lambda: [])
   monkeypatch.setattr(memory_runner, "_audit_reads", lambda *_args: [])
   monkeypatch.setattr(
@@ -774,6 +1210,36 @@ def test_read_cursor_advances_only_through_recorded_success(monkeypatch, tmp_pat
   }))
   monkeypatch.setattr(memory_runner, "STATE", state)
   monkeypatch.setattr(memory_runner, "_RECALL_STATS", stats_path)
+
+  assert [item["read_id"] for item in memory_runner._pending_read_traces()] == ["new"]
+
+
+def test_read_cursor_does_not_reopen_older_daily_logs(monkeypatch, tmp_path):
+  state = tmp_path / "app-state"
+  old = state / "read-log" / "2026-07-27.jsonl"
+  current = state / "read-log" / "2026-07-28.jsonl"
+  current.parent.mkdir(parents=True)
+  old.write_text("this file must not be reopened\n")
+  current.write_text(json.dumps({
+    "schema": 3,
+    "read_id": "new",
+    "at": "2026-07-28T01:00:00+00:00",
+    "question": "new question",
+  }) + "\n")
+  stats_path = state / "recall-stats.json"
+  stats_path.write_text(json.dumps({
+    "last_audited_at": "2026-07-28T00:30:00+00:00",
+  }))
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", stats_path)
+  original = Path.read_text
+
+  def guarded_read(path, *args, **kwargs):
+    if path == old:
+      raise AssertionError("older immutable read log was reopened")
+    return original(path, *args, **kwargs)
+
+  monkeypatch.setattr(Path, "read_text", guarded_read)
 
   assert [item["read_id"] for item in memory_runner._pending_read_traces()] == ["new"]
 
@@ -929,6 +1395,33 @@ def test_prompt_budget_preserves_routes_and_trims_note_bodies_before_chat(
   )
   assert len(payload["existing_note_contents"]) < 3
   assert len(encoded) <= 1400
+
+
+def test_graph_catalog_never_silently_truncates_large_graphs(tmp_path):
+  nodes = [
+    {
+      "id": f"note-{index}",
+      "path": f"notes/note-{index}.md",
+      "title": f"Note {index}",
+      "description": "A compact fact.",
+    }
+    for index in range(620)
+  ]
+  (tmp_path / "graph.json").write_text(json.dumps({"nodes": nodes}))
+
+  catalog = memory_runner._graph_catalog(tmp_path)
+  scale = memory_runner._graph_context_scale(tmp_path)
+
+  assert len(catalog) == 620
+  assert scale["catalog_nodes"] == 620
+  assert scale["required_context_chars"] > 0
+
+
+def test_memory_lookup_instruction_requires_a_standalone_invocation():
+  prompt = (Path(memory_runner.__file__).parent / "memory-core.md").read_text()
+
+  assert "standalone tool/exec call" in prompt
+  assert "with `cd`, pipes, redirects, or other commands" in prompt
 
 
 def test_prompt_budget_never_silently_drops_required_routes(

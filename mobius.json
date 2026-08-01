@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "Build and retrieve an optional graph of durable facts without injecting it into every chat.",
   "author": "mobius-os",
   "license": "MIT",
@@ -23,7 +23,7 @@
     "cross_app_access": "none",
     "share_with_apps": "none",
     "shared_memory": "write",
-    "chat_log_access": "summary"
+    "chat_log_access": "summary_with_deleted"
   },
   "storage_seeds": {
     "settings.json": {
@@ -79,6 +79,7 @@
     "ui/NetworkGlyph.jsx",
     "ui/EffortStepper.jsx",
     "ui/BackgroundAgentList.jsx",
+    "ui/SourceContext.jsx",
     "ui/backgroundAgentOrder.js",
     "ui/ModelPicker.jsx",
     "seed-memory/index.md",

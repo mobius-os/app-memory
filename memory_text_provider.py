@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ CODEX_DISABLED_FEATURES = (
   "browser_use_external", "browser_use_full_cdp_access", "computer_use",
   "multi_agent", "image_generation", "goals",
 )
+_ACTIVE_PROCESS_GROUPS: set[int] = set()
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,19 @@ class RunProviderHealth:
       return False
     self._choices[key] = failure
     return True
+
+
+def _kill_process_group(pid: int) -> None:
+  try:
+    os.killpg(pid, signal.SIGKILL)
+  except ProcessLookupError:
+    pass
+
+
+def terminate_active_text_processes() -> None:
+  """Reap every confined provider session owned by this process."""
+  for pid in tuple(_ACTIVE_PROCESS_GROUPS):
+    _kill_process_group(pid)
 
 
 _TERMINAL_FAILURES = (
@@ -216,17 +231,26 @@ def run_text(
 
   try:
     with tempfile.TemporaryDirectory(prefix="memory-agent-") as cwd:
-      proc = subprocess.run(
+      proc = subprocess.Popen(
         cmd,
         cwd=cwd,
         env=env,
-        input=prompt,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
+        start_new_session=True,
       )
-  except subprocess.TimeoutExpired:
-    return TextResult(None, ProviderFailure("timeout"))
+      _ACTIVE_PROCESS_GROUPS.add(proc.pid)
+      try:
+        try:
+          stdout, stderr = proc.communicate(prompt, timeout=timeout)
+        except subprocess.TimeoutExpired:
+          _kill_process_group(proc.pid)
+          proc.communicate()
+          return TextResult(None, ProviderFailure("timeout"))
+      finally:
+        _ACTIVE_PROCESS_GROUPS.discard(proc.pid)
   except OSError:
     return TextResult(
       None, ProviderFailure("provider_unavailable", True, "provider"),
@@ -235,10 +259,10 @@ def run_text(
     return TextResult(
       None,
       classify_process_failure(
-        proc.returncode, proc.stdout or "", proc.stderr or "",
+        proc.returncode, stdout or "", stderr or "",
       ),
     )
-  value = parser(proc.stdout or "").strip()
+  value = parser(stdout or "").strip()
   if not value:
     return TextResult(None, ProviderFailure("empty_output"))
   return TextResult(value)

@@ -28,9 +28,10 @@ OPERATION_LOCK = ROOT / ".operation.lock"
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _LEGACY_GEN_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 _SAFE_REL = re.compile(
-  r"^(?:index\.md|(?:mocs|notes)/[a-z0-9][a-z0-9._-]*\.md|graph\.json)$"
+  r"^(?:index\.md|(?:mocs|notes)/[a-z0-9][a-z0-9._-]*\.md|"
+  r"sources/[0-9a-f]{32}\.json|graph\.json)$"
 )
-_TRACKED_PATHS = ("index.md", "graph.json", "mocs", "notes")
+_TRACKED_PATHS = ("index.md", "graph.json", "mocs", "notes", "sources")
 
 
 def _atomic_text(path: Path, text: str) -> None:
@@ -310,6 +311,7 @@ def _ensure_repository(seed_dir: Path) -> None:
         _copy_source_tree(source, staging, strict=True)
         (staging / "mocs").mkdir(exist_ok=True)
         (staging / "notes").mkdir(exist_ok=True)
+        (staging / "sources").mkdir(exist_ok=True)
         _validate_tree(staging, require_graph=True)
         migrated_commit = _commit_at(
           staging, f"Import legacy memory generation {source.name}",
@@ -319,6 +321,7 @@ def _ensure_repository(seed_dir: Path) -> None:
       _copy_source_tree(_migration_source(seed_dir), staging)
       (staging / "mocs").mkdir(exist_ok=True)
       (staging / "notes").mkdir(exist_ok=True)
+      (staging / "sources").mkdir(exist_ok=True)
       _validate_tree(staging)
     os.replace(staging, REPOSITORY)
     root_fd = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY)
@@ -374,6 +377,7 @@ def start_staging(seed_dir: Path) -> tuple[str, Path]:
     _reset_to_published()
   (REPOSITORY / "mocs").mkdir(exist_ok=True)
   (REPOSITORY / "notes").mkdir(exist_ok=True)
+  (REPOSITORY / "sources").mkdir(exist_ok=True)
   _validate_worktree(REPOSITORY)
   return uuid.uuid4().hex, REPOSITORY
 
@@ -405,6 +409,18 @@ def _validate_tree(root: Path, *, require_graph: bool = False) -> None:
     for child in directory.iterdir():
       if child.is_symlink() or not child.is_file() or not _SAFE_REL.fullmatch(
         f"{directory.name}/{child.name}"
+      ):
+        raise ValueError(f"unsafe memory file: {child}")
+  # Source archives were introduced after the schema-one generation format.
+  # Accept their absence while importing those immutable legacy snapshots; all
+  # live worktrees create the directory before their stricter validation pass.
+  sources = root / "sources"
+  if sources.exists():
+    if sources.is_symlink() or not sources.is_dir():
+      raise ValueError(f"unsafe memory directory: {sources}")
+    for child in sources.iterdir():
+      if child.is_symlink() or not child.is_file() or not _SAFE_REL.fullmatch(
+        f"sources/{child.name}"
       ):
         raise ValueError(f"unsafe memory file: {child}")
 
@@ -553,6 +569,7 @@ def _rollback_locked(target: str) -> dict:
   _git("read-tree", "--reset", "-u", target)
   (REPOSITORY / "mocs").mkdir(exist_ok=True)
   (REPOSITORY / "notes").mkdir(exist_ok=True)
+  (REPOSITORY / "sources").mkdir(exist_ok=True)
   _validate_worktree(REPOSITORY, require_graph=True)
   if _git("diff", "--cached", "--quiet", check=False).returncode == 0:
     pointer = ready_pointer()
