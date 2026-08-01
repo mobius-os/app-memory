@@ -89,7 +89,11 @@ def _source_catalog(root: Path) -> tuple[dict[str, dict], dict[str, dict]]:
     ref = {
       "source_id": source_id,
       "file": f"sources/{source_id}.json",
-      "kind": "deleted" if value.get("deleted_at") else "active",
+      "kind": (
+        "deleted"
+        if value.get("deleted_at") or not value.get("chat_id")
+        else "active"
+      ),
       "title": str(value.get("title") or "")[:300],
       "snapshot_count": len(value.get("snapshots") or []),
     }
