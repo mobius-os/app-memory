@@ -79,8 +79,11 @@ Every successful night completes three duties across those proposals:
    redundant, or superseded. A stale candidate is a lead to verify, not proof.
 
 The live and nightly traversals have breadth-per-open-node and maximum-depth
-controls. They deliberately have no total-node budget. The navigator expands
-only branches it judges relevant and may stop early.
+controls. They deliberately have no total-node budget. Each decision expands
+only the newly active frontier; unchosen siblings are pruned rather than fed
+back as a global breadth-first queue, while the trace retains them for recall
+auditing. Live recall makes at most four decisions, with the fourth reserved
+for selecting the smallest sufficient opened set. It may stop earlier.
 
 Promote only durable, future-useful facts; preserve `source` provenance. Merge
 duplicates when the winner is unambiguous; deleting the redundant copy is safe

@@ -10,6 +10,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -20,11 +21,14 @@ from memory_text_provider import RunProviderHealth, available_provider, run_text
 
 DEFAULT_LIVE_BREADTH = 4
 DEFAULT_LIVE_DEPTH = 4
+DEFAULT_LIVE_ROUNDS = 4
 DEFAULT_NIGHT_BREADTH = 6
 DEFAULT_NIGHT_DEPTH = 6
 MAX_CONFIGURED_BREADTH = 12
 MAX_CONFIGURED_DEPTH = 12
+MAX_CONFIGURED_ROUNDS = 12
 AGENT_TIMEOUT = int(os.environ.get("MEMORY_READER_TIMEOUT", "90"))
+USAGE_PREFLIGHT_TIMEOUT = 1.25
 
 RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
 RESULT_HIT = "hit"
@@ -71,6 +75,7 @@ class TraversalResult:
   commit: str
   breadth: int
   depth_limit: int
+  round_limit: int | None
   rounds: int
   stop_reason: str
   opened: tuple[OpenedNode, ...]
@@ -84,6 +89,7 @@ class TraversalResult:
     return {
       "breadth": self.breadth,
       "depth_limit": self.depth_limit,
+      "round_limit": self.round_limit,
       "rounds": self.rounds,
       "stop_reason": self.stop_reason,
       "opened": [
@@ -221,6 +227,9 @@ def _navigator_prompt(
   breadth: int,
   depth_limit: int,
   audit: bool,
+  active_ids: set[str] | None = None,
+  selected_ids: set[str] | None = None,
+  final_round: bool = False,
 ) -> str:
   mode = (
     "This is a deeper nightly replay. Explore plausible branches more "
@@ -234,22 +243,36 @@ def _navigator_prompt(
     ',"stale":[{"id":"opened-node","reason":"why it may be stale"}]'
     if audit else ""
   )
+  focused = active_ids or {node.id for node in opened}
+  selected_ids = selected_ids or set()
+  opened_state = []
+  for node in opened:
+    item = {
+      "id": node.id,
+      "title": node.title,
+      "description": node.description,
+      "type": node.node_type,
+      "depth": node.depth,
+      "parent": node.parent,
+      "active": node.id in focused,
+    }
+    if node.id in focused or node.id in selected_ids:
+      item["content"] = node.content
+    opened_state.append(item)
   state = {
     "request": question[:8000],
-    "opened": [
-      {
-        "id": node.id,
-        "title": node.title,
-        "description": node.description,
-        "type": node.node_type,
-        "depth": node.depth,
-        "parent": node.parent,
-        "content": node.content,
-      }
-      for node in opened
-    ],
+    "opened": opened_state,
     "expandable": frontier,
   }
+  finish_instruction = (
+    "This is the final navigation decision. Do not expand another node. "
+    "Return finish=true and select the smallest sufficient subset of opened "
+    "nodes, or selected=[] when Memory has no relevant answer."
+    if final_round else
+    "Expand only from the currently listed active nodes. The next decision "
+    "will focus on the children you choose now; unchosen siblings are pruned "
+    "from this live walk rather than revisited later."
+  )
   return f"""You are Memory's confined graph navigator.
 
 Begin at the root and navigate only through the links the host exposes.
@@ -262,6 +285,8 @@ Opened nodes and selected nodes are different:
 - Open routing nodes to decide where to go next.
 - Select only the complete nodes that should be handed to the main agent as
   useful memory.
+- Complete content is included only for active nodes and already selected
+  nodes. Older routing nodes remain as compact path metadata.
 - A broad parent may lead to a detailed child without itself being selected.
 - Select both only when both independently contribute useful information.
 - A selected node must match the request's specific claim or predicate, not
@@ -278,9 +303,11 @@ Opened nodes and selected nodes are different:
 
 For each expandable parent you choose, request at most {breadth} linked nodes.
 The maximum path depth is {depth_limit}; the host enforces both limits.
-You may expand several parents in one round. A parent can appear again with
-different unopened children after a batch; continue it only when another batch
-is plausibly relevant. Never invent an id.
+You may expand several active parents in one decision. Choose every sibling
+branch needed for the request now: a parent is not offered again after its
+children have been considered. Never invent an id.
+
+{finish_instruction}
 
 Return ONLY one JSON object:
 {{"finish":false,"expand":[{{"from":"index","nodes":["child-id"]}}],"selected":[],"reason":"short decision rationale" {stale_shape}}}
@@ -299,10 +326,13 @@ def _frontier(
   opened: list[OpenedNode],
   exhausted: set[str],
   depth_limit: int,
+  active_ids: set[str] | None = None,
 ) -> list[dict]:
   opened_ids = {node.id for node in opened}
   result = []
   for node in opened:
+    if active_ids is not None and node.id not in active_ids:
+      continue
     if node.id in exhausted or node.depth >= depth_limit:
       continue
     links = graph.choices(node, opened_ids)
@@ -317,16 +347,48 @@ def _frontier(
   return result
 
 
-def _trace_frontier(graph: RevisionGraph, frontier: list[dict]) -> tuple[dict, ...]:
-  """Compact unopened choices at stop for deterministic miss attribution."""
+def _park_unexpanded(
+  graph: RevisionGraph,
+  frontier: list[dict],
+  expansions: list[dict],
+  parked: dict[tuple[str, str], dict],
+) -> None:
+  """Remember pruned siblings so nightly audit can distinguish route misses."""
+  expanded = {
+    (item["from"], node_id)
+    for item in expansions
+    for node_id in item["nodes"]
+  }
+  for item in frontier:
+    for link in item["links"]:
+      key = (item["from"], link["id"])
+      if key in expanded:
+        continue
+      parked[key] = {
+        "from": item["from"],
+        "depth": item["depth"],
+        "id": link["id"],
+        "path": str(graph.by_id[link["id"]]["path"]),
+      }
+
+
+def _parked_frontier(
+  parked: dict[tuple[str, str], dict],
+  opened: list[OpenedNode],
+) -> tuple[dict, ...]:
+  opened_ids = {node.id for node in opened}
+  parents: dict[tuple[str, int], list[dict]] = {}
+  for item in parked.values():
+    if item["id"] in opened_ids:
+      continue
+    parents.setdefault((item["from"], item["depth"]), []).append({
+      "id": item["id"], "path": item["path"],
+    })
   return tuple({
-    "from": item["from"],
-    "depth": item["depth"],
-    "nodes": [
-      {"id": link["id"], "path": str(graph.by_id[link["id"]]["path"])}
-      for link in item["links"]
-    ],
-  } for item in frontier)
+    "from": parent,
+    "depth": depth,
+    "nodes": sorted(nodes, key=lambda node: node["id"]),
+  } for (parent, depth), nodes in sorted(parents.items()))
 
 
 def _deterministic_action(
@@ -394,11 +456,14 @@ def traverse(
   depth_limit: int,
   text_call: Callable[[str], NavigatorCall | str | None] | None,
   audit: bool = False,
+  round_limit: int | None = None,
 ) -> TraversalResult:
   """Navigate from the root, then return a selected subset of opened nodes."""
   traversal_started = time.monotonic()
   breadth = max(1, min(MAX_CONFIGURED_BREADTH, int(breadth)))
   depth_limit = max(1, min(MAX_CONFIGURED_DEPTH, int(depth_limit)))
+  if round_limit is not None:
+    round_limit = max(1, min(MAX_CONFIGURED_ROUNDS, int(round_limit)))
   graph_data = json.loads(read_revision_file(commit, "graph.json"))
   graph = RevisionGraph(commit, graph_data)
   opened = [graph.open("index", 0, None)]
@@ -408,19 +473,25 @@ def traverse(
   stop_reason = "frontier_exhausted"
   selected_ids: list[str] = []
   decisions: list[dict] = []
-  frontier_at_stop: tuple[dict, ...] = ()
+  active_ids = {"index"}
+  parked: dict[tuple[str, str], dict] = {}
 
   while True:
-    available = _frontier(graph, opened, exhausted, depth_limit)
+    available = _frontier(
+      graph, opened, exhausted, depth_limit, active_ids=active_ids,
+    )
     rounds += 1
+    final_round = round_limit is not None and rounds >= round_limit
+    decision_frontier = [] if final_round else available
     decision_started = time.monotonic()
     reply = text_call(_navigator_prompt(
-      question,
-      opened,
-      available,
+      question, opened, decision_frontier,
       breadth=breadth,
       depth_limit=depth_limit,
       audit=audit,
+      active_ids=active_ids,
+      selected_ids=set(selected_ids),
+      final_round=final_round,
     )) if text_call else None
     elapsed_ms = max(0, round((time.monotonic() - decision_started) * 1000))
     if isinstance(reply, NavigatorCall):
@@ -432,7 +503,9 @@ def traverse(
     action = _json_object(raw)
     source = "model"
     if action is None:
-      action = _deterministic_action(question, opened, available, breadth)
+      action = _deterministic_action(
+        question, opened, decision_frontier, breadth,
+      )
       source = "lexical_fallback"
 
     opened_by_id = {node.id: node for node in opened}
@@ -459,9 +532,11 @@ def traverse(
           stale[node_id] = re.sub(r"\s+", " ", reason).strip()[:500]
 
     if action.get("finish") is True:
+      _park_unexpanded(graph, available, [], parked)
       decisions.append({
         "round": rounds,
         "source": source,
+        "active": sorted(active_ids),
         "finish": True,
         "expanded": [],
         "selected": list(selected_ids),
@@ -470,12 +545,13 @@ def traverse(
         "attempts": attempts,
       })
       stop_reason = "navigator_finished"
-      frontier_at_stop = _trace_frontier(graph, available)
       break
-    if not available:
+    if not decision_frontier:
+      _park_unexpanded(graph, available, [], parked)
       decisions.append({
         "round": rounds,
         "source": source,
+        "active": sorted(active_ids),
         "finish": False,
         "expanded": [],
         "selected": list(selected_ids),
@@ -483,8 +559,7 @@ def traverse(
         "elapsed_ms": elapsed_ms,
         "attempts": attempts,
       })
-      stop_reason = "frontier_exhausted"
-      frontier_at_stop = _trace_frontier(graph, available)
+      stop_reason = "round_limit" if final_round else "frontier_exhausted"
       # A valid model decision owns its selection, including an intentional
       # empty result. Lexical selection is only a provider/JSON fallback; it
       # must never turn the navigator's confirmed absence into topic padding.
@@ -495,10 +570,11 @@ def traverse(
 
     allowed = {
       item["from"]: {link["id"] for link in item["links"]}
-      for item in available
+      for item in decision_frontier
     }
     added = False
     actual_expansions = []
+    next_active: set[str] = set()
     expansions = action.get("expand")
     if not isinstance(expansions, list):
       expansions = []
@@ -528,12 +604,14 @@ def traverse(
       for child_id in valid:
         opened.append(graph.open(child_id, parent.depth + 1, parent_id))
         opened_by_id[child_id] = opened[-1]
+        next_active.add(child_id)
         added = True
       if valid:
         actual_expansions.append({"from": parent_id, "nodes": valid})
     decisions.append({
       "round": rounds,
       "source": source,
+      "active": sorted(active_ids),
       "finish": False,
       "expanded": actual_expansions,
       "selected": list(selected_ids),
@@ -541,13 +619,14 @@ def traverse(
       "elapsed_ms": elapsed_ms,
       "attempts": attempts,
     })
+    _park_unexpanded(graph, available, actual_expansions, parked)
     if not added:
       stop_reason = "navigator_made_no_progress"
-      frontier_at_stop = _trace_frontier(graph, available)
       if source == "lexical_fallback" and not selected_ids:
         fallback = _deterministic_action(question, opened, [], breadth)
         selected_ids = list(fallback.get("selected") or [])
       break
+    active_ids = next_active
 
   by_id = {node.id: node for node in opened}
   selected = tuple(by_id[node_id] for node_id in selected_ids if node_id in by_id)
@@ -561,13 +640,14 @@ def traverse(
     commit=commit,
     breadth=breadth,
     depth_limit=depth_limit,
+    round_limit=round_limit,
     rounds=rounds,
     stop_reason=stop_reason,
     opened=tuple(opened),
     selected=selected,
     decisions=tuple(decisions),
     stale_candidates=stale_candidates,
-    frontier_at_stop=frontier_at_stop,
+    frontier_at_stop=_parked_frontier(parked, opened),
     elapsed_ms=max(0, round((time.monotonic() - traversal_started) * 1000)),
   )
 
@@ -631,6 +711,89 @@ def _live_policy() -> tuple[int, int]:
   return breadth, depth
 
 
+def _usage_preflight_timeout() -> float:
+  try:
+    value = float(os.environ.get(
+      "MEMORY_USAGE_PREFLIGHT_TIMEOUT", USAGE_PREFLIGHT_TIMEOUT,
+    ))
+  except (TypeError, ValueError):
+    return USAGE_PREFLIGHT_TIMEOUT
+  return max(0.1, min(3.0, value))
+
+
+def _provider_usage_state(provider: str) -> tuple[str, int]:
+  """Return live allowance state without retaining it beyond this recall."""
+  base = os.environ.get("API_BASE_URL", "").rstrip("/")
+  token = os.environ.get("AGENT_TOKEN", "").strip()
+  if not base or not token:
+    return "unknown", 0
+  started = time.monotonic()
+  headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+  try:
+    request = urllib.request.Request(
+      f"{base}/api/settings/provider-usage/{provider}", headers=headers,
+    )
+    with urllib.request.urlopen(
+      request, timeout=_usage_preflight_timeout(),
+    ) as response:
+      snapshot = json.load(response)
+  except (
+    OSError, ValueError, TimeoutError, urllib.error.HTTPError,
+    urllib.error.URLError,
+  ):
+    return "unknown", max(0, round((time.monotonic() - started) * 1000))
+  elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+  if not isinstance(snapshot, dict) or snapshot.get("state") != "ready":
+    return "unknown", elapsed_ms
+  windows = snapshot.get("windows")
+  if not isinstance(windows, list):
+    return "unknown", elapsed_ms
+  # Model-specific windows do not necessarily constrain the reader's default
+  # model. Only provider-wide allowance windows can safely suppress a call.
+  blocking_ids = (
+    {"five_hour", "seven_day", "monthly", "seven_day_oauth_apps",
+     "monthly_agent_sdk", "agent_sdk_monthly"}
+    if provider == "claude" else
+    {"primary", "secondary"}
+  )
+  for window in windows:
+    if not isinstance(window, dict) or window.get("id") not in blocking_ids:
+      continue
+    used = window.get("used_percent")
+    if isinstance(used, (int, float)) and not isinstance(used, bool) and used >= 100:
+      return "exhausted", elapsed_ms
+  return "ready", elapsed_ms
+
+
+def _live_capacity(
+  providers: list[str],
+) -> tuple[list[str], list[dict]]:
+  """Drop only providers a fresh allowance read says are exhausted."""
+  if (
+    not providers
+    or not os.environ.get("API_BASE_URL")
+    or not os.environ.get("AGENT_TOKEN")
+  ):
+    return providers, []
+  with ThreadPoolExecutor(max_workers=len(providers)) as pool:
+    states = list(pool.map(_provider_usage_state, providers))
+  available = []
+  skipped = []
+  for provider, (state, elapsed_ms) in zip(providers, states, strict=True):
+    if state == "exhausted":
+      skipped.append({
+        "provider": provider,
+        "outcome": "usage_snapshot_exhausted",
+        "skipped": True,
+        "elapsed_ms": elapsed_ms,
+      })
+    else:
+      # Unknown must fail open: an unavailable allowance endpoint is not proof
+      # that the provider itself is unavailable.
+      available.append(provider)
+  return available, skipped
+
+
 def _live_text_call() -> Callable[[str], NavigatorCall] | None:
   requested = os.environ.get("MEMORY_READER_PROVIDER", "auto")
   provider = available_provider(requested)
@@ -644,9 +807,16 @@ def _live_text_call() -> Callable[[str], NavigatorCall] | None:
     # back to lexical matching, whose semantic judgment is intentionally weak.
     providers.extend(name for name in ("claude", "codex") if name != provider)
   health = RunProviderHealth()
+  prepared = False
+  preflight_attempts: list[dict] = []
 
   def call(prompt: str) -> NavigatorCall:
-    attempts = []
+    nonlocal prepared, providers, preflight_attempts
+    if not prepared:
+      providers, preflight_attempts = _live_capacity(providers)
+      prepared = True
+    attempts = list(preflight_attempts)
+    preflight_attempts = []
     for name in providers:
       unavailable = health.unavailable(name)
       if unavailable is not None:
@@ -725,6 +895,7 @@ def retrieve(question: str) -> RecallResult:
       breadth=breadth,
       depth_limit=depth,
       text_call=_live_text_call(),
+      round_limit=DEFAULT_LIVE_ROUNDS,
     )
   except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
     return RecallResult(
