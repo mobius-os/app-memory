@@ -21,9 +21,11 @@ Digest, and cumulative Summary for each chat. A new chat receives only recent
 names + Digests. No graph router, MOC, or fact note is injected. While Memory is
 installed, its system prompt tells the main agent to formulate a focused recall
 request. Memory's tool-free navigator starts at the root and repeatedly chooses
-which linked branches to open. Breadth limits each opened parent and depth caps
-the path length; there is no total-node budget, and the navigator may stop
-early. Routing nodes need not be selected. The reader returns the complete
+which linked branches to open. Each decision continues only through the newly
+opened frontier, pruning unchosen siblings while retaining them in the recall
+trace for nightly audit. Breadth limits each active parent, depth caps the path
+length, and the fourth live decision is selection-only; there is no total-node
+budget, and the navigator may stop early. Routing nodes need not be selected. The reader returns the complete
 contents of the useful selected nodes from the pinned commit, plus verified file
 pointers.
 

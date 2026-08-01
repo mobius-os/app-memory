@@ -128,10 +128,39 @@ def test_navigator_prompt_forbids_adjacent_nodes_as_empty_padding():
   assert "`selected` MUST be empty" in prompt
   assert "Confirmed absence is success" in prompt
   assert "IDs mentioned only in `reason` are not expansions" in prompt
-  assert "A parent can appear again" in prompt
+  assert "a parent is not offered again" in prompt
 
 
-def test_parent_can_be_expanded_again_for_another_relevant_batch(monkeypatch):
+def test_navigator_prompt_carries_full_content_only_for_active_or_selected_nodes():
+  opened = [
+    memory_search.OpenedNode(
+      "index", "index.md", "Root", "Root route", "moc", 0, None,
+      "complete root body",
+    ),
+    memory_search.OpenedNode(
+      "topic", "mocs/topic.md", "Topic", "Topic route", "moc", 1,
+      "index", "complete topic body",
+    ),
+    memory_search.OpenedNode(
+      "answer", "notes/answer.md", "Answer", "Answer route", "note", 2,
+      "topic", "complete answer body",
+    ),
+  ]
+  prompt = memory_search._navigator_prompt(
+    "What matters?", opened, [], breadth=4, depth_limit=4, audit=False,
+    active_ids={"answer"}, selected_ids={"topic"},
+  )
+  state = json.loads(prompt.split("STATE:\n", 1)[1])
+  by_id = {item["id"]: item for item in state["opened"]}
+
+  assert "content" not in by_id["index"]
+  assert by_id["topic"]["content"] == "complete topic body"
+  assert by_id["answer"]["content"] == "complete answer body"
+
+
+def test_guided_expansion_prunes_unselected_siblings_instead_of_revisiting_parent(
+  monkeypatch,
+):
   bodies = _revision()
   monkeypatch.setattr(
     memory_search,
@@ -141,24 +170,62 @@ def test_parent_can_be_expanded_again_for_another_relevant_batch(monkeypatch):
   actions = iter([
     {"finish": False, "expand": [{"from": "index", "nodes": ["a"]}]},
     {"finish": False, "expand": [{"from": "a", "nodes": ["b"]}]},
-    {"finish": False, "expand": [{"from": "a", "nodes": ["a-two"]}]},
-    {"finish": True, "expand": [], "selected": ["b", "a-two"]},
+    {"finish": True, "expand": [], "selected": ["b"]},
   ])
 
   result = memory_search.traverse(
-    "Both A details",
+    "The first A detail",
     "0" * 40,
     breadth=1,
     depth_limit=2,
     text_call=lambda _prompt: json.dumps(next(actions)),
   )
 
-  assert [node.id for node in result.opened] == ["index", "a", "b", "a-two"]
-  assert [item["expanded"] for item in result.decisions[:3]] == [
+  assert [node.id for node in result.opened] == ["index", "a", "b"]
+  assert [item["expanded"] for item in result.decisions[:2]] == [
     [{"from": "index", "nodes": ["a"]}],
     [{"from": "a", "nodes": ["b"]}],
-    [{"from": "a", "nodes": ["a-two"]}],
   ]
+  assert result.decisions[2]["active"] == ["b"]
+  assert any(
+    node["path"] == "notes/a-two.md"
+    for parent in result.frontier_at_stop
+    for node in parent["nodes"]
+  )
+
+
+def test_live_round_limit_turns_last_decision_into_selection_only(monkeypatch):
+  bodies = _revision()
+  monkeypatch.setattr(
+    memory_search,
+    "read_revision_file",
+    lambda _commit, path: bodies[path],
+  )
+  prompts = []
+  actions = iter([
+    {"finish": False, "expand": [{"from": "index", "nodes": ["a"]}]},
+    {"finish": False, "expand": [{"from": "a", "nodes": ["b"]}]},
+  ])
+
+  def decide(prompt):
+    prompts.append(prompt)
+    return json.dumps(next(actions))
+
+  result = memory_search.traverse(
+    "The complete detailed answer",
+    "0" * 40,
+    breadth=1,
+    depth_limit=4,
+    round_limit=2,
+    text_call=decide,
+  )
+
+  assert result.rounds == 2
+  assert result.stop_reason == "round_limit"
+  assert [node.id for node in result.opened] == ["index", "a"]
+  assert '"expandable": []' in prompts[-1]
+  assert "final navigation decision" in prompts[-1]
+  assert result.trace()["round_limit"] == 2
 
 
 def test_trace_records_unopened_frontier_when_navigator_stops(monkeypatch):
@@ -241,6 +308,9 @@ def test_live_reader_auto_fails_over_before_lexical_fallback(monkeypatch):
   calls = []
   monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
   monkeypatch.setattr(
+    memory_search, "_live_capacity", lambda providers: (providers, []),
+  )
+  monkeypatch.setattr(
     memory_search,
     "run_text",
     lambda provider, _prompt, **_kwargs: (
@@ -269,6 +339,9 @@ def test_live_reader_auto_fails_over_before_lexical_fallback(monkeypatch):
 def test_live_reader_remembers_terminal_provider_failure(monkeypatch):
   calls = []
   monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
+  monkeypatch.setattr(
+    memory_search, "_live_capacity", lambda providers: (providers, []),
+  )
 
   def run(provider, _prompt, **_kwargs):
     calls.append(provider)
@@ -290,6 +363,106 @@ def test_live_reader_remembers_terminal_provider_failure(monkeypatch):
   assert second.attempts[0]["skipped"] is True
   assert second.attempts[0]["outcome"] == "usage_limit"
   assert calls == ["claude", "codex", "codex"]
+
+
+def test_live_reader_skips_provider_exhausted_in_fresh_usage_snapshot(monkeypatch):
+  calls = []
+  monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
+  monkeypatch.setattr(
+    memory_search,
+    "_live_capacity",
+    lambda providers: (
+      [provider for provider in providers if provider != "claude"],
+      [{
+        "provider": "claude",
+        "outcome": "usage_snapshot_exhausted",
+        "skipped": True,
+        "elapsed_ms": 21,
+      }],
+    ),
+  )
+  monkeypatch.setattr(
+    memory_search,
+    "run_text",
+    lambda provider, _prompt, **_kwargs: (
+      calls.append(provider) or TextResult('{"finish":true}')
+    ),
+  )
+  monkeypatch.setenv("MEMORY_READER_PROVIDER", "auto")
+
+  text_call = memory_search._live_text_call()
+  assert text_call is not None
+  result = text_call("navigate")
+
+  assert calls == ["codex"]
+  assert result.attempts[0] == {
+    "provider": "claude",
+    "outcome": "usage_snapshot_exhausted",
+    "skipped": True,
+    "elapsed_ms": 21,
+  }
+  assert result.attempts[1]["provider"] == "codex"
+  assert result.attempts[1]["outcome"] == "ok"
+
+
+def test_live_usage_snapshot_is_fresh_for_each_recall(monkeypatch):
+  checks = []
+  monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "codex")
+
+  def capacity(providers):
+    checks.append(list(providers))
+    return providers, []
+
+  monkeypatch.setattr(memory_search, "_live_capacity", capacity)
+  monkeypatch.setattr(
+    memory_search,
+    "run_text",
+    lambda _provider, _prompt, **_kwargs: TextResult('{"finish":true}'),
+  )
+  monkeypatch.setenv("MEMORY_READER_PROVIDER", "codex")
+
+  first = memory_search._live_text_call()
+  second = memory_search._live_text_call()
+  assert first is not None and second is not None
+  first("one")
+  first("two")
+  second("three")
+
+  assert checks == [["codex"], ["codex"]]
+
+
+def test_usage_snapshot_only_blocks_provider_wide_allowance_windows(monkeypatch):
+  snapshots = iter([
+    {
+      "state": "ready",
+      "windows": [{"id": "seven_day_opus", "used_percent": 100}],
+    },
+    {
+      "state": "ready",
+      "windows": [{"id": "seven_day", "used_percent": 100}],
+    },
+  ])
+
+  class Response:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def read(self):
+      return json.dumps(next(snapshots)).encode()
+
+  monkeypatch.setattr(
+    memory_search.urllib.request,
+    "urlopen",
+    lambda *_args, **_kwargs: Response(),
+  )
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
+  monkeypatch.setenv("AGENT_TOKEN", "owner-token")
+
+  assert memory_search._provider_usage_state("claude")[0] == "ready"
+  assert memory_search._provider_usage_state("claude")[0] == "exhausted"
 
 
 def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
