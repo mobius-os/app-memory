@@ -154,7 +154,7 @@ test('manifest activates Memory only through a system prompt contribution', () =
   assert.deepEqual(manifest.skills, ['memory.md'])
   assert.equal('extensions' in manifest, false)
   assert.equal(manifest.permissions.shared_memory, 'write')
-  assert.equal(manifest.permissions.chat_log_access, 'summary')
+  assert.equal(manifest.permissions.chat_log_access, 'summary_with_deleted')
   assert.equal('job_authority' in manifest.permissions, false)
   assert.equal(manifest.schedule.initialize_on_install, true)
   assert.equal(manifest.embeds_agent, false)
@@ -211,7 +211,7 @@ test('note and local-graph tabs use roving focus and a labelled tab panel', () =
   assert.match(source, /tabIndex=\{detailTab === 'text' \? 0 : -1\}/)
   assert.match(source, /event\.key === 'ArrowRight'/)
   assert.match(source, /event\.key === 'Home'/)
-  assert.match(source, /id="mg-detail-panel" role="tabpanel"/)
+  assert.match(source, /id="mg-detail-panel"[\s\S]*?role="tabpanel"/)
 })
 
 test('node detail drawer exposes and enforces a modal focus contract', () => {
@@ -226,12 +226,13 @@ test('node detail drawer exposes and enforces a modal focus contract', () => {
 
 test('runner liveness is tied to the live app row, not a generic extension', () => {
   const runner = readFileSync(new URL('../memory_runner.py', import.meta.url), 'utf8')
+  const provider = readFileSync(new URL('../memory_text_provider.py', import.meta.url), 'utf8')
   assert.match(runner, /\/api\/apps\/\{app_id\}/)
   assert.match(runner, /\/api\/apps\/\{app_id\}\/job-context/)
   assert.match(runner, /\/api\/chat-logs/)
   assert.doesNotMatch(runner, /app_extensions|extensions\.memory_graph/)
   assert.doesNotMatch(runner, /app\.background_agents|codex_sdk_runner|service-token|SERVICE_TOKEN|AGENT_TOKEN/)
-  assert.match(runner, /"--tools", ""/)
+  assert.match(provider, /"--tools", ""/)
 })
 
 test('settings expose app-level background agent overrides', () => {

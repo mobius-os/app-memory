@@ -186,6 +186,47 @@ export const CSS = `
 @keyframes mg-scrim-in { from { opacity: 0; } to { opacity: 1; } }
 .mg-panel { inset: 0 0 0 auto; width: min(980px, 96vw); animation: mg-panel-in 0.22s cubic-bezier(0.22,1,0.36,1); }
 .mg-scrim { animation: mg-scrim-in 0.2s ease; }
+/* A note opened from a recall card is the app destination, not a drawer over
+   the graph. The ordinary graph/list drill-down keeps .mg-panel unchanged. */
+.mg-panel.mg-panel--direct {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-left: 0;
+  box-shadow: none;
+  animation: none;
+}
+.mg-panel--direct .mg-md {
+  width: min(920px, 100%);
+  margin-inline: auto;
+}
+.mg-panel--direct .mg-discuss {
+  width: min(920px, 100%) !important;
+  margin-inline: auto;
+}
+.mg-direct-pending {
+  position: absolute;
+  inset: 0;
+  z-index: 22;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 28px;
+  text-align: center;
+  background: var(--surface);
+}
+.mg-direct-back {
+  min-height: 44px;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface2);
+  color: var(--text);
+  font: 650 13px var(--font);
+  cursor: pointer;
+}
 .mg-local-graph { cursor: grab; background: var(--bg); }
 .mg-local-graph:active { cursor: grabbing; }
 .mg-md a[href^="#memory-node-"] {
@@ -648,6 +689,92 @@ export const CSS = `
   .mobius-model-sheet__backdrop { align-items:center; padding:24px; }
   .mobius-model-sheet { border-radius:16px; }
 }
+
+/* Retained source context stays collapsed inside the note scroll until the
+   owner deliberately opens it. */
+.mg-source-context { margin-top:24px; padding-top:18px; border-top:1px solid var(--border); }
+.mg-source-heading {
+  display:flex; align-items:flex-start; justify-content:space-between;
+  gap:14px; margin-bottom:12px;
+}
+.mg-source-heading > div { display:flex; flex-direction:column; gap:3px; }
+.mg-source-heading strong { color:var(--text); font-size:13px; line-height:1.3; }
+.mg-source-heading span { color:var(--muted); font-size:11.5px; line-height:1.45; }
+.mg-source-count,
+.mg-source-state {
+  flex:0 0 auto; display:inline-grid; place-items:center; min-width:26px;
+  min-height:26px; padding:0 8px; border:1px solid var(--border);
+  border-radius:999px; background:var(--surface2); color:var(--muted);
+  font-size:10.5px; font-weight:720;
+}
+.mg-source-list { display:flex; flex-direction:column; gap:9px; }
+.mg-source-card,
+.mg-source-unavailable {
+  overflow:hidden; border:1px solid var(--border); border-radius:12px;
+  background:color-mix(in srgb,var(--surface2) 68%,var(--surface));
+}
+.mg-source-card > summary {
+  min-height:58px; display:flex; align-items:center; gap:12px;
+  padding:10px 11px 10px 14px; cursor:pointer; list-style:none;
+}
+.mg-source-card > summary::-webkit-details-marker { display:none; }
+.mg-source-card > summary::before {
+  content:""; width:7px; height:7px; flex:0 0 auto;
+  border-right:1.5px solid var(--muted); border-bottom:1.5px solid var(--muted);
+  transform:rotate(-45deg); transition:transform .16s ease;
+}
+.mg-source-card[open] > summary::before { transform:rotate(45deg) translate(-1px,-1px); }
+.mg-source-summary-copy {
+  min-width:0; flex:1; display:flex; flex-direction:column; gap:2px;
+}
+.mg-source-summary-copy strong {
+  overflow:hidden; color:var(--text); font-size:12.5px; line-height:1.3;
+  text-overflow:ellipsis; white-space:nowrap;
+}
+.mg-source-summary-copy span { color:var(--muted); font-size:10.75px; }
+.mg-source-state.is-deleted {
+  border-color:color-mix(in srgb,var(--accent) 26%,var(--border));
+  background:color-mix(in srgb,var(--accent) 8%,var(--surface2));
+  color:var(--accent);
+}
+.mg-source-snapshots { padding:0 10px 10px; border-top:1px solid var(--border); }
+.mg-source-snapshot { padding:13px 3px 3px; }
+.mg-source-snapshot + .mg-source-snapshot { margin-top:10px; border-top:1px solid var(--border); }
+.mg-source-snapshot-head {
+  display:flex; align-items:baseline; justify-content:space-between;
+  gap:12px; margin:0 4px 9px;
+}
+.mg-source-snapshot-head strong { color:var(--text); font-size:11px; }
+.mg-source-snapshot-head span { color:var(--muted); font-size:10.5px; }
+.mg-source-caveat {
+  margin:0 4px 10px; color:var(--muted); font-size:10.75px; line-height:1.45;
+}
+.mg-source-messages { display:flex; flex-direction:column; gap:7px; }
+.mg-source-message {
+  padding:9px 10px; border:1px solid var(--border); border-radius:10px;
+  background:var(--surface);
+}
+.mg-source-message.is-user {
+  border-color:color-mix(in srgb,var(--accent) 20%,var(--border));
+  background:color-mix(in srgb,var(--accent) 5%,var(--surface));
+}
+.mg-source-message > span {
+  display:block; margin-bottom:4px; color:var(--muted); font-size:9.5px;
+  font-weight:760; letter-spacing:.04em; text-transform:uppercase;
+}
+.mg-source-message > p {
+  margin:0; color:var(--text); font-size:11.5px; line-height:1.5;
+  white-space:pre-wrap; word-break:break-word;
+}
+.mg-source-unavailable { display:flex; flex-direction:column; gap:4px; padding:12px 14px; }
+.mg-source-unavailable strong { color:var(--text); font-size:12px; }
+.mg-source-unavailable span { color:var(--muted); font-size:11px; line-height:1.45; }
+.mg-source-loading {
+  height:58px; border:1px solid var(--border); border-radius:12px;
+  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--text) 5%,transparent),transparent),var(--surface2);
+  background-size:220% 100%; animation:mg-shimmer 1.4s linear infinite;
+}
+
 @media (hover: hover) {
   .mg-agent-mode-btn:not(.is-active):hover { color: var(--text); }
 }
@@ -748,7 +875,7 @@ export const CSS = `
 }
 /* mobius-ui:ReducedMotion v1 — keep in sync; library candidate. Diverge below the marker only. */
 @media (prefers-reduced-motion: reduce) {
-  .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub, .mg-settings-deck, .mg-settings-backdrop { animation: none !important; }
+  .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-source-loading, .mg-panel, .mg-scrim, .mg-star-hub, .mg-settings-deck, .mg-settings-backdrop { animation: none !important; }
   .mg-svg-node, .mg-svg-label, .mg-legend-chevron { transition: none !important; }
 }
 /* /mobius-ui:ReducedMotion */

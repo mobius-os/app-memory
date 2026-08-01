@@ -28,6 +28,10 @@ returned text and verified file pointers.
 - **Keep continuity separate.** The base platform owns each chat's bounded
   Digest and cumulative Summary. They remain available when Memory is removed
   and are never graph startup context.
+- **Keep evidence inspectable.** For chats that support durable notes, Memory
+  retains the bounded, structurally redacted source text its analyst reviewed.
+  Deleting the chat removes its backlink and identifier but keeps that evidence
+  beside the memory under an opaque deleted-source marker.
 - **One idea per note.** Title it as the specific claim. Link every note into
   at least one map ([[index]] → maps → notes). No orphans.
 - **Recall deliberately.** The main agent formulates what prior context it

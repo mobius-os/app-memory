@@ -38,6 +38,10 @@ contribution supplies the exact `source_dir`; substitute that absolute path in
 the command. This remains correct if the install had to allocate a suffixed
 slug.
 
+Run `memory_search.py` as its own standalone tool/exec call. Do not combine it
+with `cd`, pipes, redirects, or other commands: the platform recognizes that
+exact confined invocation to record a verified Memory read and its cited files.
+
 The navigator distinguishes routing from retrieval: a broad parent can be
 opened to reach a detailed child without being selected. The lookup returns the
 complete contents of every selected node, never excerpts, followed by a verified

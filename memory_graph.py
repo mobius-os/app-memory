@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
+_SOURCE_ID = re.compile(r"^[0-9a-f]{32}$")
 
 # Structural-quality thresholds. These drive *warnings*, not errors: they flag
 # split candidates so run-status/update-log can resurface them, but they never
@@ -64,8 +65,81 @@ def _slug_for(path: Path, root: Path) -> str:
   return path.stem
 
 
+def _source_catalog(root: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+  """Index host-owned source snapshots without copying their text into graph.json."""
+  by_id: dict[str, dict] = {}
+  by_chat_id: dict[str, dict] = {}
+  directory = root / "sources"
+  if directory.is_symlink() or not directory.is_dir():
+    return by_id, by_chat_id
+  for path in sorted(directory.glob("*.json")):
+    source_id = path.stem
+    if (
+      not _SOURCE_ID.fullmatch(source_id)
+      or path.is_symlink()
+      or not path.is_file()
+    ):
+      continue
+    try:
+      value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+      continue
+    if not isinstance(value, dict) or value.get("source_id") != source_id:
+      continue
+    ref = {
+      "source_id": source_id,
+      "file": f"sources/{source_id}.json",
+      "kind": "deleted" if value.get("deleted_at") else "active",
+      "title": str(value.get("title") or "")[:300],
+      "snapshot_count": len(value.get("snapshots") or []),
+    }
+    by_id[source_id] = ref
+    chat_id = value.get("chat_id")
+    if isinstance(chat_id, str) and chat_id:
+      by_chat_id[chat_id] = ref
+  return by_id, by_chat_id
+
+
+def _source_refs(tokens: object, by_id: dict[str, dict], by_chat_id: dict[str, dict]) -> list[dict]:
+  if not isinstance(tokens, list):
+    return []
+  refs = []
+  seen = set()
+  for raw in tokens:
+    token = str(raw or "").strip()
+    if not token or token in seen:
+      continue
+    seen.add(token)
+    if token.startswith("chat:"):
+      chat_id = token[5:]
+      ref = by_chat_id.get(chat_id)
+      refs.append(dict(ref) if ref else {
+        "kind": "active",
+        "title": "",
+        "snapshot_count": 0,
+      })
+      continue
+    if token == "deleted-chat":
+      refs.append({
+        "kind": "legacy_deleted",
+        "title": "",
+        "snapshot_count": 0,
+      })
+      continue
+    if token.startswith("deleted-chat:"):
+      source_id = token[len("deleted-chat:"):]
+      ref = by_id.get(source_id)
+      refs.append({**ref, "kind": "deleted"} if ref else {
+        "kind": "deleted",
+        "title": "",
+        "snapshot_count": 0,
+      })
+  return refs
+
+
 def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
   usage = usage or {}
+  sources_by_id, sources_by_chat_id = _source_catalog(root)
   files = [root / "index.md"]
   files.extend(sorted((root / "mocs").glob("*.md")))
   files.extend(sorted((root / "notes").glob("*.md")))
@@ -103,6 +177,9 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
       "path": rel,
       "mocs": mocs,
       "tags": fm.get("tags") if isinstance(fm.get("tags"), list) else [],
+      "source_refs": _source_refs(
+        fm.get("source"), sources_by_id, sources_by_chat_id,
+      ),
       "importance": max(1, importance),
       "access_count": int(usage.get(node_id, 0)),
       "updated": str(fm.get("updated") or fm.get("as-of") or ""),

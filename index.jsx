@@ -32,6 +32,7 @@ import {
   renderWikiLinks,
   restrictNoteHtml,
   safeMemoryPath,
+  safeMemorySourcePath,
   stripFrontmatter,
   timeToDailyCron,
 } from './domain.js'
@@ -47,6 +48,7 @@ import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
 import { EffortStepper } from './ui/EffortStepper.jsx'
 import { BackgroundAgentList } from './ui/BackgroundAgentList.jsx'
+import { SourceContext } from './ui/SourceContext.jsx'
 import { agentSlotLabel, canReorderAgentSlots, reorderAgentSlots } from './ui/backgroundAgentOrder.js'
 
 export { makeSharedMemoryStore } from './storage.js'
@@ -59,6 +61,7 @@ export {
   parseDailyCronTime,
   renderWikiLinks,
   safeMemoryPath,
+  safeMemorySourcePath,
   shouldShowScreenLabel,
   shouldShowNodeLabel,
   timeToDailyCron,
@@ -131,7 +134,13 @@ export default function App({ appId, token }) {
   const [view, setView] = useState('graph'); // graph | list
   const [selected, setSelected] = useState(null); // node object
   const [pendingIntentId, setPendingIntentId] = useState(null);
+  // A note reached from a Memory recall card is the destination itself, not a
+  // modal drill-down from the graph. Keep that presentation separate from the
+  // ordinary graph/list drawer so each entry path preserves its own context.
+  const [detailPresentation, setDetailPresentation] = useState('overlay'); // overlay | direct
+  const [intentError, setIntentError] = useState('');
   const [noteState, setNoteState] = useState({ status: 'idle', md: '', fm: {}, revalidating: false });
+  const [sourceState, setSourceState] = useState({ status: 'idle', items: [] });
   const [hoverId, setHoverId] = useState(null);
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
@@ -444,6 +453,40 @@ export default function App({ appId, token }) {
     return unsub;
   }, [revision, selected, store]);
 
+  // Source snapshots are host-owned companions to the note, pinned to the
+  // same immutable revision. Notes created before source retention still show
+  // an honest unavailable state instead of silently implying provenance text.
+  useEffect(() => {
+    if (!selected || !revision) {
+      setSourceState({ status: 'idle', items: [] });
+      return undefined;
+    }
+    const refs = Array.isArray(selected.source_refs) ? selected.source_refs : [];
+    if (!refs.length) {
+      setSourceState({ status: 'ready', items: [] });
+      return undefined;
+    }
+    let alive = true;
+    setSourceState({ status: 'loading', items: [] });
+    Promise.all(refs.map(async (ref) => {
+      const rel = safeMemorySourcePath(ref?.file);
+      if (!rel) return { ref, record: null, error: null };
+      const result = await store.getJSON(rel, { revision });
+      return {
+        ref,
+        record: result.present && result.value && typeof result.value === 'object'
+          ? result.value
+          : null,
+        error: result.error || null,
+      };
+    })).then((items) => {
+      if (alive) setSourceState({ status: 'ready', items });
+    }).catch((error) => {
+      if (alive) setSourceState({ status: 'error', items: [], error });
+    });
+    return () => { alive = false; };
+  }, [revision, selected, store]);
+
   // --- Lazy-load the markdown renderer the first time we need it. ---
   useEffect(() => {
     if ((marked && purify) || !selected) return;
@@ -510,6 +553,9 @@ export default function App({ appId, token }) {
   const closePanel = useCallback(() => {
     setSelected(null);
     setHoverId(null);
+    setDetailPresentation('overlay');
+    setPendingIntentId(null);
+    setIntentError('');
   }, []);
 
   const openPanel = useCallback(async (node, opts = {}) => {
@@ -527,6 +573,11 @@ export default function App({ appId, token }) {
       if (panelNavRef.current !== handle) return;
       if (!ready) panelNavRef.current = null;
     }
+    // Only an explicit caller changes presentation. Navigating between notes
+    // inside an already-open detail view keeps the current context; a fresh
+    // graph/list open defaults back to the ordinary overlay.
+    if (opts.presentation) setDetailPresentation(opts.presentation);
+    else if (!selected) setDetailPresentation('overlay');
     setSelected(node);
     setHoverId(opts.hoverId ?? null);
     setDetailTab('text'); // every node opens on its note, not the graph
@@ -542,7 +593,15 @@ export default function App({ appId, token }) {
       if (event.source !== window.parent) return;
       if (event.data?.type !== 'moebius:app-intent') return;
       const id = memoryNoteIntent(event.data.intent);
-      if (id) setPendingIntentId(id);
+      if (id) {
+        // Switch presentation immediately, before graph lookup resolves, so a
+        // warm graph cannot become the visible intermediate destination.
+        setDetailPresentation('direct');
+        setSettingsOpen(false);
+        setShowHealth(false);
+        setIntentError('');
+        setPendingIntentId(id);
+      }
     };
     window.addEventListener('message', onIntent);
     return () => window.removeEventListener('message', onIntent);
@@ -559,7 +618,11 @@ export default function App({ appId, token }) {
       void openPanel(node, {
         ownBackEntry: false,
         resetLocalDepth: true,
+        presentation: 'direct',
       });
+    } else {
+      setSelected(null);
+      setIntentError('This memory is not available in the current graph.');
     }
   }, [pendingIntentId, graph, nodesById, openPanel]);
 
@@ -1089,6 +1152,8 @@ export default function App({ appId, token }) {
       <header
         style={S.header}
         className="mg-app-header"
+        inert={selected || detailPresentation === 'direct' ? true : undefined}
+        aria-hidden={selected || detailPresentation === 'direct' ? 'true' : undefined}
       >
         <div style={S.brand} className="mg-brand">
           {/* The app's own glossy icon as the brand mark; falls back to the
@@ -1522,7 +1587,11 @@ export default function App({ appId, token }) {
         </div>
       )}
 
-      <main style={S.main}>
+      <main
+        style={S.main}
+        inert={selected || detailPresentation === 'direct' ? true : undefined}
+        aria-hidden={selected || detailPresentation === 'direct' ? 'true' : undefined}
+      >
         {status === 'loading' && (
           <div style={S.center}>
             <div className="mg-orbit"><span /><span /><span /></div>
@@ -1682,16 +1751,38 @@ export default function App({ appId, token }) {
         )}
       </main>
 
+      {detailPresentation === 'direct' && (pendingIntentId || intentError) && (
+        <section className="mg-direct-pending" aria-live="polite" aria-label="Opening memory">
+          {pendingIntentId ? (
+            <>
+              <div className="mg-orbit"><span /><span /><span /></div>
+              <div style={S.centerText}>Opening memory…</div>
+            </>
+          ) : (
+            <>
+              <div style={S.errIcon}>!</div>
+              <div style={S.centerTitle}>Memory unavailable</div>
+              <div style={S.centerText}>{intentError}</div>
+              <button type="button" className="mg-direct-back" onClick={closePanel}>
+                Back to Memory
+              </button>
+            </>
+          )}
+        </section>
+      )}
+
       {/* ----------------------------------------------------- note panel --- */}
-      {selected && (
+      {selected && !pendingIntentId && !intentError && (
         <>
-          <div style={S.scrim} className="mg-scrim" onClick={closePanel} role="presentation" aria-hidden="true" />
+          {detailPresentation !== 'direct' && (
+            <div style={S.scrim} className="mg-scrim" onClick={closePanel} role="presentation" aria-hidden="true" />
+          )}
           <aside
             ref={panelRef}
             style={S.panel}
-            className="mg-panel"
-            role="dialog"
-            aria-modal="true"
+            className={`mg-panel${detailPresentation === 'direct' ? ' mg-panel--direct' : ''}`}
+            role={detailPresentation === 'direct' ? 'region' : 'dialog'}
+            aria-modal={detailPresentation === 'direct' ? undefined : 'true'}
             aria-labelledby="mg-panel-title"
           >
             <div style={{ ...S.panelAccent, background: colorForNode(selected) }} />
@@ -1754,7 +1845,8 @@ export default function App({ appId, token }) {
                   style={S.closeBtn}
                   className="mg-close"
                   onClick={closePanel}
-                  aria-label="Close"
+                  aria-label={detailPresentation === 'direct' ? 'Back to Memory' : 'Close'}
+                  title={detailPresentation === 'direct' ? 'Back to Memory' : 'Close'}
                 >×</button>
               </div>
             </div>
@@ -1768,7 +1860,7 @@ export default function App({ appId, token }) {
             {/* Only the active pane mounts, so the local graph does no hidden
                 layout work while the owner is reading the note. */}
             {detailTab === 'graph' && (
-              <div style={S.detailBar}>
+              <div style={S.detailBar} className="mg-detail-bar">
                 <span style={S.localCount}>
                   {localGraphData.nodes.length} nodes · {localGraphData.links.length} links
                 </span>
@@ -1788,7 +1880,13 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            <div id="mg-detail-panel" role="tabpanel" aria-labelledby={detailTab === 'text' ? 'mg-tab-text' : 'mg-tab-graph'} style={S.detailBody}>
+            <div
+              id="mg-detail-panel"
+              className="mg-detail-body"
+              role="tabpanel"
+              aria-labelledby={detailTab === 'text' ? 'mg-tab-text' : 'mg-tab-graph'}
+              style={S.detailBody}
+            >
               {detailTab === 'text' ? (
                 <div style={S.panelBody} className="mg-md mg-scroll" onClick={onNoteClick}>
                   {noteState.status === 'loading' && (
@@ -1808,9 +1906,12 @@ export default function App({ appId, token }) {
                     </div>
                   )}
                   {noteState.status === 'ready' && (
-                    noteHtml != null
-                      ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
-                      : <pre style={S.pre}>{noteState.md}</pre>
+                    <>
+                      {noteHtml != null
+                        ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
+                        : <pre style={S.pre}>{noteState.md}</pre>}
+                      <SourceContext state={sourceState} />
+                    </>
                   )}
                 </div>
               ) : (
@@ -1837,7 +1938,7 @@ export default function App({ appId, token }) {
               )}
             </div>
 
-            <div style={S.panelFoot}>
+            <div style={S.panelFoot} className="mg-panel-foot">
               <button type="button" style={S.discussBtn} className="mg-discuss" onClick={() => discuss(selected)}>
                 <ChatGlyph />
                 Discuss in a new chat

@@ -11,6 +11,7 @@ under `/data/shared/memory/`; the base platform independently owns only
 repository/index.md                  small root map/router
 repository/mocs/                     maps of content with described [[links]]
 repository/notes/                    one durable claim per note
+repository/sources/                  redacted source snapshots cited by notes
 repository/graph.json                deterministic viewer index
 repository/.git/                     compact history and rollback data
 app-state/read-trace/                 latest retrieval observation per chat
@@ -28,12 +29,20 @@ read its blobs directly; maintenance edits one private worktree and advances
 or interrupted run must leave the previous pointer readable.
 
 Atomic notes use frontmatter with `type: note`, a claim-shaped `title`, a short
-`description`, `mocs: [...]`, `source: [chat:<id>]`, and an `as-of` date when
-freshness matters. A note holds one independently supersedable fact. MOCs group
-notes by a useful retrieval question, not merely by shared vocabulary. Every
-new note must be linked from at least one MOC; every MOC must be reachable from
-`index.md`. Put a short answer beside each link so a parent often answers the
-question without opening the child.
+`description`, `mocs: [...]`, provenance, and an `as-of` date when freshness
+matters. Provenance is `source: [chat:<id>]` while the source chat is active.
+Memory stores the exact bounded, structurally redacted chat snapshot its
+analyst reviewed under `sources/`, so the partner can inspect the evidence
+beside the note. After the partner deletes a chat, the current graph replaces
+the backlink with `source: [deleted-chat:<opaque-id>]`, removes the raw chat id
+from the current source record, and retains the redacted source text. Never
+retain or reconstruct a deleted chat's id in a current note or source record.
+Older notes may carry the legacy non-linking `source: [deleted-chat]` marker
+without a recoverable snapshot. A note holds one independently supersedable
+fact. MOCs group notes by a useful retrieval question, not merely by shared
+vocabulary. Every new note must be linked from at least one MOC; every MOC must
+be reachable from `index.md`. Put a short answer beside each link so a parent
+often answers the question without opening the child.
 
 ## Scheduled consolidation
 
@@ -60,11 +69,15 @@ atomically without acknowledging the rejected batch.
 
 Every successful night completes three duties across those proposals:
 
-1. **Learn.** Review the day's chats for durable, future-useful facts about the
-   partner. Write atomic nodes with chat provenance and place them behind
-   described links reachable from the root. `source: [chat:<id>]` is the
-   backlink to the source chat; do not copy a whole chat into a graph node just
-   to create provenance.
+1. **Learn.** Review the day's active and recoverable deleted chats for durable,
+   future-useful facts about the partner. Write atomic nodes with provenance and
+   place them behind described links reachable from the root.
+   `source: [chat:<id>]` is the backlink for an active source. Deleted sources
+   use only the host-issued `source: [deleted-chat:<opaque-id>]` marker.
+   Deletion removes the backlink, not the lesson or its separately stored
+   redacted source snapshot. Do not copy a whole chat into a graph node just to
+   create provenance; source text belongs only in the host-owned source
+   archive.
 2. **Audit recall.** Replay every unaudited live read through the same
    root-linked navigator with the configured larger nightly breadth and depth.
    Opened routing nodes and selected answer nodes remain separate. Compare the
@@ -120,8 +133,10 @@ the generated Unfiled MOC.
 
 Finish by rebuilding `graph.json`, fixing every publish-blocking error,
 committing the complete graph, advancing `.ready`, and appending a compact JSONL update
-record. Per-chat summaries remain base-platform continuity and are neither
-stored nor managed by this app.
+record. Per-chat Digest/Summary notes remain base-platform continuity and are
+not managed by this app. Memory's retained source snapshots are instead the
+bounded, structurally redacted chat text actually supplied to its analyst, and
+only chats cited by durable notes are retained.
 
 Reflection owns qualitative review of the nightly writer. If its interview
 finds weak inclusion, placement, correction, or pruning decisions, improve this

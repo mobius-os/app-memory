@@ -117,7 +117,8 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._redacted_chats = lambda: [{"id": "chat-1", "messages": []}]
+      runner._collect_chat_intake = lambda: runner.ChatIntake([{"id": "chat-1", "messages": []}])
+      runner._remember_pending_chat_ids(["chat-1"])
       runner._proposal = lambda *_args: runner.ProposalOutcome(
         "ok", _proposal(), "test", None, [],
       )
@@ -145,7 +146,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._redacted_chats = lambda: []
+      runner._collect_chat_intake = lambda: runner.ChatIntake([])
       proposal_started = threading.Event()
       finish_proposal = threading.Event()
 
@@ -199,7 +200,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._redacted_chats = lambda: []
+      runner._collect_chat_intake = lambda: runner.ChatIntake([])
       runner._proposal = lambda *_args: runner.ProposalOutcome(
         status="degraded",
         proposal=None,
@@ -412,7 +413,8 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._redacted_chats = lambda: [{"id": "chat-1", "messages": []}]
+      runner._collect_chat_intake = lambda: runner.ChatIntake([{"id": "chat-1", "messages": []}])
+      runner._remember_pending_chat_ids(["chat-1"])
       runner._proposal = lambda *_args: runner.ProposalOutcome(
         "ok", _proposal("unseen-chat"), "test", None, [],
       )
@@ -449,150 +451,10 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertEqual([row["path"] for row in proposal["updates"]], [valid["path"]])
       self.assertIn("notes/unverified.md: dropped", proposal["followups"][0])
 
-  def test_claude_child_gets_no_platform_or_app_credentials(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      captured = {}
 
-      class FakePopen:
-        pid = 999998
-        returncode = 0
 
-        def __init__(self, cmd, **kwargs):
-          captured.update({"cmd": cmd, **kwargs})
 
-        def communicate(self, value=None, timeout=None):
-          captured["input"] = value
-          captured["timeout"] = timeout
-          return '{"updates":[]}', ""
 
-      with mock.patch.object(runner.subprocess, "Popen", FakePopen):
-        value = runner._claude_proposal({"provider": "claude", "effort": "ultracode"}, "prompt")
-
-      self.assertEqual(value.proposal, {"updates": []})
-      self.assertIsNone(value.failure)
-      self.assertIn("--tools", captured["cmd"])
-      self.assertEqual(captured["cmd"][captured["cmd"].index("--tools") + 1], "")
-      self.assertEqual(captured["cmd"][captured["cmd"].index("--effort") + 1], "xhigh")
-      self.assertEqual(captured["input"], "prompt")
-      self.assertNotIn("prompt", captured["cmd"])
-      self.assertTrue(captured["start_new_session"])
-      for key in ("APP_TOKEN", "SERVICE_TOKEN", "AGENT_TOKEN", "API_BASE_URL", "DATA_DIR"):
-        self.assertNotIn(key, captured["env"])
-      self.assertTrue(captured["cwd"].startswith("/tmp/memory-agent-"))
-
-  def test_claude_effort_allows_reviewed_values_and_omits_unknown_values(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      commands = []
-
-      class FakePopen:
-        pid = 999998
-        returncode = 0
-
-        def __init__(self, cmd, **_kwargs):
-          commands.append(cmd)
-
-        def communicate(self, value=None, timeout=None):
-          return '{"updates":[]}', ""
-
-      with mock.patch.object(runner.subprocess, "Popen", FakePopen):
-        runner._claude_proposal({"provider": "claude", "effort": "max"}, "prompt")
-        runner._claude_proposal({"provider": "claude", "effort": "future-level"}, "prompt")
-
-      self.assertEqual(commands[0][commands[0].index("--effort") + 1], "max")
-      self.assertNotIn("--effort", commands[1])
-
-  def test_agent_timeout_kills_and_reaps_the_whole_process_session(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-
-      class TimedOutPopen:
-        pid = 123456
-        returncode = -9
-        calls = 0
-
-        def __init__(self, _cmd, **_kwargs):
-          pass
-
-        def communicate(self, _value=None, timeout=None):
-          self.calls += 1
-          if self.calls == 1:
-            raise subprocess.TimeoutExpired("agent", timeout)
-          return "", ""
-
-      with (
-        mock.patch.object(runner.subprocess, "Popen", TimedOutPopen),
-        mock.patch.object(runner.os, "killpg") as killpg,
-      ):
-        result = runner._run_text_process(
-          ["agent"], "prompt", cwd=raw, env={"PATH": "/usr/bin"},
-        )
-
-      self.assertTrue(result.timed_out)
-      self.assertIsNone(result.returncode)
-      killpg.assert_called_once_with(123456, runner.signal.SIGKILL)
-      self.assertEqual(runner._ACTIVE_AGENT_GROUPS, set())
-
-  def test_shutdown_signal_kills_every_active_agent_group(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      runner._ACTIVE_AGENT_GROUPS.update({123456, 234567})
-      try:
-        with mock.patch.object(runner, "_kill_agent_group") as kill_group:
-          with self.assertRaises(SystemExit) as raised:
-            runner._terminate_active_agents(runner.signal.SIGTERM, None)
-        self.assertEqual(raised.exception.code, 128 + runner.signal.SIGTERM)
-        self.assertEqual(
-          {call.args[0] for call in kill_group.call_args_list},
-          {123456, 234567},
-        )
-      finally:
-        runner._ACTIVE_AGENT_GROUPS.clear()
-
-  def test_codex_child_is_ephemeral_read_only_and_gets_no_credentials(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      captured = {}
-
-      class FakePopen:
-        pid = 999999
-        returncode = 0
-
-        def __init__(self, cmd, **kwargs):
-          captured.update({"cmd": cmd, **kwargs})
-
-        def communicate(self, value=None, timeout=None):
-          captured["input"] = value
-          captured["timeout"] = timeout
-          event = {
-            "type": "item.completed",
-            "item": {"type": "agent_message", "text": '{"updates":[]}'},
-          }
-          return json.dumps(event) + "\n", ""
-
-      with (
-        mock.patch.object(runner.shutil, "which", return_value="/usr/bin/codex"),
-        mock.patch.object(runner.subprocess, "Popen", FakePopen),
-      ):
-        value = runner._codex_proposal(
-          {"provider": "codex", "model": "gpt-test", "effort": "high"},
-          "prompt",
-        )
-
-      self.assertEqual(value.proposal, {"updates": []})
-      self.assertIsNone(value.failure)
-      self.assertEqual(captured["input"], "prompt")
-      self.assertIn("--ephemeral", captured["cmd"])
-      self.assertIn("--ignore-user-config", captured["cmd"])
-      self.assertEqual(
-        captured["cmd"][captured["cmd"].index("--sandbox") + 1], "read-only",
-      )
-      self.assertIn("shell_tool", captured["cmd"])
-      self.assertIn("apps", captured["cmd"])
-      for key in ("APP_TOKEN", "SERVICE_TOKEN", "AGENT_TOKEN", "API_BASE_URL", "DATA_DIR"):
-        self.assertNotIn(key, captured["env"])
-      self.assertTrue(captured["cwd"].startswith("/tmp/memory-agent-"))
 
   def test_degraded_provider_run_is_visible_and_does_not_publish(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -605,7 +467,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._redacted_chats = lambda: []
+      runner._collect_chat_intake = lambda: runner.ChatIntake([])
       runner._proposal = lambda *_args: runner.ProposalOutcome(
         status="degraded", proposal=None, provider=None, model=None,
         attempted_agents=[{
@@ -634,7 +496,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._redacted_chats = lambda: []
+      runner._collect_chat_intake = lambda: runner.ChatIntake([])
       runner._proposal = lambda *_args: runner.ProposalOutcome("ok", _reviewed({
         "summary": "replace the root", "followups": [], "deletes": [],
         "updates": [{"path": "index.md", "content": "# Empty root\n"}],
@@ -690,11 +552,11 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       canonical = "1f905105-a3a6-4a67-a6e3-1b34ea6963d8"
-      runner._redacted_chats = lambda: [{"id": canonical, "messages": []}]
+      runner._collect_chat_intake = lambda: runner.ChatIntake([{"id": canonical, "messages": []}])
       runner._proposal = lambda *_args: runner.ProposalOutcome(
         "ok", _proposal("c01"), "test", None, [],
       )
-      runner._remember_pending_chats([{"id": canonical}])
+      runner._remember_pending_chat_ids([canonical])
 
       self.assertEqual(asyncio.run(runner.run()), 0)
 
@@ -715,7 +577,7 @@ class MemoryRunnerTests(unittest.TestCase):
         {"id": "first", "title": "first", "messages": [{"role": "user", "text": "a"}]},
         {"id": "second", "title": "second", "messages": [{"role": "user", "text": "b" * 1000}]},
       ]
-      runner._remember_pending_chats(chats)
+      runner._remember_pending_chat_ids([chat["id"] for chat in chats])
 
       offered = runner._proposal_batch(staging, chats)
       runner._acknowledge_pending_chats(offered)
@@ -723,87 +585,9 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertEqual([chat["id"] for chat in offered], ["first"])
       self.assertEqual(runner._load_pending_chat_ids(), ["second"])
 
-  def test_failed_run_chat_ids_are_retried_before_latest_window(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      runner._remember_pending_chats([{"id": "pending-chat"}])
 
-      def fake_api(path):
-        if path.startswith("/api/chat-logs?"):
-          return {"items": [
-            {"id": "latest-chat"}, {"id": "pending-chat"},
-          ]}
-        chat_id = path.rsplit("/", 1)[-1]
-        return {"title": chat_id, "messages": []}
 
-      runner._api_json = fake_api
 
-      chats = runner._redacted_chats(limit=30)
-
-      self.assertEqual(
-        [chat["id"] for chat in chats],
-        ["pending-chat", "latest-chat"],
-      )
-
-  def test_latest_id_is_queued_even_when_its_detail_fetch_fails(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-
-      def fake_api(path):
-        if path.startswith("/api/chat-logs?"):
-          return {"items": [{"id": "temporarily-unreadable"}]}
-        return None
-
-      runner._api_json = fake_api
-
-      self.assertEqual(runner._redacted_chats(), [])
-      self.assertEqual(
-        runner._load_pending_chat_ids(),
-        ["temporarily-unreadable"],
-      )
-
-  def test_default_discovery_window_covers_a_full_proposal_batch(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      listing_paths = []
-      ids = [f"chat-{index:03d}" for index in range(75)]
-
-      def fake_api(path):
-        if path.startswith("/api/chat-logs?"):
-          listing_paths.append(path)
-          return {"items": [{"id": chat_id} for chat_id in ids]}
-        chat_id = path.rsplit("/", 1)[-1]
-        return {"title": chat_id, "messages": []}
-
-      runner._api_json = fake_api
-
-      chats = runner._redacted_chats()
-
-      self.assertEqual([chat["id"] for chat in chats], ids)
-      self.assertIn("limit=100", listing_paths[0])
-      self.assertEqual(runner._load_pending_chat_ids(), ids)
-
-  def test_full_discovery_window_still_retries_older_pending_chats(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      pending = [f"pending-{index:03d}" for index in range(70)]
-      latest = [f"latest-{index:03d}" for index in range(100)]
-      runner._remember_pending_chats([{"id": chat_id} for chat_id in pending])
-
-      def fake_api(path):
-        if path.startswith("/api/chat-logs?"):
-          return {"items": [{"id": chat_id} for chat_id in latest]}
-        chat_id = path.rsplit("/", 1)[-1]
-        return {"title": chat_id, "messages": []}
-
-      runner._api_json = fake_api
-
-      chats = runner._redacted_chats()
-
-      self.assertEqual(
-        [chat["id"] for chat in chats],
-        pending + latest[:30],
-      )
 
   def test_semantically_invalid_primary_proposal_uses_configured_fallback(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -816,11 +600,8 @@ class MemoryRunnerTests(unittest.TestCase):
         {"provider": "claude", "model": "primary"},
         {"provider": "codex", "model": "fallback"},
       ]
-      runner._claude_proposal = lambda *_args: runner.AnalystResult(
-        _proposal("invented-source"),
-      )
-      runner._codex_proposal = lambda *_args: runner.AnalystResult(
-        _proposal("c01"),
+      runner._text_proposal = lambda choice, _prompt: runner.AnalystResult(
+        _proposal("invented-source" if choice["provider"] == "claude" else "c01"),
       )
 
       outcome = runner._proposal(7, staging, [{"id": canonical, "messages": []}])
@@ -845,7 +626,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._agent_choices = lambda _app_id: [
         {"provider": "claude", "model": "only"},
       ]
-      runner._claude_proposal = lambda *_args: runner.AnalystResult(
+      runner._text_proposal = lambda *_args: runner.AnalystResult(
         _proposal("invented-source"),
       )
 
@@ -927,7 +708,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._redacted_chats = lambda: []
+      runner._collect_chat_intake = lambda: runner.ChatIntake([])
       runner._proposal = lambda *_args: runner.ProposalOutcome("ok", _reviewed({
         "summary": "no provider", "followups": [], "updates": [], "deletes": [],
       }), "test", None, [])

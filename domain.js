@@ -198,6 +198,12 @@ export function safeMemoryPath(path) {
   return parts.map((part) => encodeURIComponent(part)).join('/');
 }
 
+export function safeMemorySourcePath(path) {
+  if (typeof path !== 'string') return null;
+  const match = path.trim().match(/^sources\/([0-9a-f]{32})\.json$/);
+  return match ? `sources/${match[1]}.json` : null;
+}
+
 // DOMPurify policy for memory notes: on top of the html profile, forbid every
 // network-bearing tag and attribute (the prod CSP blocks remote img/connect,
 // but form-action is NOT covered by default-src and test instances run without
