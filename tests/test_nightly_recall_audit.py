@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+import memory_graph
 import memory_runner
 
 
@@ -84,6 +85,46 @@ def test_preflight_failure_replaces_stale_run_status(monkeypatch):
   assert recorded[0]["error_code"] == "missing_app_token"
   assert recorded[0]["commit"] == "ready-commit"
   assert recorded[0]["run_id"].startswith("preflight-")
+
+
+def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
+  tmp_path,
+):
+  (tmp_path / "notes").mkdir()
+  (tmp_path / "mocs").mkdir()
+  (tmp_path / "index.md").write_text(
+    "---\ntype: moc\ntitle: Memory\n---\n[[owned]]\n[[writer-owned]]\n",
+    encoding="utf-8",
+  )
+  long_body = "\n".join(f"line {index}" for index in range(31))
+  (tmp_path / "notes" / "owned.md").write_text(
+    "---\ntype: note\ntitle: Owned\nmanaged_by: memory\n---\n" + long_body,
+    encoding="utf-8",
+  )
+  (tmp_path / "notes" / "writer-owned.md").write_text(
+    "---\ntype: note\ntitle: Writer owned\n---\n" + long_body,
+    encoding="utf-8",
+  )
+  graph = memory_graph.build(tmp_path)
+  graph["problems"].append(dict(graph["problems"][0]))
+  (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+  diagnostics = memory_runner._maintenance_diagnostics(tmp_path)
+  flags = memory_runner._maintenance_flags(tmp_path)
+
+  owned = [item for item in diagnostics if item["path"] == "notes/owned.md"]
+  assert owned == [{
+    "code": "graph.oversized_note",
+    "kind": "oversized_note",
+    "severity": "warning",
+    "node": "owned",
+    "path": "notes/owned.md",
+    "owner": "memory",
+    "actionable_by_writer": False,
+    "lines": 31,
+  }]
+  assert [item["path"] for item in flags] == ["notes/writer-owned.md"]
+  assert flags[0]["code"] == "graph.oversized_note"
 
 
 def test_read_audit_batch_is_oldest_first_and_bounded():

@@ -103,7 +103,10 @@ Every run, start with maintenance. The prompt payload carries a
 that need work: oversized notes, overfull or bare maps, dangling links, and
 orphans. Clearing a flag is real work, so a maintenance-only run that promotes
 no new fact is still a complete, successful run; never leave a standing flag
-unaddressed across runs.
+unaddressed across runs. This list contains only writer-owned work. Documents
+whose frontmatter declares `managed_by` are maintained by that app boundary;
+their warnings are recorded once as typed owner diagnostics and must not be
+turned into prose follow-ups or worked around by the nightly writer.
 
 Keep the graph cheap to traverse. The split trigger is self-computable, so apply
 it without waiting to be flagged: a note whose body exceeds ~30 non-blank lines,

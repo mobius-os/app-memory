@@ -953,15 +953,49 @@ def _graph_prompt_context(staging: Path) -> tuple[list[dict], list[dict]]:
   return required, note_contents
 
 
-def _maintenance_flags(staging: Path) -> list[dict]:
-  """Surface the deterministic graph defects the analyst is expected to fix.
+def _typed_maintenance_diagnostics(graph: dict) -> list[dict]:
+  """Give graph warnings a stable identity and route them to their owner."""
+  nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+  node_by_id = {
+    str(node.get("id")): node
+    for node in nodes
+    if isinstance(node, dict) and isinstance(node.get("id"), str)
+  }
+  diagnostics: list[dict] = []
+  seen: set[tuple[str, str, str]] = set()
+  problems = graph.get("problems") if isinstance(graph.get("problems"), list) else []
+  for problem in problems:
+    if not isinstance(problem, dict):
+      continue
+    node_id = str(problem.get("node") or problem.get("source") or "")[:160]
+    node = node_by_id.get(node_id, {})
+    path = str(node.get("path") or "")[:240]
+    owner = str(node.get("managed_by") or "memory-writer")[:80]
+    kind = str(problem.get("kind") or "unknown")[:64]
+    code = f"graph.{kind}"
+    key = (code, path, owner)
+    if key in seen:
+      continue
+    seen.add(key)
+    diagnostic = {
+      "code": code,
+      "kind": kind,
+      "severity": str(problem.get("severity") or "")[:16],
+      "node": node_id,
+      "path": path,
+      "owner": owner,
+      "actionable_by_writer": owner == "memory-writer",
+    }
+    for metric in ("lines", "entries"):
+      if isinstance(problem.get(metric), int):
+        diagnostic[metric] = problem[metric]
+    diagnostics.append(diagnostic)
+    if len(diagnostics) == 60:
+      break
+  return diagnostics
 
-  build_graph already records oversized notes, overfull/bare maps, dangling
-  links, and orphans in graph.json, but the analyst never saw them, so a flagged
-  note (e.g. an oversized recipe note) was re-flagged every run and never split.
-  Piping the existing `problems` list into the prompt turns each one into an
-  actionable, self-computable maintenance task keyed to a concrete path.
-  """
+
+def _maintenance_diagnostics(staging: Path) -> list[dict]:
   graph_path = staging / "graph.json"
   if not graph_path.is_file():
     return []
@@ -971,29 +1005,15 @@ def _maintenance_flags(staging: Path) -> list[dict]:
     return []
   if not isinstance(value, dict):
     return []
-  path_by_id = {
-    str(node.get("id")): str(node.get("path") or "")[:240]
-    for node in (value.get("nodes") or [])
-    if isinstance(node, dict) and isinstance(node.get("id"), str)
-  }
-  flags: list[dict] = []
-  for problem in value.get("problems") or []:
-    if not isinstance(problem, dict):
-      continue
-    node_id = str(problem.get("node") or "")[:160]
-    flag = {
-      "kind": str(problem.get("kind") or "")[:64],
-      "severity": str(problem.get("severity") or "")[:16],
-      "node": node_id,
-      "path": path_by_id.get(node_id, ""),
-    }
-    for metric in ("lines", "entries"):
-      if isinstance(problem.get(metric), int):
-        flag[metric] = problem[metric]
-    flags.append(flag)
-    if len(flags) == 60:
-      break
-  return flags
+  return _typed_maintenance_diagnostics(value)
+
+
+def _maintenance_flags(staging: Path) -> list[dict]:
+  """Return only deterministic defects the nightly writer can actually fix."""
+  return [
+    item for item in _maintenance_diagnostics(staging)
+    if item["actionable_by_writer"]
+  ]
 
 
 def _bounded_chat(chat: dict) -> dict | None:
@@ -1784,6 +1804,10 @@ def _append_update_log(
       "before": _topology_counts(baseline),
       "after": _topology_counts(graph),
     },
+    "owner_maintenance": [
+      item for item in _typed_maintenance_diagnostics(graph)
+      if not item["actionable_by_writer"]
+    ],
     "followups": proposal.get("followups") if isinstance(proposal.get("followups"), list) else [],
     "writer_self_reviews": (
       proposal.get("writer_self_reviews")
@@ -2316,6 +2340,10 @@ async def run() -> int:
       "audit_proposal_batch_count": audit_proposal_count,
       "chat_proposal_batch_count": chat_proposal_count,
       "deferred_chat_count": len(remaining_chats),
+      "owner_maintenance": [
+        item for item in _typed_maintenance_diagnostics(graph)
+        if not item["actionable_by_writer"]
+      ],
       "topology": {
         "before": _topology_counts(baseline),
         "after": _topology_counts(graph),
