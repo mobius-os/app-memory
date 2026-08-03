@@ -1438,6 +1438,7 @@ def test_prompt_budget_preserves_routes_and_trims_note_bodies_before_chat(
       "title": "Memory",
       "description": "Root",
       "content": "r" * 200,
+      "content_complete": True,
     },
     {
       "id": "topic",
@@ -1445,6 +1446,7 @@ def test_prompt_budget_preserves_routes_and_trims_note_bodies_before_chat(
       "title": "Topic",
       "description": "Route",
       "content": "r" * 200,
+      "content_complete": True,
     },
     *[
       {
@@ -1453,6 +1455,7 @@ def test_prompt_budget_preserves_routes_and_trims_note_bodies_before_chat(
         "title": f"Note {index}",
         "description": "Existing fact",
         "content": "n" * 250,
+        "content_complete": True,
       }
       for index in range(3)
     ],
@@ -1516,12 +1519,32 @@ def test_prompt_budget_never_silently_drops_required_routes(
     "title": "Memory",
     "description": "Root",
     "content": "r" * 500,
+    "content_complete": True,
   }])
 
   with pytest.raises(memory_runner.ProposalValidationError) as raised:
     memory_runner._proposal_envelope(tmp_path, [], [])
 
   assert raised.value.code == "routing_context_over_budget"
+
+
+def test_prompt_rejects_a_routing_document_that_cannot_be_supplied_complete(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
+  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [{
+    "id": "topic",
+    "path": "mocs/topic.md",
+    "title": "Topic",
+    "description": "Route",
+    "content": "",
+    "content_complete": False,
+  }])
+
+  with pytest.raises(memory_runner.ProposalValidationError) as raised:
+    memory_runner._proposal_envelope(tmp_path, [], [])
+
+  assert raised.value.code == "routing_document_too_large"
 
 
 def test_prompt_budget_skips_oversized_chat_and_keeps_trying(monkeypatch, tmp_path):
