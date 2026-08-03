@@ -1,24 +1,15 @@
-import io
 import json
-import urllib.error
 
 import personalization_profile
-from personalization_profile import build_profile, derive_confirmed, refresh_profile
+from personalization_profile import derive_confirmed, refresh_profile
 
 
 class FakeResponse:
-  def __init__(self, payload=None, *, etag=""):
-    self.body = io.BytesIO(json.dumps(payload or {}).encode())
-    self.headers = {"ETag": etag}
-
   def __enter__(self):
     return self
 
   def __exit__(self, *_args):
     return False
-
-  def read(self, *args):
-    return self.body.read(*args)
 
 
 def test_confirmed_comes_only_from_about_the_user_notes():
@@ -53,51 +44,22 @@ def test_confirmed_comes_only_from_about_the_user_notes():
   }]
 
 
-def test_refresh_preserves_explicit_owner_fields():
-  profile = build_profile(
-    {"nodes": []},
-    {
-      "priorities": [" Ship profile ", "Ship profile"],
-      "boundaries": ["Never assume permission"],
-      "hypotheses": ["Maybe concise"],
-    },
-    source_commit="abc",
-  )
-  assert profile["priorities"] == ["Ship profile"]
-  assert profile["boundaries"] == ["Never assume permission"]
-  assert profile["hypotheses"] == ["Maybe concise"]
-
-
-def test_refresh_claims_first_creation_without_overwriting_a_racing_writer(monkeypatch):
+def test_refresh_publishes_only_confirmed_context_and_provenance(monkeypatch):
   requests = []
 
   def urlopen(request, timeout):
     requests.append(request)
-    if len(requests) == 1:
-      raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
     return FakeResponse()
 
   monkeypatch.setattr(personalization_profile.urllib.request, "urlopen", urlopen)
   refresh_profile(
     api_base_url="https://example.test", token="token", app_id=7,
-    graph={"nodes": []}, source_commit="abc",
+    graph={"nodes": []},
+    source_commit="abc",
   )
-  assert requests[1].get_header("If-none-match") == "*"
-
-
-def test_refresh_matches_the_profile_version_it_merged(monkeypatch):
-  requests = []
-
-  def urlopen(request, timeout):
-    requests.append(request)
-    if len(requests) == 1:
-      return FakeResponse({"priorities": ["Keep this"]}, etag='"version-3"')
-    return FakeResponse()
-
-  monkeypatch.setattr(personalization_profile.urllib.request, "urlopen", urlopen)
-  profile = refresh_profile(
-    api_base_url="https://example.test", token="token", app_id=7,
-    graph={"nodes": []}, source_commit="abc",
-  )
-  assert profile["priorities"] == ["Keep this"]
-  assert requests[1].get_header("If-match") == '"version-3"'
+  assert len(requests) == 1
+  assert requests[0].get_method() == "PUT"
+  payload = json.loads(requests[0].data)
+  assert set(payload) == {"schema", "generated_at", "source_commit", "confirmed"}
+  assert payload["source_commit"] == "abc"
+  assert payload["confirmed"] == []
