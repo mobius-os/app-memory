@@ -667,6 +667,35 @@ class MemoryRunnerTests(unittest.TestCase):
       )
       self.assertEqual((changed, deleted), (["notes/old.md"], []))
 
+  def test_routing_maps_are_complete_while_oversized_notes_are_omitted(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      _seed(staging)
+      route = "# Topic\n" + ("complete routing text\n" * 260)
+      note = "# Large note\n" + ("optional detail\n" * 400)
+      (staging / "mocs" / "topic.md").write_text(route, encoding="utf-8")
+      (staging / "notes" / "large.md").write_text(note, encoding="utf-8")
+      runner.build_graph(staging, usage={})
+
+      data = json.loads(runner._proposal_data(staging, []))
+      route_row = next(
+        row for row in data["existing_graph"]
+        if row["path"] == "mocs/topic.md"
+      )
+      note_row = next(
+        row for row in data["existing_graph"]
+        if row["path"] == "notes/large.md"
+      )
+
+      self.assertEqual(route_row["content"], route)
+      self.assertTrue(route_row["content_complete"])
+      self.assertFalse(note_row["content_complete"])
+      self.assertNotIn(
+        "notes/large.md",
+        {row["path"] for row in data["existing_note_contents"]},
+      )
+
   def test_validated_delete_can_merge_duplicate_without_touching_index(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))

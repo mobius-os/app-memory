@@ -75,6 +75,9 @@ _DELETE_PATH = re.compile(r"^(?:notes|mocs)/[a-z0-9][a-z0-9._-]*\.md$")
 _MAX_UPDATES = 50
 _MAX_DELETES = 25
 _MAX_CONTENT = 64_000
+# Routing documents are complete-file edit surfaces.  They are small as a set
+# and must never be clipped by the lower, optional note-body budget.
+_MAX_ROUTING_CONTENT = 64_000
 _MAX_EXISTING_CONTENT = 4_000
 _MAX_CHAT_CHARS = 12_000
 _MAX_PROMPT_DATA_CHARS = 180_000
@@ -1039,27 +1042,36 @@ def _graph_catalog(staging: Path) -> list[dict]:
       continue
     rel = str(node.get("path") or "")[:240]
     content = ""
+    content_complete = False
     if _UPDATE_PATH.fullmatch(rel):
       source = staging / rel
       try:
         if source.is_file() and not source.is_symlink():
+          limit = (
+            _MAX_ROUTING_CONTENT
+            if rel == "index.md" or rel.startswith("mocs/")
+            else _MAX_EXISTING_CONTENT
+          )
           with source.open("r", encoding="utf-8") as handle:
-            content = handle.read(_MAX_EXISTING_CONTENT + 1)
-          content = content[:_MAX_EXISTING_CONTENT]
+            value = handle.read(limit + 1)
+          content_complete = len(value) <= limit
+          content = value if content_complete else ""
       except (OSError, UnicodeError):
         content = ""
+        content_complete = False
     catalog.append({
       "id": str(node.get("id") or "")[:160],
       "title": str(node.get("title") or "")[:300],
       "description": str(node.get("description") or "")[:800],
       "path": rel,
       "content": content,
+      "content_complete": content_complete,
     })
   return catalog
 
 
 def _graph_prompt_context(staging: Path) -> tuple[list[dict], list[dict]]:
-  """Keep all routing text + note metadata, with note bodies independently trimable."""
+  """Keep complete routing text and only complete, independently trimable notes."""
   required = []
   note_contents = []
   for item in _graph_catalog(staging):
@@ -1069,7 +1081,7 @@ def _graph_prompt_context(staging: Path) -> tuple[list[dict], list[dict]]:
       continue
     content = str(item.get("content") or "")
     required.append({key: value for key, value in item.items() if key != "content"})
-    if content:
+    if content and item.get("content_complete") is True:
       note_contents.append({"path": path, "content": content})
   return required, note_contents
 
@@ -1386,6 +1398,19 @@ def _proposal_envelope(
 ) -> tuple[str, list[dict]]:
   """Encode the prompt envelope and return the exact chats it contains."""
   required_graph, note_contents = _graph_prompt_context(staging)
+  incomplete_routes = [
+    item.get("path") for item in required_graph
+    if (
+      item.get("path") == "index.md"
+      or str(item.get("path") or "").startswith("mocs/")
+    ) and item.get("content_complete") is not True
+  ]
+  if incomplete_routes:
+    raise ProposalValidationError(
+      "routing_document_too_large",
+      "complete Memory routing documents are required: "
+      + ", ".join(str(path) for path in incomplete_routes[:5]),
+    )
   # The full root/MOC text and every note's compact identity are required:
   # without them a complete-file map update can unknowingly erase routes or a
   # chat batch can duplicate an existing fact. Full note bodies are useful but
@@ -1520,9 +1545,12 @@ handles supplied in DATA (for example source: [chat:c01] or
 source: [deleted:d01]). A recoverable deleted chat uses a `deleted:dNN` handle;
 learn from it normally and cite that exact handle. The host expands it to an
 opaque retained-source marker that is deliberately not a chat backlink. The
-`existing_graph` array always contains the complete current index/MOC text and
-compact metadata for every note. `existing_note_contents` contains the full
-text of only the existing notes that fit this batch. Never replace an existing
+`existing_graph` always contains complete current index/MOC text and compact
+metadata for every note. Every editable routing document has
+`content_complete: true`; if that invariant cannot be met, the host rejects the
+batch before invoking you. `existing_note_contents` contains the full text of
+only the existing notes that fit this batch. Oversized note bodies are omitted
+rather than clipped. Never replace an existing
 note unless its path and full current text are present there; leave a follow-up
 instead. The source-handle rules are absolute; follow them exactly:
 - The ONLY legal source tokens are the short handles listed in DATA. Never type
