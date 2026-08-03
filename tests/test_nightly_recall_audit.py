@@ -1501,11 +1501,23 @@ def test_graph_catalog_never_silently_truncates_large_graphs(tmp_path):
   assert scale["required_context_chars"] > 0
 
 
-def test_memory_lookup_instruction_requires_a_standalone_invocation():
+def test_memory_lookup_keeps_receipt_command_exact_without_serializing_work():
   prompt = (Path(memory_runner.__file__).parent / "memory-core.md").read_text()
 
-  assert "standalone tool/exec call" in prompt
-  assert "with `cd`, pipes, redirects, or other commands" in prompt
+  assert "own exact exec invocation" in prompt
+  assert "with `cd`, pipes, redirects, or other shell operations" in prompt
+  assert "isolation describes the command shape, not the schedule" in prompt
+  assert "concurrently with those other tool calls" in prompt
+
+
+def test_memory_lookup_treats_direct_chat_code_and_data_as_authoritative():
+  prompt = (Path(memory_runner.__file__).parent / "memory-core.md").read_text()
+
+  assert "Do not ask Memory to locate or summarize a chat" in prompt
+  assert "inspect source code" in prompt
+  assert "answer analytics and operational questions" in prompt
+  assert "corroborate it directly" in prompt
+  assert "direct code or data are authoritative over Memory" in prompt
 
 
 def test_prompt_budget_never_silently_drops_required_routes(
