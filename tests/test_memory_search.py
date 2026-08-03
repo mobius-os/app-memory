@@ -57,23 +57,10 @@ class MemorySearchContractTests(unittest.TestCase):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
       _commit(store)
-      actions = iter([
-        json.dumps({
-          "finish": False,
-          "expand": [{
-            "from": "index",
-            "nodes": ["../../owner-secret", "quiet-ui"],
-          }],
-          "selected": [],
-        }),
-        json.dumps({
-          "finish": True,
-          "expand": [],
+      with mock.patch.object(
+        search, "_live_text_call", return_value=lambda _prompt: json.dumps({
           "selected": ["../../owner-secret", "quiet-ui"],
         }),
-      ])
-      with mock.patch.object(
-        search, "_live_text_call", return_value=lambda _prompt: next(actions),
       ):
         result = search.retrieve("What interface style is preferred?")
 
@@ -205,7 +192,14 @@ class MemorySearchContractTests(unittest.TestCase):
           raise ValueError("unsafe memory source")
         return original_read(commit, rel, **kwargs)
 
-      with mock.patch.object(search, "read_revision_file", side_effect=reject_note):
+      with (
+        mock.patch.object(search, "read_revision_file", side_effect=reject_note),
+        mock.patch.object(
+          search, "_live_text_call", return_value=lambda _prompt: json.dumps({
+            "selected": ["quiet-ui"],
+          }),
+        ),
+      ):
         result = search.retrieve("secret project")
 
       self.assertEqual(result.status, search.RESULT_FAILED)

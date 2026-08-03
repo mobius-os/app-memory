@@ -86,6 +86,109 @@ def test_traversal_opens_per_parent_and_returns_only_selected_full_node(monkeypa
   assert len(bodies["notes/b.md"]) > 900
 
 
+def test_direct_live_selector_uses_one_call_and_loads_only_selected_bodies(
+  monkeypatch,
+):
+  bodies = _revision()
+  reads = []
+
+  def read(_commit, path):
+    reads.append(path)
+    return bodies[path]
+
+  monkeypatch.setattr(memory_search, "read_revision_file", read)
+  prompts = []
+
+  def select(prompt):
+    prompts.append(prompt)
+    return json.dumps({"selected": ["b"], "reason": "Exact answer note."})
+
+  result = memory_search.direct_live_traverse(
+    "What is the complete detailed answer?",
+    "0" * 40,
+    depth_limit=4,
+    text_call=select,
+  )
+
+  assert len(prompts) == 1
+  assert result.rounds == 1
+  assert result.stop_reason == "direct_catalog_selection"
+  assert [node.id for node in result.selected] == ["b"]
+  assert reads == ["graph.json", "index.md", "notes/b.md"]
+  assert [node.id for node in result.opened] == ["index", "b"]
+  assert any(
+    node["id"] == "a"
+    for parent in result.frontier_at_stop
+    for node in parent["nodes"]
+  )
+  assert result.decisions[0]["catalog_nodes"] == 8
+
+
+def test_direct_live_selector_fallback_prefers_deepest_lexical_match(monkeypatch):
+  bodies = _revision()
+  monkeypatch.setattr(
+    memory_search, "read_revision_file", lambda _commit, path: bodies[path],
+  )
+
+  result = memory_search.direct_live_traverse(
+    "route a-two",
+    "0" * 40,
+    depth_limit=4,
+    text_call=lambda _prompt: "not json",
+  )
+
+  assert [node.id for node in result.selected] == ["a-two"]
+  assert result.decisions[0]["source"] == "lexical_fallback"
+
+
+def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
+  bodies = _revision()
+  graph = json.loads(bodies["graph.json"])
+  graph["nodes"].append({
+    "id": "orphan", "path": "notes/orphan.md", "title": "Secret answer",
+    "description": "Must not be exposed", "type": "note",
+  })
+  bodies["graph.json"] = json.dumps(graph)
+  bodies["notes/orphan.md"] = "unreachable"
+  monkeypatch.setattr(
+    memory_search, "read_revision_file", lambda _commit, path: bodies[path],
+  )
+  prompt = []
+
+  result = memory_search.direct_live_traverse(
+    "secret answer", "0" * 40, depth_limit=4,
+    text_call=lambda value: prompt.append(value) or json.dumps({
+      "selected": ["orphan"],
+    }),
+  )
+
+  assert "orphan" not in prompt[0]
+  assert result.selected == ()
+
+
+def test_direct_live_catalog_keeps_the_selector_prompt_bounded():
+  graph = {
+    "nodes": [{
+      "id": "index", "path": "index.md", "title": "Index",
+      "description": "root", "type": "map",
+    }],
+    "edges": [{"kind": "link", "source": "index", "target": f"note-{index}"}
+              for index in range(200)],
+  }
+  graph["nodes"].extend({
+    "id": f"note-{index}", "path": f"notes/{index}.md",
+    "title": f"Note {index}", "description": "x" * 800,
+    "type": "note",
+  } for index in range(200))
+
+  catalog, _positions = memory_search._direct_catalog(
+    memory_search.RevisionGraph("0" * 40, graph), 4,
+  )
+
+  assert len(json.dumps(catalog, ensure_ascii=False)) <= 65_000
+  assert len(catalog) < 201
+
+
 def test_navigator_can_select_nodes_opened_at_the_depth_limit(monkeypatch):
   bodies = _revision()
   monkeypatch.setattr(
@@ -508,7 +611,7 @@ def test_retrieve_distinguishes_not_ready_from_a_graph_read_failure(monkeypatch)
     "ready_pointer",
     lambda: {"commit": "0" * 40},
   )
-  monkeypatch.setattr(memory_search, "_live_policy", lambda: (4, 4))
+  monkeypatch.setattr(memory_search, "_live_policy", lambda: 4)
 
   def fail_read(*_args, **_kwargs):
     raise OSError("private internal detail")

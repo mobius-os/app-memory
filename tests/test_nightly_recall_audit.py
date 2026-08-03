@@ -1009,7 +1009,7 @@ def test_run_reaches_consolidation_with_a_bounded_recall_audit_batch(
     "_record_recall_audits",
     lambda *_args, **_kwargs: None,
   )
-  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: (4, 4))
+  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: 4)
   monkeypatch.setattr(memory_runner, "_night_policy", lambda _app_id: (6, 6))
 
   assert asyncio.run(memory_runner.run()) == 0
@@ -1101,7 +1101,7 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
     "_record_recall_audits",
     lambda *_args, **_kwargs: None,
   )
-  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: (4, 4))
+  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: 4)
   monkeypatch.setattr(memory_runner, "_night_policy", lambda _app_id: (6, 6))
 
   assert asyncio.run(memory_runner.run()) == 0
@@ -1209,7 +1209,7 @@ def test_run_publishes_accepted_batches_and_defers_topology_rejection(
     "_record_recall_audits",
     lambda *_args, **_kwargs: None,
   )
-  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: (4, 4))
+  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: 4)
   monkeypatch.setattr(memory_runner, "_night_policy", lambda _app_id: (6, 6))
 
   assert asyncio.run(memory_runner.run()) == 0
@@ -1361,7 +1361,7 @@ def test_recall_stats_split_route_miss_overreach_and_graph_scale(monkeypatch, tm
     audits,
     proposal,
     graph,
-    live_policy=(4, 4),
+    live_policy=4,
     night_policy=(6, 6),
   )
 
@@ -1377,7 +1377,7 @@ def test_recall_stats_split_route_miss_overreach_and_graph_scale(monkeypatch, tm
   assert stats["no_memory_rate"] == 0.0
   assert stats["model_to_host_selection_override_rate"] == 0.0
   assert stats["graph_nodes"] == 3
-  assert stats["live_policy"] == {"breadth": 4, "depth": 4}
+  assert stats["live_policy"] == {"selection": "one_pass", "depth": 4}
   assert stats["night_policy"] == {"breadth": 6, "depth": 6}
 
 
@@ -1416,7 +1416,7 @@ def test_recall_stats_distinguish_unopened_frontier_from_route_miss(
 
   memory_runner._record_recall_audits(
     "run-1", audits, proposal, {"nodes": [], "edges": []},
-    live_policy=(4, 4), night_policy=(6, 6),
+    live_policy=4, night_policy=(6, 6),
   )
 
   stats = json.loads((state / "recall-stats.json").read_text())

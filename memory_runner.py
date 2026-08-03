@@ -28,7 +28,6 @@ from pathlib import Path
 
 from memory_graph import build as build_graph
 from memory_search import (
-  DEFAULT_LIVE_BREADTH,
   DEFAULT_LIVE_DEPTH,
   DEFAULT_NIGHT_BREADTH,
   DEFAULT_NIGHT_DEPTH,
@@ -491,19 +490,12 @@ def _night_policy(app_id: int) -> tuple[int, int]:
   )
 
 
-def _live_policy(app_id: int) -> tuple[int, int]:
+def _live_policy(app_id: int) -> int:
   settings = _settings(app_id)
-  return (
-    _positive_int(
-      settings.get("live_breadth"),
-      DEFAULT_LIVE_BREADTH,
-      MAX_CONFIGURED_BREADTH,
-    ),
-    _positive_int(
-      settings.get("live_depth"),
-      DEFAULT_LIVE_DEPTH,
-      MAX_CONFIGURED_DEPTH,
-    ),
+  return _positive_int(
+    settings.get("live_depth"),
+    DEFAULT_LIVE_DEPTH,
+    MAX_CONFIGURED_DEPTH,
   )
 
 
@@ -2329,7 +2321,7 @@ def _record_recall_audits(
   proposal: dict,
   graph: dict,
   *,
-  live_policy: tuple[int, int],
+  live_policy: int,
   night_policy: tuple[int, int],
 ) -> None:
   if not read_audits:
@@ -2452,7 +2444,7 @@ def _record_recall_audits(
     "model_to_host_selection_override_rate": override_total / total if total else 0.0,
     "graph_nodes": len(graph.get("nodes") or []),
     "graph_edges": len(graph.get("edges") or []),
-    "live_policy": {"breadth": live_policy[0], "depth": live_policy[1]},
+    "live_policy": {"selection": "one_pass", "depth": live_policy},
     "night_policy": {"breadth": night_policy[0], "depth": night_policy[1]},
     "recent": (recent + records)[-50:],
   }

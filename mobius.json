@@ -33,7 +33,6 @@
       "secondary_agent_mode": "system",
       "fallback_provider": null,
       "fallback_model": null,
-      "live_breadth": 4,
       "live_depth": 4,
       "night_breadth": 6,
       "night_depth": 6
