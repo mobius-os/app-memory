@@ -182,6 +182,15 @@ export default function App({ appId, token }) {
   const [nightBreadth, setNightBreadth] = useState(6);
   const [nightDepth, setNightDepth] = useState(6);
   const [recallStats, setRecallStats] = useState(null);
+  const [profileStatus, setProfileStatus] = useState('idle'); // idle | loading | ready | conflict | error
+  const [profileMessage, setProfileMessage] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileConfirmed, setProfileConfirmed] = useState([]);
+  const [profilePriorities, setProfilePriorities] = useState('');
+  const [profileBoundaries, setProfileBoundaries] = useState('');
+  const [profileHypotheses, setProfileHypotheses] = useState('');
+  const [profileBase, setProfileBase] = useState({});
+  const [profileEtag, setProfileEtag] = useState('');
   const [localDepth, setLocalDepth] = useState(1);
   // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
   // Defaults to 'text' — the user arrives here from the global graph, so they
@@ -797,6 +806,22 @@ export default function App({ appId, token }) {
     }
   }, [appId, authHeaders]);
 
+  const loadProfile = useCallback(async () => {
+    setProfileStatus('loading'); setProfileMessage('');
+    try {
+      const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/personalization-profile.json`, { headers: authHeaders });
+      if (!res.ok && res.status !== 404) throw new Error('Could not load your profile.');
+      const value = res.ok ? await res.json() : {};
+      const safe = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      setProfileBase(safe); setProfileEtag(res.headers.get('ETag') || '');
+      setProfileConfirmed(Array.isArray(safe.confirmed) ? safe.confirmed : []);
+      setProfilePriorities((Array.isArray(safe.priorities) ? safe.priorities : []).join('\n'));
+      setProfileBoundaries((Array.isArray(safe.boundaries) ? safe.boundaries : []).join('\n'));
+      setProfileHypotheses((Array.isArray(safe.hypotheses) ? safe.hypotheses : []).join('\n'));
+      setProfileStatus('ready');
+    } catch (err) { setProfileStatus('error'); setProfileMessage(err.message || 'Could not load your profile.'); }
+  }, [appId, authHeaders]);
+
   useEffect(() => {
     if (!settingsOpen || scheduleStatus !== 'idle') return;
     loadSchedule();
@@ -806,6 +831,11 @@ export default function App({ appId, token }) {
     if (!settingsOpen || agentStatus !== 'idle') return;
     loadAgentSettings();
   }, [settingsOpen, agentStatus, loadAgentSettings]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsSection !== 'profile' || profileStatus !== 'idle') return;
+    loadProfile();
+  }, [settingsOpen, settingsSection, profileStatus, loadProfile]);
 
   useEffect(() => {
     if (!settingsOpen) return undefined;
@@ -1030,6 +1060,33 @@ export default function App({ appId, token }) {
     nightBreadth,
     nightDepth,
   ]);
+
+  const saveProfile = useCallback(async () => {
+    if (profileSaving) return;
+    const lines = (value) => value.split('\n').map((item) => item.trim()).filter(Boolean).slice(0, 24);
+    setProfileSaving(true); setProfileMessage('');
+    const payload = { ...profileBase, schema: 1, confirmed: profileConfirmed,
+      priorities: lines(profilePriorities), boundaries: lines(profileBoundaries),
+      hypotheses: lines(profileHypotheses) };
+    try {
+      const headers = { ...authHeaders, 'Content-Type': 'application/json' };
+      if (profileEtag) headers['If-Match'] = profileEtag;
+      else headers['If-None-Match'] = '*';
+      const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/personalization-profile.json`, {
+        method: 'PUT', headers, body: JSON.stringify(payload),
+      });
+      if (res.status === 412) {
+        setProfileStatus('conflict');
+        setProfileMessage('This profile changed elsewhere. Reload before saving.');
+        return;
+      }
+      if (!res.ok) throw new Error('Could not save your profile.');
+      setProfileBase(payload); setProfileEtag(res.headers.get('ETag') || profileEtag);
+      setProfileMessage('Profile saved');
+      setTimeout(() => setProfileMessage(''), 2200);
+    } catch (err) { setProfileMessage(err.message || 'Could not save your profile.'); }
+    finally { setProfileSaving(false); }
+  }, [appId, authHeaders, profileBase, profileConfirmed, profilePriorities, profileBoundaries, profileHypotheses, profileEtag, profileSaving]);
 
   // The detail drawer is modal on phone and desktop (it owns a scrim), so it
   // must also own focus: enter on Close, trap Tab, close on Escape, then return
@@ -1265,6 +1322,7 @@ export default function App({ appId, token }) {
             <div className="mg-settings-layout">
               <nav className="mg-settings-nav" aria-label="Memory settings sections">
                 {[
+                  ['profile', 'Personalization', 'What Reflection should know'],
                   ['schedule', 'Schedule', 'When nightly review runs'],
                   ['agents', 'Background agents', 'Models and priority'],
                   ['retrieval', 'Retrieval', 'Live and nightly search limits'],
@@ -1283,6 +1341,27 @@ export default function App({ appId, token }) {
               </nav>
 
               <div className="mg-settings-content mg-scroll">
+                {settingsSection === 'profile' && (
+                  <div className="mg-settings-section">
+                    <div className="mg-section-intro"><div><div className="mg-settings-kicker">Shared context</div><h3>Your personalization profile</h3></div>
+                      <p>Memory supplies evidence-backed facts. You control priorities, boundaries, and tentative hypotheses. Reflection uses these to rank what matters—not as permission.</p></div>
+                    {profileStatus === 'loading' || profileStatus === 'idle' ? <div className="mg-settings-loading">Loading profile…</div>
+                      : profileStatus === 'error' ? <div className="mg-settings-callout is-error"><span>{profileMessage}</span><button type="button" onClick={loadProfile}>Retry</button></div>
+                      : <>
+                        {profileStatus === 'conflict' && <div className="mg-settings-callout is-error"><span>{profileMessage}</span><button type="button" onClick={loadProfile}>Reload profile</button></div>}
+                        <div className="mg-policy-grid">
+                          <label className="mg-profile-editor"><strong>Current priorities</strong><small>One per line. Reflection should favor work that advances these.</small><textarea rows="5" value={profilePriorities} onChange={(e) => setProfilePriorities(e.target.value)} placeholder="Ship the next milestone" /></label>
+                          <label className="mg-profile-editor"><strong>Boundaries</strong><small>One per line. These constrain suggestions; they never weaken normal approvals.</small><textarea rows="5" value={profileBoundaries} onChange={(e) => setProfileBoundaries(e.target.value)} placeholder="Do not generalize a one-off preference" /></label>
+                        </div>
+                        <label className="mg-profile-editor"><strong>Tentative hypotheses</strong><small>One per line. Reflection must treat these as ideas to test, not facts.</small><textarea rows="4" value={profileHypotheses} onChange={(e) => setProfileHypotheses(e.target.value)} placeholder="Shorter briefs may be easier to act on" /></label>
+                        <details className="mg-policy-card mg-profile-confirmed">
+                          <summary>Confirmed by Memory <span>{profileConfirmed.length} evidence-backed notes</span></summary>
+                          <div className="mg-profile-facts">{profileConfirmed.map((item) => <div className="mg-profile-fact" key={item.id}><strong>{item.title || item.id}</strong>{item.description ? <div>{item.description}</div> : null}</div>)}</div>
+                          {profileConfirmed.length === 0 && <p>Memory will fill this after its next successful review.</p>}
+                        </details>
+                      </>}
+                  </div>
+                )}
                 {settingsSection === 'retrieval' && (
                   <div className="mg-settings-section">
                     <div className="mg-section-intro">
@@ -1532,23 +1611,25 @@ export default function App({ appId, token }) {
 
             <footer className="mg-settings-foot">
               <span className={`mg-settings-message${(
-                settingsSection === 'schedule' ? scheduleMessage === 'Saved' : agentMessage === 'Settings saved'
+                settingsSection === 'schedule' ? scheduleMessage === 'Saved' : settingsSection === 'profile' ? profileMessage === 'Profile saved' : agentMessage === 'Settings saved'
               ) ? ' is-ok' : ''}`} role="status" aria-live="polite">
-                {settingsSection === 'schedule' ? scheduleMessage : agentMessage}
+                {settingsSection === 'schedule' ? scheduleMessage : settingsSection === 'profile' ? profileMessage : agentMessage}
               </span>
               <button
                 className="mg-settings-save"
                 type="button"
-                onClick={settingsSection === 'schedule' ? saveSchedule : saveAgentSettings}
+                onClick={settingsSection === 'schedule' ? saveSchedule : settingsSection === 'profile' ? saveProfile : saveAgentSettings}
                 disabled={
                   settingsSection === 'schedule'
                     ? scheduleSaving || scheduleStatus !== 'ready'
-                    : agentSaving || agentStatus !== 'ready'
+                    : settingsSection === 'profile'
+                      ? profileSaving || profileStatus !== 'ready'
+                      : agentSaving || agentStatus !== 'ready'
                 }
               >
-                {(settingsSection === 'schedule' ? scheduleSaving : agentSaving)
+                {(settingsSection === 'schedule' ? scheduleSaving : settingsSection === 'profile' ? profileSaving : agentSaving)
                   ? 'Saving…'
-                  : settingsSection === 'schedule' ? 'Save schedule' : 'Save settings'}
+                  : settingsSection === 'schedule' ? 'Save schedule' : settingsSection === 'profile' ? 'Save profile' : 'Save settings'}
               </button>
             </footer>
           </section>

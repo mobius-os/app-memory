@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from memory_graph import build as build_graph
+from personalization_profile import refresh_profile
 from memory_search import (
   DEFAULT_LIVE_DEPTH,
   DEFAULT_NIGHT_BREADTH,
@@ -3001,6 +3002,16 @@ async def run() -> int:
       raise RuntimeError("Memory app became inactive; publication aborted")
     pointer = publish(staging)
     staging = None
+    profile_status = {"status": "published", "confirmed_count": 0}
+    try:
+      profile = refresh_profile(api_base_url=API_BASE_URL, token=APP_TOKEN,
+                                app_id=app_id, graph=graph, source_commit=pointer["commit"])
+      profile_status["confirmed_count"] = len(profile.get("confirmed") or [])
+    except Exception as exc:
+      # The graph is already durable. A profile handoff problem is observable
+      # degradation, not grounds to misreport graph publication as failed.
+      profile_status = {"status": "unavailable", "error": type(exc).__name__}
+      _log(f"WARN personalization profile refresh failed: {exc!r}")
     acknowledged = _acknowledge_pending_chats(proposal_chats)
     intake = replace(
       intake,
@@ -3040,6 +3051,7 @@ async def run() -> int:
         consolidation.provider_outcomes, deferred_attempts,
       ),
       "graph_scale": graph_scale,
+      "personalization_profile": profile_status,
       "owner_maintenance": [
         item for item in _typed_maintenance_diagnostics(graph)
         if not item["actionable_by_writer"]

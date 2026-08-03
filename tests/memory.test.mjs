@@ -161,6 +161,7 @@ test('manifest activates Memory only through a system prompt contribution', () =
   for (const file of [
     'memory-core.md', 'memory.md', 'memory_search.py', 'memory_runner.py',
     'memory_store.py', 'memory_graph.py', 'memory_text_provider.py',
+    'personalization_profile.py',
   ]) {
     assert.ok(manifest.source_files.includes(file), file)
   }
@@ -298,6 +299,16 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(runner, /def _settings/)
   assert.match(runner, /def _agent_choices/)
   assert.match(runner, /job-context/)
+})
+
+test('personalization editor uses phone-safe fields and navigation', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
+  assert.equal((source.match(/className="mg-profile-editor"/g) || []).length, 3)
+  assert.match(source, /If-None-Match/)
+  assert.match(source, /Reload profile/)
+  assert.match(theme, /\.mg-profile-editor textarea\s*\{[\s\S]*?width:\s*100%[\s\S]*?font-size:\s*16px/)
+  assert.match(theme, /@media \(max-width: 640px\)[\s\S]*?\.mg-settings-nav\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2/)
 })
 
 test('agent order swaps exact overrides and refuses inherited positional rows', () => {
