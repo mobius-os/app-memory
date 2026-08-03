@@ -402,35 +402,7 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertEqual(overfull[0]["severity"], "warning")
       self.assertGreater(overfull[0]["entries"], 30)
 
-  def test_invalid_model_provenance_fails_without_advancing_pointer(self):
-    with tempfile.TemporaryDirectory() as raw:
-      store, runner = _load(Path(raw))
-      seed = Path(raw) / "seed"
-      _seed(seed)
-      _, first = store.start_staging(seed)
-      runner.build_graph(first, usage={})
-      old = store.publish(first)
-      runner.SEED_DIR = seed
-      runner._app_id = lambda: 7
-      runner._app_active = lambda _app_id: True
-      runner._collect_chat_intake = lambda: runner.ChatIntake([{"id": "chat-1", "messages": []}])
-      runner._remember_pending_chat_ids(["chat-1"])
-      runner._proposal = lambda *_args: runner.ProposalOutcome(
-        "ok", _proposal("unseen-chat"), "test", None, [],
-      )
-
-      self.assertEqual(asyncio.run(runner.run()), 1)
-
-      self.assertEqual(store.ready_pointer()["commit"], old["commit"])
-      self.assertEqual(store._git("status", "--porcelain", text=True).stdout, "")
-      status = json.loads((store.STATE / "run-status.json").read_text())
-      self.assertEqual(status["error_code"], "unverified_chat_provenance")
-      self.assertEqual(status["offending_path"], "notes/quiet-ui.md")
-      self.assertEqual(status["invalid_source_count"], 1)
-      pending = json.loads(runner._PENDING_CHAT_IDS.read_text())
-      self.assertEqual(pending["chat_ids"], ["chat-1"])
-
-  def test_one_bad_provenance_update_does_not_discard_verified_siblings(self):
+  def test_one_bad_provenance_update_rejects_the_coherence_unit(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))
       staging = Path(raw) / "staging"
@@ -442,14 +414,17 @@ class MemoryRunnerTests(unittest.TestCase):
         "path": "notes/unverified.md",
       }
 
-      proposal = runner._normalize_proposal(
-        _reviewed({"updates": [valid, invalid], "deletes": [], "followups": []}),
-        allowed_chat_ids={"chat-1"},
-        source_handles={"c01": "chat-1"},
-      )
+      with self.assertRaises(runner.ProposalValidationError) as raised:
+        runner._normalize_proposal(
+          _reviewed({
+            "updates": [valid, invalid], "deletes": [], "followups": [],
+          }),
+          allowed_chat_ids={"chat-1"},
+          source_handles={"c01": "chat-1"},
+        )
 
-      self.assertEqual([row["path"] for row in proposal["updates"]], [valid["path"]])
-      self.assertIn("notes/unverified.md: dropped", proposal["followups"][0])
+      self.assertEqual(raised.exception.code, "unverified_chat_provenance")
+      self.assertEqual(raised.exception.path, "notes/unverified.md")
 
 
 
@@ -553,8 +528,13 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_active = lambda _app_id: True
       canonical = "1f905105-a3a6-4a67-a6e3-1b34ea6963d8"
       runner._collect_chat_intake = lambda: runner.ChatIntake([{"id": canonical, "messages": []}])
+      proposal = runner._normalize_proposal(
+        _proposal("c01"),
+        allowed_chat_ids={canonical},
+        source_handles={"c01": canonical},
+      )
       runner._proposal = lambda *_args: runner.ProposalOutcome(
-        "ok", _proposal("c01"), "test", None, [],
+        "ok", proposal, "test", None, [],
       )
       runner._remember_pending_chat_ids([canonical])
 
@@ -601,7 +581,22 @@ class MemoryRunnerTests(unittest.TestCase):
         {"provider": "codex", "model": "fallback"},
       ]
       runner._text_proposal = lambda choice, _prompt: runner.AnalystResult(
-        _proposal("invented-source" if choice["provider"] == "claude" else "c01"),
+        (
+          _reviewed({
+            "summary": "mixed primary",
+            "followups": [],
+            "deletes": [],
+            "updates": [
+              _proposal("c01")["updates"][0],
+              {
+                **_proposal("invented-source")["updates"][0],
+                "path": "notes/unverified.md",
+              },
+            ],
+          })
+          if choice["provider"] == "claude"
+          else _proposal("c01")
+        ),
       )
 
       outcome = runner._proposal(7, staging, [{"id": canonical, "messages": []}])

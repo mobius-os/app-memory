@@ -176,13 +176,146 @@ def test_chat_discovery_pages_to_the_durable_marker(monkeypatch, tmp_path):
   }
 
 
+def test_chat_discovery_uses_ordered_watermark_and_skips_empty_rows(
+  monkeypatch, tmp_path,
+):
+  state = tmp_path / "app-state"
+  pending = state / "pending-chat-ids.json"
+  discovery = state / "chat-discovery.json"
+  state.mkdir()
+  discovery.write_text(json.dumps({
+    "schema": 1,
+    "newest": {"recency_at": "2026-07-28T01:00:00", "id": "moved"},
+  }))
+  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
+  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", discovery)
+  calls = []
+
+  def api(path):
+    calls.append(path)
+    return memory_runner.ApiResult({
+      "items": [
+        {
+          "id": "moved", "recency_at": "2026-07-30T03:00:00",
+          "message_count": 2,
+        },
+        {
+          "id": "empty", "recency_at": "2026-07-30T02:00:00",
+          "message_count": 0,
+        },
+        {
+          "id": "new", "recency_at": "2026-07-29T01:00:00",
+          "message_count": 1,
+        },
+        {
+          "id": "older", "recency_at": "2026-07-27T01:00:00",
+          "message_count": 4,
+        },
+      ],
+      "next_before": None,
+    }, 200)
+
+  monkeypatch.setattr(memory_runner, "_api_result", api)
+
+  ids, complete, queue_ok = memory_runner._discover_chat_ids()
+
+  assert ids == ["moved", "new"]
+  assert complete is queue_ok is True
+  assert len(calls) == 1
+  assert memory_runner._load_pending_chat_ids() == ["moved", "new"]
+  assert json.loads(discovery.read_text())["newest"] == {
+    "recency_at": "2026-07-30T03:00:00", "id": "moved",
+  }
+
+
+def test_chat_discovery_stops_at_watermark_after_marker_chat_disappears(
+  monkeypatch, tmp_path,
+):
+  state = tmp_path / "app-state"
+  state.mkdir()
+  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", state / "pending.json")
+  marker = state / "discovery.json"
+  marker.write_text(json.dumps({
+    "schema": 1,
+    "newest": {"recency_at": "2026-07-28T01:00:00", "id": "gone"},
+  }))
+  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", marker)
+  monkeypatch.setattr(
+    memory_runner,
+    "_api_result",
+    lambda _path: memory_runner.ApiResult({
+      "items": [
+        {
+          "id": "new", "recency_at": "2026-07-29T01:00:00",
+          "message_count": 1,
+        },
+        {
+          "id": "older", "recency_at": "2026-07-27T01:00:00",
+          "message_count": 1,
+        },
+      ],
+      "next_before": None,
+    }, 200),
+  )
+
+  ids, complete, queue_ok = memory_runner._discover_chat_ids()
+
+  assert ids == ["new"]
+  assert complete is queue_ok is True
+
+
+def test_all_empty_discovery_page_advances_watermark_without_queueing(
+  monkeypatch, tmp_path,
+):
+  state = tmp_path / "app-state"
+  state.mkdir()
+  pending = state / "pending.json"
+  marker = state / "discovery.json"
+  marker.write_text(json.dumps({
+    "schema": 1,
+    "newest": {"recency_at": "2026-07-28T01:00:00", "id": "previous"},
+  }))
+  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
+  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", marker)
+  monkeypatch.setattr(
+    memory_runner,
+    "_api_result",
+    lambda _path: memory_runner.ApiResult({
+      "items": [
+        {
+          "id": "empty-newest", "recency_at": "2026-07-30T02:00:00",
+          "message_count": 0,
+        },
+        {
+          "id": "empty-newer", "recency_at": "2026-07-29T02:00:00",
+          "message_count": 0,
+        },
+        {
+          "id": "older", "recency_at": "2026-07-27T01:00:00",
+          "message_count": 2,
+        },
+      ],
+      "next_before": None,
+    }, 200),
+  )
+
+  ids, complete, queue_ok = memory_runner._discover_chat_ids()
+
+  assert ids == []
+  assert complete is queue_ok is True
+  assert memory_runner._load_pending_chat_ids() == []
+  assert json.loads(marker.read_text())["newest"] == {
+    "recency_at": "2026-07-30T02:00:00", "id": "empty-newest",
+  }
+
+
 def test_chat_intake_prunes_404s_but_retries_transient_failures(
   monkeypatch, tmp_path,
 ):
   pending = tmp_path / "pending-chat-ids.json"
   pending.write_text(json.dumps({
     "schema": 1,
-    "chat_ids": ["gone", "transient", "good", "recent"],
+    "chat_ids": ["gone", "transient", "empty", "good", "recent"],
   }))
   monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
   monkeypatch.setattr(
@@ -197,6 +330,9 @@ def test_chat_intake_prunes_404s_but_retries_transient_failures(
       return memory_runner.ApiResult(None, 404, "http_error")
     if chat_id == "transient":
       return memory_runner.ApiResult(None, 503, "http_error")
+    messages = [] if chat_id == "empty" else [
+      {"role": "user", "text": f"content from {chat_id}"},
+    ]
     return memory_runner.ApiResult({
       "id": chat_id,
       "title": chat_id,
@@ -204,7 +340,7 @@ def test_chat_intake_prunes_404s_but_retries_transient_failures(
       "deleted_at": (
         "2026-07-30T01:00:00" if chat_id == "recent" else None
       ),
-      "messages": [],
+      "messages": messages,
     }, 200)
 
   monkeypatch.setattr(memory_runner, "_api_result", api)
@@ -248,6 +384,50 @@ def test_deleted_chat_prompt_uses_non_linking_provenance(tmp_path):
   assert staged["source_handle"] == "deleted:d01"
   assert "deleted-chat-id" not in encoded
   assert memory_runner._source_handles([chat]) == {}
+
+
+def test_deleted_chat_handle_is_expanded_during_provider_validation(
+  monkeypatch, tmp_path,
+):
+  chat = {
+    "id": "deleted-chat-id",
+    "title": "A deleted conversation",
+    "updated_at": "2026-07-30T00:00:00",
+    "deleted_at": "2026-07-30T01:00:00",
+    "messages": [{"role": "user", "text": "I prefer concise reports."}],
+  }
+  proposal = {
+    "updates": [{
+      "path": "notes/concise.md",
+      "content": (
+        "---\ntype: note\ntitle: Concise reports are preferred\n"
+        "source: [deleted:d01]\n---\nConcise reports are preferred.\n"
+      ),
+    }],
+    "deletes": [],
+    "followups": [],
+    "read_audits": [],
+    "self_review": _self_review(),
+  }
+  providers = memory_runner.ProviderPool([
+    {"provider": "codex", "model": "gpt-test", "effort": None},
+  ])
+  monkeypatch.setattr(memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "key")
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
+  monkeypatch.setattr(memory_runner, "_known_deleted_source_ids", lambda _path: set())
+  monkeypatch.setattr(memory_runner, "_known_deleted_source", lambda _path: False)
+  monkeypatch.setattr(
+    memory_runner, "run_text", lambda *_args, **_kwargs: TextResult(json.dumps(proposal)),
+  )
+
+  outcome = memory_runner._proposal(57, tmp_path, [chat], [], providers)
+
+  assert outcome.status == "ok"
+  content = outcome.proposal["updates"][0]["content"]
+  assert "source: [deleted-chat:" in content
+  assert "deleted:d01" not in content
+  assert chat["id"] not in content
 
 
 def test_deleted_chat_source_is_accepted_only_when_available():
@@ -921,12 +1101,58 @@ def test_rejected_batch_restores_files_and_derived_graph(monkeypatch, tmp_path):
     memory_runner._apply_validated_proposal(
       tmp_path,
       proposal,
-      allowed_chat_ids=set(),
-      source_handles={},
       baseline=baseline,
     )
 
   assert raised.value.code == "topology_regression"
+  assert topic.read_text() == original
+  assert builds == []
+
+
+def test_structurally_invalid_batch_restores_files_and_derived_graph(
+  monkeypatch, tmp_path,
+):
+  mocs = tmp_path / "mocs"
+  mocs.mkdir()
+  topic = mocs / "topic.md"
+  original = "# Topic\n"
+  topic.write_text(original)
+  baseline = {
+    "nodes": [{"id": "index"}, {"id": "topic"}],
+    "edges": [{"source": "index", "target": "topic"}],
+    "problems": [],
+  }
+  invalid = {
+    "nodes": baseline["nodes"],
+    "edges": baseline["edges"],
+    "problems": [{
+      "kind": "dangling_link", "source": "topic", "target": "missing",
+      "severity": "error",
+    }],
+  }
+  builds = [invalid, baseline]
+  monkeypatch.setattr(
+    memory_runner,
+    "build_graph",
+    lambda *_args, **_kwargs: builds.pop(0),
+  )
+  proposal = {
+    "updates": [{
+      "path": "mocs/topic.md", "content": "# Topic\n\n- [[missing]]\n",
+    }],
+    "deletes": [],
+    "followups": [],
+    "self_review": _self_review(),
+  }
+
+  with pytest.raises(memory_runner.ProposalValidationError) as raised:
+    memory_runner._apply_validated_proposal(
+      tmp_path,
+      proposal,
+      baseline=baseline,
+    )
+
+  assert raised.value.code == "invalid_graph"
   assert topic.read_text() == original
   assert builds == []
 
@@ -1118,8 +1344,9 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
   assert statuses[-1]["deferred_chat_count"] == 0
 
 
-def test_run_publishes_accepted_batches_and_defers_topology_rejection(
-  monkeypatch, tmp_path,
+@pytest.mark.parametrize("rejection_code", ["topology_regression", "invalid_graph"])
+def test_run_publishes_accepted_batches_and_defers_structural_rejection(
+  monkeypatch, tmp_path, rejection_code,
 ):
   chats = [{"id": f"chat-{index}"} for index in range(3)]
   acknowledged = []
@@ -1179,7 +1406,7 @@ def test_run_publishes_accepted_batches_and_defers_topology_rejection(
     apply_count += 1
     if apply_count == 2:
       raise memory_runner.ProposalValidationError(
-        "topology_regression", "specific routing would regress",
+        rejection_code, "candidate graph is not publishable",
       )
     return proposal, [], [], graph
 
@@ -1217,10 +1444,10 @@ def test_run_publishes_accepted_batches_and_defers_topology_rejection(
   assert statuses[-1]["status"] == "published"
   assert statuses[-1]["source_chat_count"] == 2
   assert statuses[-1]["deferred_chat_count"] == 1
-  assert statuses[-1]["deferred_reason"] == "topology_regression"
+  assert statuses[-1]["deferred_reason"] == rejection_code
   assert statuses[-1]["deferred_attempted_agents"][-1][
     "rejection_code"
-  ] == "topology_regression"
+  ] == rejection_code
 
 
 def test_nightly_policy_defaults_to_six_by_six(monkeypatch):
