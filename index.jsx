@@ -79,6 +79,7 @@ const AGENT_PROVIDER_META = [
 ];
 
 const COMMIT_RE = /^[0-9a-f]{40}$/;
+const PROFILE_STORAGE_PATH = 'personalization-profile.json';
 
 export function buildAgentGroups(payload) {
   if (!payload || typeof payload !== 'object') return [];
@@ -182,6 +183,14 @@ export default function App({ appId, token }) {
   const [nightBreadth, setNightBreadth] = useState(6);
   const [nightDepth, setNightDepth] = useState(6);
   const [recallStats, setRecallStats] = useState(null);
+  const [profileStatus, setProfileStatus] = useState('idle'); // idle | loading | ready | conflict | error
+  const [profileMessage, setProfileMessage] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileEvidence, setProfileEvidence] = useState({ confirmed: [], generated_at: '', source_commit: '' });
+  const [profilePriorities, setProfilePriorities] = useState('');
+  const [profileBoundaries, setProfileBoundaries] = useState('');
+  const [profileHypotheses, setProfileHypotheses] = useState('');
+  const [profileEtag, setProfileEtag] = useState('');
   const [localDepth, setLocalDepth] = useState(1);
   // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
   // Defaults to 'text' — the user arrives here from the global graph, so they
@@ -797,6 +806,26 @@ export default function App({ appId, token }) {
     }
   }, [appId, authHeaders]);
 
+  const loadProfile = useCallback(async () => {
+    setProfileStatus('loading'); setProfileMessage('');
+    try {
+      const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/${PROFILE_STORAGE_PATH}`, { headers: authHeaders });
+      if (!res.ok && res.status !== 404) throw new Error('Could not load your profile.');
+      const value = res.ok ? await res.json() : {};
+      const safe = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      setProfileEvidence({
+        confirmed: Array.isArray(safe.confirmed) ? safe.confirmed : [],
+        generated_at: typeof safe.generated_at === 'string' ? safe.generated_at : '',
+        source_commit: typeof safe.source_commit === 'string' ? safe.source_commit : '',
+      });
+      setProfileEtag(res.headers.get('ETag') || '');
+      setProfilePriorities((Array.isArray(safe.priorities) ? safe.priorities : []).join('\n'));
+      setProfileBoundaries((Array.isArray(safe.boundaries) ? safe.boundaries : []).join('\n'));
+      setProfileHypotheses((Array.isArray(safe.hypotheses) ? safe.hypotheses : []).join('\n'));
+      setProfileStatus('ready');
+    } catch (err) { setProfileStatus('error'); setProfileMessage(err.message || 'Could not load your profile.'); }
+  }, [appId, authHeaders]);
+
   useEffect(() => {
     if (!settingsOpen || scheduleStatus !== 'idle') return;
     loadSchedule();
@@ -806,6 +835,11 @@ export default function App({ appId, token }) {
     if (!settingsOpen || agentStatus !== 'idle') return;
     loadAgentSettings();
   }, [settingsOpen, agentStatus, loadAgentSettings]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsSection !== 'profile' || profileStatus !== 'idle') return;
+    loadProfile();
+  }, [settingsOpen, settingsSection, profileStatus, loadProfile]);
 
   useEffect(() => {
     if (!settingsOpen) return undefined;
@@ -1031,6 +1065,32 @@ export default function App({ appId, token }) {
     nightDepth,
   ]);
 
+  const saveProfile = useCallback(async () => {
+    if (profileSaving) return;
+    const lines = (value) => value.split('\n').map((item) => item.trim()).filter(Boolean).slice(0, 24);
+    setProfileSaving(true); setProfileMessage('');
+    const payload = { schema: 1, ...profileEvidence,
+      priorities: lines(profilePriorities), boundaries: lines(profileBoundaries),
+      hypotheses: lines(profileHypotheses) };
+    try {
+      const headers = { ...authHeaders, 'Content-Type': 'application/json' };
+      if (profileEtag) headers['If-Match'] = profileEtag;
+      else headers['If-None-Match'] = '*';
+      const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/${PROFILE_STORAGE_PATH}`, {
+        method: 'PUT', headers, body: JSON.stringify(payload),
+      });
+      if (res.status === 412) {
+        setProfileStatus('conflict');
+        return;
+      }
+      if (!res.ok) throw new Error('Could not save your profile.');
+      setProfileEtag(res.headers.get('ETag') || profileEtag);
+      setProfileMessage('Profile saved');
+      setTimeout(() => setProfileMessage(''), 2200);
+    } catch (err) { setProfileMessage(err.message || 'Could not save your profile.'); }
+    finally { setProfileSaving(false); }
+  }, [appId, authHeaders, profileEvidence, profilePriorities, profileBoundaries, profileHypotheses, profileEtag, profileSaving]);
+
   // The detail drawer is modal on phone and desktop (it owns a scrim), so it
   // must also own focus: enter on Close, trap Tab, close on Escape, then return
   // to the row/control that opened it. Depend on the open BOOLEAN so switching
@@ -1129,6 +1189,7 @@ export default function App({ appId, token }) {
     return c;
   }, [graph]);
   const selectedUpdated = relDate(noteState.fm.updated);
+  const profileConfirmed = profileEvidence.confirmed;
   const visibleAgentGroups = agentGroups || [];
   const agentSlots = [
     { mode: primaryAgentMode, provider: agentProvider, model: agentModel, effort: agentEffort },
@@ -1139,6 +1200,22 @@ export default function App({ appId, token }) {
     agentSlotLabel(agentSlots[0], visibleAgentGroups, 'Settings default primary agent'),
     agentSlotLabel(agentSlots[1], visibleAgentGroups, 'Settings default secondary agent'),
   ];
+  const agentSettingsAction = {
+    message: agentMessage, success: 'Settings saved', save: saveAgentSettings,
+    saving: agentSaving, status: agentStatus, label: 'Save settings',
+  };
+  const settingsAction = {
+    profile: {
+      message: profileMessage, success: 'Profile saved', save: saveProfile,
+      saving: profileSaving, status: profileStatus, label: 'Save profile',
+    },
+    schedule: {
+      message: scheduleMessage, success: 'Saved', save: saveSchedule,
+      saving: scheduleSaving, status: scheduleStatus, label: 'Save schedule',
+    },
+    agents: agentSettingsAction,
+    retrieval: agentSettingsAction,
+  }[settingsSection];
 
   // ---------------------------------------------------------------- render ---
   return (
@@ -1265,6 +1342,7 @@ export default function App({ appId, token }) {
             <div className="mg-settings-layout">
               <nav className="mg-settings-nav" aria-label="Memory settings sections">
                 {[
+                  ['profile', 'Personalization', 'What Reflection should know'],
                   ['schedule', 'Schedule', 'When nightly review runs'],
                   ['agents', 'Background agents', 'Models and priority'],
                   ['retrieval', 'Retrieval', 'Live and nightly search limits'],
@@ -1283,6 +1361,28 @@ export default function App({ appId, token }) {
               </nav>
 
               <div className="mg-settings-content mg-scroll">
+                {settingsSection === 'profile' && (
+                  <div className="mg-settings-section">
+                    <div className="mg-section-intro"><div><div className="mg-settings-kicker">Shared context</div><h3>Your personalization profile</h3></div>
+                      <p>Memory supplies evidence-backed facts. You control priorities, boundaries, and tentative hypotheses. Reflection uses these to rank what matters—not as permission.</p></div>
+                    {profileStatus === 'loading' || profileStatus === 'idle' ? <div className="mg-settings-loading">Loading profile…</div>
+                      : profileStatus === 'error' ? <div className="mg-settings-callout is-error"><span>{profileMessage}</span><button type="button" onClick={loadProfile}>Retry</button></div>
+                      : <>
+                        {profileStatus === 'conflict' && <div className="mg-settings-callout is-error"><span>This profile changed elsewhere. Reload before saving.</span><button type="button" onClick={loadProfile}>Reload profile</button></div>}
+                        <div className="mg-policy-grid">
+                          <label className="mg-profile-editor"><strong>Current priorities</strong><small>One per line. Reflection should favor work that advances these.</small><textarea rows="5" value={profilePriorities} onChange={(e) => setProfilePriorities(e.target.value)} placeholder="Ship the next milestone" /></label>
+                          <label className="mg-profile-editor"><strong>Boundaries</strong><small>One per line. These constrain suggestions; they never weaken normal approvals.</small><textarea rows="5" value={profileBoundaries} onChange={(e) => setProfileBoundaries(e.target.value)} placeholder="Do not generalize a one-off preference" /></label>
+                        </div>
+                        <label className="mg-profile-editor"><strong>Tentative hypotheses</strong><small>One per line. Reflection must treat these as ideas to test, not facts.</small><textarea rows="4" value={profileHypotheses} onChange={(e) => setProfileHypotheses(e.target.value)} placeholder="Shorter briefs may be easier to act on" /></label>
+                        <details className="mg-policy-card mg-profile-confirmed">
+                          <summary>Confirmed by Memory <span>{profileConfirmed.length} evidence-backed notes</span></summary>
+                          {profileConfirmed.length > 0
+                            ? <div className="mg-profile-facts">{profileConfirmed.map((item) => <div className="mg-profile-fact" key={item.id}><strong>{item.title || item.id}</strong>{item.description ? <div>{item.description}</div> : null}</div>)}</div>
+                            : <p>Memory will fill this after its next successful review.</p>}
+                        </details>
+                      </>}
+                  </div>
+                )}
                 {settingsSection === 'retrieval' && (
                   <div className="mg-settings-section">
                     <div className="mg-section-intro">
@@ -1531,24 +1631,16 @@ export default function App({ appId, token }) {
             </div>
 
             <footer className="mg-settings-foot">
-              <span className={`mg-settings-message${(
-                settingsSection === 'schedule' ? scheduleMessage === 'Saved' : agentMessage === 'Settings saved'
-              ) ? ' is-ok' : ''}`} role="status" aria-live="polite">
-                {settingsSection === 'schedule' ? scheduleMessage : agentMessage}
+              <span className={`mg-settings-message${settingsAction.message === settingsAction.success ? ' is-ok' : ''}`} role="status" aria-live="polite">
+                {settingsAction.message}
               </span>
               <button
                 className="mg-settings-save"
                 type="button"
-                onClick={settingsSection === 'schedule' ? saveSchedule : saveAgentSettings}
-                disabled={
-                  settingsSection === 'schedule'
-                    ? scheduleSaving || scheduleStatus !== 'ready'
-                    : agentSaving || agentStatus !== 'ready'
-                }
+                onClick={settingsAction.save}
+                disabled={settingsAction.saving || settingsAction.status !== 'ready'}
               >
-                {(settingsSection === 'schedule' ? scheduleSaving : agentSaving)
-                  ? 'Saving…'
-                  : settingsSection === 'schedule' ? 'Save schedule' : 'Save settings'}
+                {settingsAction.saving ? 'Saving…' : settingsAction.label}
               </button>
             </footer>
           </section>

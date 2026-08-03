@@ -451,6 +451,56 @@ export const CSS = `
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+.mg-profile-facts { display: grid; gap: 8px; margin-top: 12px; }
+.mg-profile-confirmed { padding: 14px 16px; }
+.mg-profile-confirmed summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 750;
+}
+.mg-profile-confirmed summary span {
+  margin-left: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+.mg-profile-fact {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 82%, var(--bg));
+}
+.mg-profile-fact strong { color: var(--text); font-size: 12px; line-height: 1.35; }
+.mg-profile-fact div { margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.mg-profile-editor {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 15px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg) 72%, var(--surface));
+  color: var(--text);
+  cursor: text;
+}
+.mg-profile-editor strong { font-size: 13.5px; line-height: 1.25; }
+.mg-profile-editor small { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.mg-profile-editor textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 120px;
+  resize: vertical;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.5;
+}
+.mg-profile-editor textarea::placeholder { color: var(--muted); }
 .mg-schedule-card {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
@@ -816,12 +866,12 @@ export const CSS = `
   .mg-settings-head p { font-size: 11.5px; }
   .mg-settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .mg-settings-nav {
-    flex-direction: row; gap: 5px; overflow-x: auto; padding: 9px 10px;
-    border-right: 0; border-bottom: 1px solid var(--border); scrollbar-width: none;
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px;
+    overflow: visible; padding: 9px 10px;
+    border-right: 0; border-bottom: 1px solid var(--border);
   }
-  .mg-settings-nav::-webkit-scrollbar { display: none; }
   .mg-settings-nav-item {
-    min-width: max-content; min-height: 44px; padding: 7px 11px; border-radius: 9px;
+    min-width: 0; min-height: 44px; padding: 7px 9px; border-radius: 9px; text-align: center;
   }
   .mg-settings-nav-item small { display: none; }
   .mg-settings-nav-item.is-active { box-shadow: inset 0 -3px 0 var(--accent); }

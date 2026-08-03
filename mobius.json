@@ -62,6 +62,7 @@
     "memory_runner.py",
     "memory_store.py",
     "memory_graph.py",
+    "personalization_profile.py",
     "constants.js",
     "theme.js",
     "domain.js",
