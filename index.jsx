@@ -972,8 +972,9 @@ export default function App({ appId, token }) {
     if (agentSaving) return;
     setAgentSaving(true);
     setAgentMessage('');
+    const { live_breadth: _retiredLiveBreadth, ...currentSettings } = agentSettingsExtra;
     const payload = {
-      ...agentSettingsExtra,
+      ...currentSettings,
       primary_agent_mode: primaryAgentMode === 'app' ? 'app' : 'system',
       provider: primaryAgentMode === 'app' ? (agentProvider || 'claude') : null,
       model: primaryAgentMode === 'app' ? (agentModel || null) : null,

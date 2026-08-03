@@ -106,7 +106,6 @@ def test_direct_live_selector_uses_one_call_and_loads_only_selected_bodies(
   result = memory_search.direct_live_traverse(
     "What is the complete detailed answer?",
     "0" * 40,
-    breadth=4,
     depth_limit=4,
     text_call=select,
   )
@@ -134,7 +133,6 @@ def test_direct_live_selector_fallback_prefers_deepest_lexical_match(monkeypatch
   result = memory_search.direct_live_traverse(
     "route a-two",
     "0" * 40,
-    breadth=4,
     depth_limit=4,
     text_call=lambda _prompt: "not json",
   )
@@ -158,7 +156,7 @@ def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
   prompt = []
 
   result = memory_search.direct_live_traverse(
-    "secret answer", "0" * 40, breadth=4, depth_limit=4,
+    "secret answer", "0" * 40, depth_limit=4,
     text_call=lambda value: prompt.append(value) or json.dumps({
       "selected": ["orphan"],
     }),
@@ -613,7 +611,7 @@ def test_retrieve_distinguishes_not_ready_from_a_graph_read_failure(monkeypatch)
     "ready_pointer",
     lambda: {"commit": "0" * 40},
   )
-  monkeypatch.setattr(memory_search, "_live_policy", lambda: (4, 4))
+  monkeypatch.setattr(memory_search, "_live_policy", lambda: 4)
 
   def fail_read(*_args, **_kwargs):
     raise OSError("private internal detail")

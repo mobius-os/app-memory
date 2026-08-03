@@ -19,7 +19,6 @@ from memory_store import read_revision_file, ready_pointer, record_read
 from memory_text_provider import RunProviderHealth, available_provider, run_text
 
 
-DEFAULT_LIVE_BREADTH = 4
 DEFAULT_LIVE_DEPTH = 4
 DEFAULT_LIVE_ROUNDS = 4
 DEFAULT_NIGHT_BREADTH = 6
@@ -73,7 +72,7 @@ class NavigatorCall:
 class TraversalResult:
   status: str
   commit: str
-  breadth: int
+  breadth: int | None
   depth_limit: int
   round_limit: int | None
   rounds: int
@@ -314,13 +313,11 @@ def direct_live_traverse(
   question: str,
   commit: str,
   *,
-  breadth: int,
   depth_limit: int,
   text_call: Callable[[str], NavigatorCall | str | None] | None,
 ) -> TraversalResult:
   """Select from the compact rooted catalog in one semantic decision."""
   started = time.monotonic()
-  breadth = max(1, min(MAX_CONFIGURED_BREADTH, int(breadth)))
   depth_limit = max(1, min(MAX_CONFIGURED_DEPTH, int(depth_limit)))
   graph_data = json.loads(read_revision_file(commit, "graph.json"))
   graph = RevisionGraph(commit, graph_data)
@@ -377,7 +374,7 @@ def direct_live_traverse(
   return TraversalResult(
     status=RESULT_HIT if selected else RESULT_EMPTY,
     commit=commit,
-    breadth=breadth,
+    breadth=None,
     depth_limit=depth_limit,
     round_limit=1,
     rounds=1,
@@ -835,8 +832,7 @@ def _positive_int(value: object, fallback: int, maximum: int) -> int:
   return max(1, min(maximum, parsed))
 
 
-def _live_policy() -> tuple[int, int]:
-  breadth = DEFAULT_LIVE_BREADTH
+def _live_policy() -> int:
   depth = _positive_int(
     os.environ.get("MEMORY_LIVE_DEPTH"),
     DEFAULT_LIVE_DEPTH,
@@ -845,7 +841,7 @@ def _live_policy() -> tuple[int, int]:
   base = os.environ.get("API_BASE_URL", "").rstrip("/")
   token = os.environ.get("AGENT_TOKEN", "").strip()
   if not base or not token:
-    return breadth, depth
+    return depth
   headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
   try:
     request = urllib.request.Request(f"{base}/api/apps/", headers=headers)
@@ -860,7 +856,7 @@ def _live_policy() -> tuple[int, int]:
       None,
     )
     if not isinstance(app, dict) or not isinstance(app.get("id"), int):
-      return breadth, depth
+      return depth
     request = urllib.request.Request(
       f"{base}/api/storage/apps/{app['id']}/settings.json",
       headers=headers,
@@ -871,12 +867,12 @@ def _live_policy() -> tuple[int, int]:
     OSError, ValueError, TimeoutError, urllib.error.HTTPError,
     urllib.error.URLError,
   ):
-    return breadth, depth
+    return depth
   if isinstance(settings, dict):
     depth = _positive_int(
       settings.get("live_depth"), depth, MAX_CONFIGURED_DEPTH,
     )
-  return breadth, depth
+  return depth
 
 
 def _usage_preflight_timeout() -> float:
@@ -1055,12 +1051,11 @@ def retrieve(question: str) -> RecallResult:
       reason=RESULT_REASON_NOT_READY,
     )
   commit = pointer["commit"]
-  breadth, depth = _live_policy()
+  depth = _live_policy()
   try:
     traversal = direct_live_traverse(
       question,
       commit,
-      breadth=breadth,
       depth_limit=depth,
       text_call=_live_text_call(),
     )
