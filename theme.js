@@ -499,14 +499,8 @@ export const CSS = `
   font-family: var(--font);
   font-size: 16px;
   line-height: 1.5;
-  transition: border-color .15s ease, box-shadow .15s ease;
 }
 .mg-profile-editor textarea::placeholder { color: var(--muted); }
-.mg-profile-editor textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
-.mg-profile-editor textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .mg-schedule-card {
   display: grid;
   grid-template-columns: auto 1fr auto auto;

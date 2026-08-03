@@ -44,7 +44,13 @@ def test_confirmed_comes_only_from_about_the_user_notes():
       {"id": "map", "title": "About", "type": "moc", "mocs": ["about-the-user"]},
     ],
   }
-  assert [item["id"] for item in derive_confirmed(graph)] == ["yes"]
+  assert derive_confirmed(graph) == [{
+    "id": "yes",
+    "title": "Yes",
+    "description": "Evidence",
+    "path": "notes/yes.md",
+    "updated": "",
+  }]
 
 
 def test_refresh_preserves_explicit_owner_fields():

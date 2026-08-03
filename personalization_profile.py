@@ -12,7 +12,9 @@ MAX_CONFIRMED, MAX_EXPLICIT = 48, 24
 
 
 def _text(value: object, limit: int) -> str:
-  return " ".join(str(value or "").split())[:limit]
+  if not isinstance(value, str):
+    return ""
+  return " ".join(value.split())[:limit]
 
 
 def _explicit(items: object) -> list[str]:
@@ -46,7 +48,6 @@ def derive_confirmed(graph: dict) -> list[dict]:
       "description": _text(node.get("description"), 500),
       "path": _text(node.get("path"), 240),
       "updated": _text(node.get("updated"), 80),
-      "tags": [_text(tag, 80) for tag in (node.get("tags") or [])[:12]],
     })
   return sorted(
     result, key=lambda item: (item["title"].casefold(), item["id"]),
