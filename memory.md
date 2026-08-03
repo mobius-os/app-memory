@@ -91,12 +91,18 @@ Every successful night completes three duties across those proposals:
    then removes or updates facts that are demonstrably stale, obsolete,
    redundant, or superseded. A stale candidate is a lead to verify, not proof.
 
-The live and nightly traversals have breadth-per-open-node and maximum-depth
-controls. They deliberately have no total-node budget. Each decision expands
-only the newly active frontier; unchosen siblings are pruned rather than fed
-back as a global breadth-first queue, while the trace retains them for recall
-auditing. Live recall makes at most four decisions, with the fourth reserved
-for selecting the smallest sufficient opened set. It may stop earlier.
+Live recall makes one semantic selection over the compact metadata catalog of
+every node reachable from the root within the configured depth, then loads the
+complete bodies of only the selected nodes. The provider never receives note
+bodies during selection, and the host accepts only ids from that pinned,
+root-reachable catalog. A malformed or unavailable provider falls back to the
+best exact lexical metadata match rather than starting a second traversal.
+
+Nightly replay retains the adaptive breadth-per-open-node and maximum-depth
+traversal. Each decision expands only the newly active frontier; unchosen
+siblings are pruned rather than fed back as a global breadth-first queue, while
+the trace retains them for recall auditing. This intentionally stronger replay
+is the comparator that measures live misses and overreach.
 
 Promote only durable, future-useful facts; preserve `source` provenance. Merge
 duplicates when the winner is unambiguous; deleting the redundant copy is safe

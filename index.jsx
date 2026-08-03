@@ -178,7 +178,6 @@ export default function App({ appId, token }) {
   const [secondaryAgentEffort, setSecondaryAgentEffort] = useState('');
   const [agentSaving, setAgentSaving] = useState(false);
   const [agentMessage, setAgentMessage] = useState('');
-  const [liveBreadth, setLiveBreadth] = useState(4);
   const [liveDepth, setLiveDepth] = useState(4);
   const [nightBreadth, setNightBreadth] = useState(6);
   const [nightDepth, setNightDepth] = useState(6);
@@ -671,7 +670,6 @@ export default function App({ appId, token }) {
         ? settings
         : {};
       setAgentSettingsExtra(safeSettings);
-      setLiveBreadth(policyNumber(safeSettings.live_breadth, 4));
       setLiveDepth(policyNumber(safeSettings.live_depth, 4));
       setNightBreadth(policyNumber(safeSettings.night_breadth, 6));
       setNightDepth(policyNumber(safeSettings.night_depth, 6));
@@ -988,7 +986,6 @@ export default function App({ appId, token }) {
       fallback_effort: secondaryAgentMode === 'app' && secondaryAgentProvider
         ? effortForProvider(secondaryAgentProvider, secondaryAgentEffort)
         : null,
-      live_breadth: policyNumber(liveBreadth, 4),
       live_depth: policyNumber(liveDepth, 4),
       night_breadth: policyNumber(nightBreadth, 6),
       night_depth: policyNumber(nightDepth, 6),
@@ -1028,7 +1025,6 @@ export default function App({ appId, token }) {
     secondaryAgentProvider,
     secondaryAgentModel,
     secondaryAgentEffort,
-    liveBreadth,
     liveDepth,
     nightBreadth,
     nightDepth,
@@ -1294,7 +1290,7 @@ export default function App({ appId, token }) {
                         <h3>How far Memory can explore</h3>
                       </div>
                       <p>
-                        Breadth is the maximum new links considered from each opened note. Depth is how many layers it may follow. The reader can stop early.
+                        Live reads choose once from the root-reachable catalog. Depth limits which layers are eligible; breadth remains a nightly replay control.
                       </p>
                     </div>
 
@@ -1327,20 +1323,10 @@ export default function App({ appId, token }) {
                     ) : (
                       <div className="mg-policy-grid">
                         <fieldset className="mg-policy-card">
-                          <legend>Live reads <span>Fast, focused recall</span></legend>
+                          <legend>Live reads <span>One-pass semantic recall</span></legend>
                           <label>
-                            <span>Breadth <small>Links per open note</small></span>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min="1"
-                              max="12"
-                              value={liveBreadth}
-                              onChange={(event) => {
-                                setLiveBreadth(policyNumber(event.target.value, 4));
-                                setAgentMessage('');
-                              }}
-                            />
+                            <span>Selection <small>Root-reachable catalog</small></span>
+                            <strong>1 decision</strong>
                           </label>
                           <label>
                             <span>Depth <small>Maximum graph layers</small></span>

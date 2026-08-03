@@ -491,11 +491,7 @@ def _night_policy(app_id: int) -> tuple[int, int]:
 def _live_policy(app_id: int) -> tuple[int, int]:
   settings = _settings(app_id)
   return (
-    _positive_int(
-      settings.get("live_breadth"),
-      DEFAULT_LIVE_BREADTH,
-      MAX_CONFIGURED_BREADTH,
-    ),
+    DEFAULT_LIVE_BREADTH,
     _positive_int(
       settings.get("live_depth"),
       DEFAULT_LIVE_DEPTH,

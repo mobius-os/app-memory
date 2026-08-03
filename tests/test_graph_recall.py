@@ -86,6 +86,84 @@ def test_traversal_opens_per_parent_and_returns_only_selected_full_node(monkeypa
   assert len(bodies["notes/b.md"]) > 900
 
 
+def test_direct_live_selector_uses_one_call_and_loads_only_selected_bodies(
+  monkeypatch,
+):
+  bodies = _revision()
+  reads = []
+
+  def read(_commit, path):
+    reads.append(path)
+    return bodies[path]
+
+  monkeypatch.setattr(memory_search, "read_revision_file", read)
+  prompts = []
+
+  def select(prompt):
+    prompts.append(prompt)
+    return json.dumps({"selected": ["b"], "reason": "Exact answer note."})
+
+  result = memory_search.direct_live_traverse(
+    "What is the complete detailed answer?",
+    "0" * 40,
+    breadth=4,
+    depth_limit=4,
+    text_call=select,
+  )
+
+  assert len(prompts) == 1
+  assert result.rounds == 1
+  assert result.stop_reason == "direct_catalog_selection"
+  assert [node.id for node in result.selected] == ["b"]
+  assert reads == ["graph.json", "index.md", "notes/b.md"]
+  assert len(result.opened) == 8
+  assert next(node for node in result.opened if node.id == "a").content == ""
+  assert result.decisions[0]["catalog_nodes"] == 8
+
+
+def test_direct_live_selector_fallback_prefers_deepest_lexical_match(monkeypatch):
+  bodies = _revision()
+  monkeypatch.setattr(
+    memory_search, "read_revision_file", lambda _commit, path: bodies[path],
+  )
+
+  result = memory_search.direct_live_traverse(
+    "route a-two",
+    "0" * 40,
+    breadth=4,
+    depth_limit=4,
+    text_call=lambda _prompt: "not json",
+  )
+
+  assert [node.id for node in result.selected] == ["a-two"]
+  assert result.decisions[0]["source"] == "lexical_fallback"
+
+
+def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
+  bodies = _revision()
+  graph = json.loads(bodies["graph.json"])
+  graph["nodes"].append({
+    "id": "orphan", "path": "notes/orphan.md", "title": "Secret answer",
+    "description": "Must not be exposed", "type": "note",
+  })
+  bodies["graph.json"] = json.dumps(graph)
+  bodies["notes/orphan.md"] = "unreachable"
+  monkeypatch.setattr(
+    memory_search, "read_revision_file", lambda _commit, path: bodies[path],
+  )
+  prompt = []
+
+  result = memory_search.direct_live_traverse(
+    "secret answer", "0" * 40, breadth=4, depth_limit=4,
+    text_call=lambda value: prompt.append(value) or json.dumps({
+      "selected": ["orphan"],
+    }),
+  )
+
+  assert "orphan" not in prompt[0]
+  assert result.selected == ()
+
+
 def test_navigator_can_select_nodes_opened_at_the_depth_limit(monkeypatch):
   bodies = _revision()
   monkeypatch.setattr(
