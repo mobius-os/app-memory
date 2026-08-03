@@ -236,16 +236,22 @@ def _direct_catalog(
       positions[child] = (depth + 1, parent)
       queue.append(child)
   catalog = []
+  catalog_chars = 0
   for node_id, (depth, parent) in positions.items():
     metadata = graph.by_id[node_id]
-    catalog.append({
+    item = {
       "id": node_id,
       "title": str(metadata.get("title") or node_id)[:300],
       "description": str(metadata.get("description") or "")[:800],
       "type": str(metadata.get("type") or "note"),
       "depth": depth,
       "parent": parent,
-    })
+    }
+    item_chars = len(json.dumps(item, ensure_ascii=False))
+    if catalog and catalog_chars + item_chars > 64_000:
+      break
+    catalog.append(item)
+    catalog_chars += item_chars
   return catalog, positions
 
 
@@ -340,24 +346,11 @@ def direct_live_traverse(
     if isinstance(node_id, str) and node_id in valid_ids
   ))[:12]
   selected_set = set(selected_ids)
-  opened = []
-  for item in catalog:
-    node_id = item["id"]
-    depth, parent = positions[node_id]
-    if node_id in selected_set or node_id == "index":
-      opened.append(graph.open(node_id, depth, parent))
-    else:
-      metadata = graph.by_id[node_id]
-      opened.append(OpenedNode(
-        id=node_id,
-        path=str(metadata["path"]),
-        title=item["title"],
-        description=item["description"],
-        node_type=item["type"],
-        depth=depth,
-        parent=parent,
-        content="",
-      ))
+  opened = [graph.open("index", 0, None)]
+  opened.extend(
+    graph.open(node_id, positions[node_id][0], positions[node_id][1])
+    for node_id in selected_ids
+  )
   by_id = {node.id: node for node in opened}
   frontier = {}
   for item in catalog:
@@ -365,7 +358,7 @@ def direct_live_traverse(
       continue
     parent = item["parent"] or "index"
     frontier.setdefault((parent, max(0, item["depth"] - 1)), []).append({
-      "id": item["id"], "path": by_id[item["id"]].path,
+      "id": item["id"], "path": str(graph.by_id[item["id"]]["path"]),
     })
   reason = action.get("reason") if isinstance(action, dict) else ""
   decision = {

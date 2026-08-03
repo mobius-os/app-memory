@@ -116,8 +116,12 @@ def test_direct_live_selector_uses_one_call_and_loads_only_selected_bodies(
   assert result.stop_reason == "direct_catalog_selection"
   assert [node.id for node in result.selected] == ["b"]
   assert reads == ["graph.json", "index.md", "notes/b.md"]
-  assert len(result.opened) == 8
-  assert next(node for node in result.opened if node.id == "a").content == ""
+  assert [node.id for node in result.opened] == ["index", "b"]
+  assert any(
+    node["id"] == "a"
+    for parent in result.frontier_at_stop
+    for node in parent["nodes"]
+  )
   assert result.decisions[0]["catalog_nodes"] == 8
 
 
@@ -162,6 +166,29 @@ def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
 
   assert "orphan" not in prompt[0]
   assert result.selected == ()
+
+
+def test_direct_live_catalog_keeps_the_selector_prompt_bounded():
+  graph = {
+    "nodes": [{
+      "id": "index", "path": "index.md", "title": "Index",
+      "description": "root", "type": "map",
+    }],
+    "edges": [{"kind": "link", "source": "index", "target": f"note-{index}"}
+              for index in range(200)],
+  }
+  graph["nodes"].extend({
+    "id": f"note-{index}", "path": f"notes/{index}.md",
+    "title": f"Note {index}", "description": "x" * 800,
+    "type": "note",
+  } for index in range(200))
+
+  catalog, _positions = memory_search._direct_catalog(
+    memory_search.RevisionGraph("0" * 40, graph), 4,
+  )
+
+  assert len(json.dumps(catalog, ensure_ascii=False)) <= 65_000
+  assert len(catalog) < 201
 
 
 def test_navigator_can_select_nodes_opened_at_the_depth_limit(monkeypatch):
