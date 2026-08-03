@@ -399,14 +399,30 @@ def _topology_counts(graph: dict) -> dict[str, int]:
   }
 
 
-def _assert_publishable_graph(graph: dict) -> None:
-  """Reject structural graph errors while allowing maintenance warnings."""
-  blocking = [
+def _blocking_graph_problems(graph: dict) -> list[dict]:
+  return [
     problem for problem in graph.get("problems", [])
     if isinstance(problem, dict) and problem.get("severity") != "warning"
   ]
+
+
+def _assert_publishable_graph(graph: dict) -> None:
+  """Reject structural graph errors while allowing maintenance warnings."""
+  blocking = _blocking_graph_problems(graph)
   if blocking:
     raise ValueError(f"invalid memory graph: {blocking!r}")
+
+
+def _assert_batch_graph_valid(graph: dict) -> None:
+  """Reject batch defects except orphans owned by final deterministic repair."""
+  blocking = [
+    problem for problem in _blocking_graph_problems(graph)
+    if problem.get("kind") != "orphan"
+  ]
+  if blocking:
+    raise ProposalValidationError(
+      "invalid_graph", f"invalid memory graph: {blocking!r}",
+    )
 
 
 def _app_id() -> int | None:
@@ -820,6 +836,10 @@ def _discover_chat_ids() -> tuple[list[str], bool, bool]:
   failed page therefore causes harmless rediscovery, never a permanent gap.
   """
   previous = _load_chat_discovery_marker()
+  previous_key = (
+    (previous["recency_at"], previous["id"])
+    if previous is not None else None
+  )
   newest: dict | None = None
   before: dict | None = None
   discovered: list[str] = []
@@ -862,9 +882,18 @@ def _discover_chat_ids() -> tuple[list[str], bool, bool]:
       key = {"recency_at": recency_at, "id": chat_id}
       if newest is None:
         newest = key
-      if previous == key:
+      # The marker row can move when its chat receives new activity, or vanish
+      # after deletion recovery expires. Stop at the ordered watermark rather
+      # than requiring that mutable row to reappear exactly; every following
+      # row is older in the API's (recency_at, id) descending order.
+      if previous_key is not None and (recency_at, chat_id) <= previous_key:
         reached_previous = True
         break
+      # Empty chat shells are valid platform lifecycle records, but contain no
+      # facts for Memory. The list response already owns that classification,
+      # so do not turn them into detail reads or permanent queue work.
+      if item.get("message_count") == 0:
+        continue
       discovered.append(chat_id)
     if invalid_key:
       _log("WARN chat discovery response lacked stable recency keys")
@@ -905,17 +934,24 @@ def _collect_chat_intake(limit: int = _MAX_SOURCE_CHATS) -> ChatIntake:
   chat_ids = (older_ids[:pending_budget] + recent_ids)[:_MAX_SOURCE_CHATS]
   chats: list[dict] = []
   tombstones: list[str] = []
+  empty: list[str] = []
   detail_failures = 0
   for chat_id in chat_ids:
     chat, status = _fetch_chat_detail(chat_id)
     if chat is not None:
-      chats.append(chat)
+      if chat["messages"]:
+        chats.append(chat)
+      else:
+        empty.append(chat_id)
     elif status == 404:
       tombstones.append(chat_id)
     else:
       detail_failures += 1
-  if tombstones:
-    queue_ok = _discard_pending_chat_ids(tombstones) and queue_ok
+  discard = tombstones + empty
+  if discard:
+    queue_ok = _discard_pending_chat_ids(discard) and queue_ok
+  if empty:
+    _log(f"discarded empty pending chat records count={len(empty)}")
   return ChatIntake(
     chats=chats,
     discovered_count=len(discovered),
@@ -1003,7 +1039,7 @@ def _discard_pending_chat_ids(chat_ids: list[str]) -> bool:
     if chat_id not in discarded
   ]
   return _write_pending_chat_ids(
-    remaining, warning="could not discard deleted pending chats",
+    remaining, warning="could not discard non-source pending chats",
   )
 
 
@@ -1657,6 +1693,14 @@ def _proposal(
   prompt = _proposal_prompt(staging, chats, read_audits)
   source_handles = _source_handles(chats)
   allowed_chat_ids = set(source_handles.values()) | _known_chat_sources(staging)
+  deleted_handles = _deleted_source_handles(chats)
+  deleted_source_handles = {
+    handle: _source_archive_id(chat_id)
+    for handle, chat_id in deleted_handles.items()
+  }
+  allowed_deleted_source_ids = (
+    set(deleted_source_handles.values()) | _known_deleted_source_ids(staging)
+  )
   deleted_chat_ids = {
     str(chat["id"])
     for chat in chats
@@ -1697,6 +1741,8 @@ def _proposal(
           value,
           allowed_chat_ids=allowed_chat_ids,
           source_handles=source_handles,
+          deleted_source_handles=deleted_source_handles,
+          allowed_deleted_source_ids=allowed_deleted_source_ids,
           allow_deleted_source=allow_deleted_source,
           forbidden_chat_ids=deleted_chat_ids,
         )
@@ -2011,8 +2057,6 @@ def _normalize_proposal(
   deleted_handles = deleted_source_handles or {}
   allowed_deleted_ids = allowed_deleted_source_ids or set()
   normalized_updates = []
-  dropped_updates: list[str] = []
-  first_invalid_provenance: dict | None = None
   for update in updates:
     if not isinstance(update, dict):
       raise ProposalValidationError("invalid_update", "invalid update")
@@ -2079,11 +2123,10 @@ def _normalize_proposal(
       ) or (
         not cited and not cites_deleted
       ) or invalid_sources:
-        # Safety invariant preserved: a fact whose chat provenance cannot be
-        # verified is never published. But one fabricated handle must not sink
-        # the whole night, so DROP only this note -- any prior verified version
-        # stays on disk untouched -- and record it as a follow-up. Every other
-        # update in the proposal still validates and publishes.
+        # A proposal is the coherence boundary: keeping sibling map edits after
+        # dropping an uncited note can leave links to a target that never
+        # existed. Reject the complete proposal so provider fallback can try a
+        # coherent replacement; earlier accepted batches remain untouched.
         reason = (
           "deleted-chat source was not available"
           if (
@@ -2093,30 +2136,15 @@ def _normalize_proposal(
           if not cited and not cites_deleted
           else "unverifiable chat source " + ", ".join(sorted(invalid_sources))
         )
-        dropped_updates.append(f"{rel}: dropped ({reason})")
-        if first_invalid_provenance is None:
-          first_invalid_provenance = {
-            "path": rel,
-            "invalid_sources": invalid_sources,
-          }
-        _log(f"dropped update with unverified provenance: {rel} ({reason})")
-        continue
+        raise ProposalValidationError(
+          "unverified_chat_provenance",
+          f"proposed fact has {reason}",
+          path=rel,
+          invalid_sources=invalid_sources,
+        )
     normalized_updates.append({**update, "content": content})
-  if dropped_updates and not normalized_updates and updates:
-    # A wholly invalid proposal is a provider failure, not a successful no-op.
-    # Preserve retry/fallback so a configured second provider can return a
-    # verifiable proposal. Per-fact skipping is only for mixed proposals where
-    # valid work would otherwise be lost.
-    invalid = first_invalid_provenance or {}
-    raise ProposalValidationError(
-      "unverified_chat_provenance",
-      "proposed facts have unverified chat provenance",
-      path=invalid.get("path"),
-      invalid_sources=invalid.get("invalid_sources") or set(),
-    )
   followups = proposal.get("followups")
   followups = list(followups) if isinstance(followups, list) else []
-  followups.extend(dropped_updates)
   return {
     **proposal,
     "self_review": self_review,
@@ -2178,15 +2206,9 @@ def _apply_proposal(
 
 def _apply_validated_proposal(
   staging: Path,
-  proposal: dict,
+  normalized: dict,
   *,
-  allowed_chat_ids: set[str],
-  source_handles: dict[str, str] | None,
-  deleted_source_handles: dict[str, str] | None = None,
-  allowed_deleted_source_ids: set[str] | None = None,
   baseline: dict,
-  allow_deleted_source: bool = False,
-  forbidden_chat_ids: set[str] | None = None,
 ) -> tuple[dict, list[str], list[str], dict]:
   """Apply one analyst batch transactionally and preserve specific routing.
 
@@ -2195,15 +2217,6 @@ def _apply_validated_proposal(
   proposal could touch, leaving earlier accepted batches intact for one later
   atomic publication.
   """
-  normalized = _normalize_proposal(
-    proposal,
-    allowed_chat_ids=allowed_chat_ids,
-    source_handles=source_handles,
-    deleted_source_handles=deleted_source_handles,
-    allowed_deleted_source_ids=allowed_deleted_source_ids,
-    allow_deleted_source=allow_deleted_source,
-    forbidden_chat_ids=forbidden_chat_ids,
-  )
   paths = list(dict.fromkeys(
     [
       update["path"] for update in normalized["updates"]
@@ -2221,6 +2234,7 @@ def _apply_validated_proposal(
     changed, deleted = _apply_normalized_proposal(staging, normalized)
     candidate = build_graph(staging, usage=load_usage())
     _assert_no_topology_regression(baseline, candidate)
+    _assert_batch_graph_valid(candidate)
     return normalized, changed, deleted, candidate
   except BaseException:
     try:
@@ -2614,13 +2628,8 @@ def _consolidate_batches(
     else:
       break
 
-    raw_outcome = _proposal(
+    candidate_outcome = _proposal(
       app_id, staging, batch, batch_audits, providers,
-    )
-    candidate_outcome = (
-      raw_outcome
-      if isinstance(raw_outcome, ProposalOutcome)
-      else ProposalOutcome("ok", raw_outcome, None, None, [])
     )
     rejection_reason = None
     rejection_detail = None
@@ -2631,40 +2640,15 @@ def _consolidate_batches(
       if not isinstance(proposal, dict):
         raise ValueError("text-only provider returned no proposal object")
       try:
-        batch_source_handles = _source_handles(batch)
-        batch_deleted_handles = _deleted_source_handles(batch)
-        deleted_source_handles = {
-          handle: _source_archive_id(chat_id)
-          for handle, chat_id in batch_deleted_handles.items()
-        }
         proposal, proposed_changed, proposed_deleted, accepted_candidate = (
           _apply_validated_proposal(
             staging,
             proposal,
-            allowed_chat_ids=(
-              set(batch_source_handles.values())
-              | _known_chat_sources(staging)
-            ),
-            source_handles=batch_source_handles,
-            deleted_source_handles=deleted_source_handles,
-            allowed_deleted_source_ids=(
-              set(deleted_source_handles.values())
-              | _known_deleted_source_ids(staging)
-            ),
             baseline=accepted_graph,
-            allow_deleted_source=(
-              any(chat.get("deleted_at") for chat in batch)
-              or _known_deleted_source(staging)
-            ),
-            forbidden_chat_ids={
-              str(chat["id"])
-              for chat in batch
-              if chat.get("deleted_at") and isinstance(chat.get("id"), str)
-            },
           )
         )
       except ProposalValidationError as exc:
-        if exc.code != "topology_regression":
+        if exc.code not in {"topology_regression", "invalid_graph"}:
           raise
         rejection_reason = exc.code
         rejection_detail = str(exc)
