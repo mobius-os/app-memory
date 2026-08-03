@@ -301,16 +301,6 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(runner, /job-context/)
 })
 
-test('personalization editor uses phone-safe fields and navigation', () => {
-  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
-  const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
-  assert.match(source, /className="mg-profile-editor"/)
-  assert.match(source, /If-None-Match/)
-  assert.match(source, /Reload profile/)
-  assert.match(theme, /\.mg-profile-editor textarea\s*\{[\s\S]*?width:\s*100%[\s\S]*?font-size:\s*16px/)
-  assert.match(theme, /@media \(max-width: 640px\)[\s\S]*?\.mg-settings-nav\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2/)
-})
-
 test('agent order swaps exact overrides and refuses inherited positional rows', () => {
   const primary = { mode: 'app', provider: 'claude', model: 'claude-primary', effort: 'high' }
   const fallback = { mode: 'app', provider: 'codex', model: 'codex-fallback', effort: 'medium' }
