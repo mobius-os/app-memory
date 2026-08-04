@@ -1,37 +1,52 @@
 # Memory system app
 
-Memory is an optional Obsidian-style graph of durable facts. Its graph is never
-injected into a chat automatically. Recent chat Digests in the private context
-come from the base platform and are separate from this app.
+Memory is an Obsidian-style graph of durable facts. Its graph is never injected
+into a chat automatically. Recent chat Digests are separate from Memory and do
+not count as a Memory lookup.
 
 Use Memory selectively but decisively for durable context about the partner:
-preferences, people, goals, recurring projects, stable decisions, and working
-style. A technical task can trigger recall for a relevant preference or
-constraint, but Memory is supporting context rather than evidence of current
-chat, code, app, contribution, or operational state. In a longer chat, search
-again when the topic materially shifts or a new subproblem needs different
+preferences, constraints, people, goals, device or accessibility habits,
+recurring projects, stable decisions, and working style.
+
+Search early when missing durable partner context could materially change the
+answer or approach. Common cues are:
+
+- continuity language such as “again”, “restore”, or “like before”;
+- a request that depends on the partner's setup, habits, accessibility, people,
+  recurring projects, or workflow without supplying that context; or
+- an underdetermined design, architecture, or interaction choice where an
+  established preference could rule out plausible options.
+
+A technically detailed request can still warrant recall when one of those cues
+is present. Skip when the current conversation already supplies the relevant
+context, or the task is self-contained and its desired outcome is fully
+specified. Complexity alone is not a cue. When recall is warranted, run one
+focused lookup and repeat only when a materially different subproblem needs
+different context.
+
+For technical work, Memory helps determine what may matter to the partner;
+owning sources establish what is true now and what happened. Use recall to
+prioritize investigation, preserve established preferences and interaction
+invariants, or decide whether to ask a clarifying question. Verify current
+state and exact history through chat records, source, Git, tests, contribution
+records, logs, APIs, or current documentation as appropriate. When sources
+disagree, direct evidence is authoritative. Never infer an exact requirement
+from a broader memory; ask rather than inventing it.
+
+For any current-state or exact-history question, use the owning source and skip
+Memory. Do not use it to locate or summarize chats, reconstruct implementation
+history, inspect source code, or establish current app, contribution,
+operational, or analytics state. Recall is relevant only for a distinct
+personalized recommendation, design, or decision that genuinely needs durable
 partner context.
 
-The decision test is simple: if missing durable partner context could change
-the answer or build, search early. Recent chat Digests are shallow continuity,
-not a Memory search; seeing a related Digest does not mean the graph has been
-searched. Skip lookup for genuinely self-contained questions, casual chatter,
-novel one-offs with no plausible history, and work already fully specified in
-the current conversation. Do not repeat the same lookup every turn without a
-new context need.
-
-Do not ask Memory to locate or summarize a chat, reconstruct implementation
-history, inspect source code, establish current app or contribution state, or
-answer analytics and operational questions. Use the direct source instead:
-the platform chat Summary or transcript for conversations; local files, Git,
-tests, and contribution records for code and delivery state; and live logs,
-metrics, or APIs for runtime facts. A relevant technical memory can still be a
-useful lead, but corroborate it directly. When sources disagree, the current
-chat and direct code or data are authoritative over Memory.
-
-Formulate a focused retrieval prompt that states exactly what durable partner
-context you need and why, naming the specific people, projects, and apps that
-anchor it. Then run this read-only background lookup. A confined navigator
+Formulate a focused retrieval prompt describing the durable partner context
+needed and why, anchored to relevant people, projects, or apps. Never request
+credentials or secrets, or ask Memory to establish current account or
+configuration state, exact records or transactions, or implementation history.
+When earlier experience matters, retrieve its user impact, risks, preferences,
+constraints, goals, or habits, then verify what changed through the owning
+source. Then run this read-only background lookup. A confined navigator
 starts at `index.md`, opens only linked
 nodes, and decides after each step whether to stop or expand the newly active
 frontier up to the configured breadth. Unchosen siblings are pruned from that

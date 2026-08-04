@@ -13,6 +13,11 @@ import memory_runner
 from memory_text_provider import TextResult, classify_process_failure
 
 
+MEMORY_CORE_PROMPT = " ".join(
+  (Path(memory_runner.__file__).parent / "memory-core.md").read_text().split()
+)
+
+
 def _self_review():
   return {
     "hardest_decision": "Distinguishing durable facts from transient context.",
@@ -1728,23 +1733,39 @@ def test_graph_catalog_never_silently_truncates_large_graphs(tmp_path):
   assert scale["required_context_chars"] > 0
 
 
-def test_memory_lookup_keeps_receipt_command_exact_without_serializing_work():
-  prompt = (Path(memory_runner.__file__).parent / "memory-core.md").read_text()
+def test_memory_prompt_keeps_lookup_invocation_isolated():
+  prompt = MEMORY_CORE_PROMPT
 
+  assert "python3 <this installed system app's source_dir>/memory_search.py" in prompt
+  assert "/data/apps/memory/memory_search" not in prompt
   assert "own exact exec invocation" in prompt
-  assert "with `cd`, pipes, redirects, or other shell operations" in prompt
+  assert "pipes, redirects, or other shell operations" in prompt
   assert "isolation describes the command shape, not the schedule" in prompt
   assert "concurrently with those other tool calls" in prompt
 
 
-def test_memory_lookup_treats_direct_chat_code_and_data_as_authoritative():
-  prompt = (Path(memory_runner.__file__).parent / "memory-core.md").read_text()
+def test_memory_prompt_balances_recall_with_direct_evidence():
+  prompt = MEMORY_CORE_PROMPT
 
-  assert "Do not ask Memory to locate or summarize a chat" in prompt
-  assert "inspect source code" in prompt
-  assert "answer analytics and operational questions" in prompt
-  assert "corroborate it directly" in prompt
-  assert "direct code or data are authoritative over Memory" in prompt
+  assert (
+    "Search early when missing durable partner context could materially change "
+    "the answer or approach."
+  ) in prompt
+  assert "A technically detailed request can still warrant recall" in prompt
+  assert "Complexity alone is not a cue." in prompt
+  assert "owning sources establish what is true now and what happened" in prompt
+  assert "For any current-state or exact-history question" in prompt
+  assert "Never infer an exact requirement from a broader memory" in prompt
+
+
+def test_memory_prompt_keeps_retrieval_queries_durable_and_safe():
+  prompt = MEMORY_CORE_PROMPT
+
+  assert "Never request credentials or secrets" in prompt
+  assert (
+    "current account or configuration state, exact records or transactions, "
+    "or implementation history"
+  ) in prompt
 
 
 def test_prompt_budget_never_silently_drops_required_routes(

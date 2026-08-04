@@ -31,23 +31,26 @@ function candidateNodeModules() {
   return [...new Set(candidates.map((candidate) => resolve(candidate)))]
 }
 
-function hasFrontendTestDeps(nodeModules) {
-  return existsSync(join(nodeModules, '.bin', 'esbuild'))
-    && existsSync(join(nodeModules, 'react'))
+function hasFrontendRuntimeDeps(nodeModules) {
+  return existsSync(join(nodeModules, 'react'))
 }
 
 export function findFrontendNodeModules() {
   for (const candidate of candidateNodeModules()) {
-    if (hasFrontendTestDeps(candidate)) return candidate
+    if (hasFrontendRuntimeDeps(candidate)) return candidate
   }
   throw new Error(
-    'Could not find frontend test dependencies. Run npm ci in mobius/frontend, '
-      + 'run npm install in this app, or set MOBIUS_FRONTEND_NODE_MODULES.',
+    'Could not find frontend runtime dependencies. Run npm ci in '
+      + 'mobius/frontend or set MOBIUS_FRONTEND_NODE_MODULES.',
   )
 }
 
 export const frontendNodeModules = findFrontendNodeModules()
-export const esbuildPath = join(frontendNodeModules, '.bin', 'esbuild')
+export const esbuildPath = join(appRoot, 'node_modules', '.bin', 'esbuild')
+
+if (!existsSync(esbuildPath)) {
+  throw new Error('Could not find the app test compiler. Run npm ci in this app.')
+}
 
 export function buildEnv(extra = {}) {
   const nodePath = [frontendNodeModules, process.env.NODE_PATH]
