@@ -174,5 +174,34 @@ class MemoryTextProviderTests(unittest.TestCase):
       self.assertEqual(provider.available_provider("auto"), "codex")
 
 
+  def test_json_object_survives_the_prose_models_wrap_their_answer_in(self):
+    expected = {"summary": "s", "updates": [{"path": "notes/a.md"}]}
+    body = json.dumps(expected)
+    for label, reply in (
+      ("bare", body),
+      ("fenced", f"```json\n{body}\n```"),
+      ("lead-in", f"Here is the JSON object you asked for:\n\n{body}"),
+      ("trailing remark", f"{body}\n\nLet me know if you want changes."),
+      ("both", f"Sure - here it is:\n```json\n{body}\n```\nHope that helps!"),
+    ):
+      with self.subTest(label):
+        self.assertEqual(provider.json_object(reply), expected)
+
+  def test_json_object_reads_past_braces_inside_string_values(self):
+    value = {"reason": "a } and a { inside prose", "nested": {"deep": [1, 2]}}
+    self.assertEqual(provider.json_object(json.dumps(value)), value)
+
+  def test_json_object_rejects_replies_with_no_recoverable_object(self):
+    for label, reply in (
+      ("truncated mid-token", '{"summary": "s", "updates": [{"path": "notes/'),
+      ("no object at all", "I could not complete this request."),
+      ("top-level array", "[1, 2, 3]"),
+      ("empty", ""),
+      ("not a string", None),
+    ):
+      with self.subTest(label):
+        self.assertIsNone(provider.json_object(reply))
+
+
 if __name__ == "__main__":
   unittest.main()

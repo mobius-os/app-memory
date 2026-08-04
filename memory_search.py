@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Callable
 
 from memory_store import read_revision_file, ready_pointer, record_read
-from memory_text_provider import RunProviderHealth, available_provider, run_text
+from memory_text_provider import (
+  RunProviderHealth,
+  available_provider,
+  json_object,
+  run_text,
+)
 
 
 DEFAULT_LIVE_DEPTH = 4
@@ -205,19 +210,6 @@ def _score(value: str, terms: set[str]) -> int:
   return sum(1 for term in terms if term in haystack)
 
 
-def _json_object(raw: str | None) -> dict | None:
-  if not isinstance(raw, str) or not raw.strip():
-    return None
-  value = raw.strip()
-  if value.startswith("```"):
-    value = re.sub(r"^```(?:json)?\s*|\s*```$", "", value, flags=re.I | re.S)
-  try:
-    parsed = json.loads(value)
-  except (TypeError, ValueError):
-    return None
-  return parsed if isinstance(parsed, dict) else None
-
-
 def _direct_catalog(
   graph: RevisionGraph, depth_limit: int,
 ) -> tuple[list[dict], dict[str, tuple[int, str | None]]]:
@@ -331,7 +323,7 @@ def direct_live_traverse(
   else:
     raw = reply
     attempts = []
-  action = _json_object(raw)
+  action = json_object(raw)
   source = "model"
   valid_ids = {item["id"] for item in catalog if item["id"] != "index"}
   requested = action.get("selected") if isinstance(action, dict) else None
@@ -672,7 +664,7 @@ def traverse(
     else:
       raw = reply
       attempts = []
-    action = _json_object(raw)
+    action = json_object(raw)
     source = "model"
     if action is None:
       action = _deterministic_action(

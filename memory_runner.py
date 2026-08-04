@@ -49,6 +49,7 @@ from memory_store import (
 from memory_text_provider import (
   ProviderFailure,
   RunProviderHealth,
+  json_object,
   run_text,
   terminate_active_text_processes,
 )
@@ -1670,15 +1671,13 @@ def _text_proposal(choice: dict, prompt: str) -> AnalystResult:
       f"failed: {result.failure.code}"
     )
     return AnalystResult(None, result.failure)
-  raw = str(result.text or "").strip()
-  if raw.startswith("```"):
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
-  try:
-    value = json.loads(raw)
-  except ValueError:
-    _log(f"{provider or 'unknown'} analyst ({model or 'default'}) returned non-JSON")
-    return AnalystResult(None, ProviderFailure("invalid_output"))
-  if not isinstance(value, dict):
+  raw = str(result.text or "")
+  value = json_object(raw)
+  if value is None:
+    _log(
+      f"{provider or 'unknown'} analyst ({model or 'default'}) returned no JSON "
+      f"object in {len(raw)} chars; head={raw[:200]!r} tail={raw[-120:]!r}"
+    )
     return AnalystResult(None, ProviderFailure("invalid_output"))
   return AnalystResult(value)
 
