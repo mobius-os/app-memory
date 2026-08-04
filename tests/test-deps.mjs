@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const appRoot = resolve(here, '..')
@@ -31,30 +32,42 @@ function candidateNodeModules() {
   return [...new Set(candidates.map((candidate) => resolve(candidate)))]
 }
 
-function hasFrontendRuntimeDeps(nodeModules) {
-  return existsSync(join(nodeModules, 'react'))
+function hasFrontendTestDeps(nodeModules) {
+  return existsSync(join(nodeModules, 'rolldown'))
+    && existsSync(join(nodeModules, 'react'))
 }
 
 export function findFrontendNodeModules() {
   for (const candidate of candidateNodeModules()) {
-    if (hasFrontendRuntimeDeps(candidate)) return candidate
+    if (hasFrontendTestDeps(candidate)) return candidate
   }
   throw new Error(
-    'Could not find frontend runtime dependencies. Run npm ci in '
-      + 'mobius/frontend or set MOBIUS_FRONTEND_NODE_MODULES.',
+    'Could not find frontend test dependencies (rolldown, react). Run npm ci '
+      + 'in mobius/frontend or set MOBIUS_FRONTEND_NODE_MODULES.',
   )
 }
 
 export const frontendNodeModules = findFrontendNodeModules()
-export const esbuildPath = join(appRoot, 'node_modules', '.bin', 'esbuild')
 
-if (!existsSync(esbuildPath)) {
-  throw new Error('Could not find the app test compiler. Run npm ci in this app.')
-}
-
-export function buildEnv(extra = {}) {
-  const nodePath = [frontendNodeModules, process.env.NODE_PATH]
-    .filter(Boolean)
-    .join(delimiter)
-  return { ...process.env, NODE_PATH: nodePath, ...extra }
+// Möbius compiles mini-apps with Rolldown, so the tests bundle the same way.
+// Keeping the bundler behind one helper stops each test from re-encoding the
+// compiler's command line.
+export async function bundleModule({ entry, outfile, alias = {} }) {
+  const requireFromFrontend = createRequire(join(frontendNodeModules, 'package.json'))
+  const { rolldown } = await import(
+    pathToFileURL(requireFromFrontend.resolve('rolldown')).href
+  )
+  const build = await rolldown({
+    input: entry,
+    platform: 'node',
+    tsconfig: false,
+    transform: { jsx: 'react-jsx' },
+    resolve: { alias, modules: [frontendNodeModules, 'node_modules'] },
+  })
+  // codeSplitting:false matches the shell compiler: index.jsx's dynamic
+  // imports (marked, dompurify) are inlined into one module rather than
+  // emitted as side chunks, so the tests import what Möbius installs.
+  await build.write({ file: outfile, format: 'es', codeSplitting: false })
+  await build.close()
+  return import(pathToFileURL(outfile).href)
 }
