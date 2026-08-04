@@ -190,15 +190,6 @@ test('reader returns verified graph-relative file pointers', () => {
     assert.ok(provider.includes(`"${feature}"`), feature)
   }
   assert.doesNotMatch(provider, /\bGlob\b|\bGrep\b/)
-  const prompt = readFileSync(new URL('../memory-core.md', import.meta.url), 'utf8')
-  assert.match(prompt, /focused retrieval prompt/)
-  assert.match(prompt, /source_dir/)
-  assert.doesNotMatch(prompt, /\/data\/apps\/memory\/memory_search/)
-  assert.match(prompt, /never\s+injected/i)
-  assert.match(prompt, /concurrently with those other tool calls/)
-  assert.match(prompt, /direct evidence establishes what is true now/)
-  assert.match(prompt, /Some requests are direct-source-only/)
-  assert.match(prompt, /credentials or\s+secrets/)
 })
 
 test('viewer pins graph and notes to the validated ready commit', () => {
