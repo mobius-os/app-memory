@@ -722,6 +722,53 @@ class MemoryRunnerTests(unittest.TestCase):
           allowed_chat_ids=set(),
         )
 
+  def test_a_batch_routing_to_an_uncreated_note_is_rejected_and_rolled_back(self):
+    """One dangling routing edge must cost its batch, never the whole run.
+
+    A batch whose routing text references a note it does not create is rejected
+    and rolled back, while a batch that creates the note it routes to in the
+    same proposal is still accepted - otherwise the ordinary "record a fact,
+    then file it" flow would break.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      staging = Path(raw) / "staging"
+      _seed(staging)
+      baseline = runner.build_graph(staging, usage={})
+      moc = staging / "mocs" / "about-the-user.md"
+      before = moc.read_text(encoding="utf-8")
+
+      dangling = (
+        "---\ntitle: About the user\ntype: moc\n---\n# About\n\n"
+        "- [[a-preference-this-batch-never-writes]]\n"
+      )
+      with self.assertRaises(runner.ProposalValidationError) as caught:
+        runner._apply_validated_proposal(
+          staging,
+          {"updates": [{"path": "mocs/about-the-user.md", "content": dangling}],
+           "deletes": []},
+          baseline=baseline,
+        )
+      self.assertEqual(caught.exception.code, "invalid_graph")
+      self.assertIn("dangling_link", str(caught.exception))
+      self.assertEqual(moc.read_text(encoding="utf-8"), before)
+
+      note = (
+        "---\ntype: note\ntitle: A preference\ndescription: a preference\n"
+        "---\nThe durable preference detail.\n"
+      )
+      _normalized, changed, deleted, _graph = runner._apply_validated_proposal(
+        staging,
+        {"updates": [
+          {"path": "notes/a-preference-this-batch-never-writes.md", "content": note},
+          {"path": "mocs/about-the-user.md", "content": dangling},
+        ], "deletes": []},
+        baseline=baseline,
+      )
+      self.assertEqual(deleted, [])
+      self.assertIn("mocs/about-the-user.md", changed)
+      self.assertEqual(moc.read_text(encoding="utf-8"), dangling)
+
   def test_duplicate_note_and_moc_ids_cannot_be_published(self):
     with tempfile.TemporaryDirectory() as raw:
       store, runner = _load(Path(raw))
