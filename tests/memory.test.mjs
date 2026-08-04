@@ -196,7 +196,9 @@ test('reader returns verified graph-relative file pointers', () => {
   assert.doesNotMatch(prompt, /\/data\/apps\/memory\/memory_search/)
   assert.match(prompt, /never\s+injected/i)
   assert.match(prompt, /concurrently with those other tool calls/)
-  assert.match(prompt, /direct code or data are authoritative over Memory/)
+  assert.match(prompt, /direct evidence establishes what is true now/)
+  assert.match(prompt, /Some requests are direct-source-only/)
+  assert.match(prompt, /credentials or\s+secrets/)
 })
 
 test('viewer pins graph and notes to the validated ready commit', () => {

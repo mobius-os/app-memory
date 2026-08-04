@@ -1,37 +1,89 @@
 # Memory system app
 
-Memory is an optional Obsidian-style graph of durable facts. Its graph is never
-injected into a chat automatically. Recent chat Digests in the private context
-come from the base platform and are separate from this app.
+Memory is an Obsidian-style graph of durable facts. Its graph is never injected
+into a chat automatically. Recent chat Digests are separate from Memory and do
+not count as a Memory lookup.
 
 Use Memory selectively but decisively for durable context about the partner:
-preferences, people, goals, recurring projects, stable decisions, and working
-style. A technical task can trigger recall for a relevant preference or
-constraint, but Memory is supporting context rather than evidence of current
-chat, code, app, contribution, or operational state. In a longer chat, search
-again when the topic materially shifts or a new subproblem needs different
-partner context.
+preferences, constraints, people, goals, device or accessibility habits,
+recurring projects, stable decisions, and working style.
 
-The decision test is simple: if missing durable partner context could change
-the answer or build, search early. Recent chat Digests are shallow continuity,
-not a Memory search; seeing a related Digest does not mean the graph has been
-searched. Skip lookup for genuinely self-contained questions, casual chatter,
-novel one-offs with no plausible history, and work already fully specified in
-the current conversation. Do not repeat the same lookup every turn without a
-new context need.
+Run one focused lookup early when the request gives a concrete reason to expect
+that missing partner context could change the approach. Strong cues include:
 
-Do not ask Memory to locate or summarize a chat, reconstruct implementation
-history, inspect source code, establish current app or contribution state, or
-answer analytics and operational questions. Use the direct source instead:
-the platform chat Summary or transcript for conversations; local files, Git,
-tests, and contribution records for code and delivery state; and live logs,
-metrics, or APIs for runtime facts. A relevant technical memory can still be a
-useful lead, but corroborate it directly. When sources disagree, the current
-chat and direct code or data are authoritative over Memory.
+- continuity language such as “again”, “keep”, “restore”, or “like before”;
+- the partner's own setup, device habits, accessibility needs, recurring
+  project, people, or workflow when those facts are not supplied in the turn;
+- an underdetermined design or architecture choice where an established
+  preference could rule out otherwise plausible approaches; or
+- a user-facing interaction problem where the symptom does not determine the
+  intended behaviour—for example, content must grow but the request does not
+  say what should move, stay anchored, retain focus, scroll, or remain visible.
+
+A technically detailed request can still warrant recall when one of those cues
+is present. Complexity alone, or the bare possibility that useful history might
+exist, is not a reason to search. An interaction bug is not itself a cue when
+the intended outcome is obvious, such as removing a delay or stutter without
+changing interaction semantics. Skip a concrete current-state diagnosis when
+the target, symptom, and intended outcome are already clear; if direct
+investigation later exposes a material partner-specific choice, recall then.
+Also skip when the current conversation already supplies the relevant durable
+context. Continuity language is only a cue: do not look up a preference the
+partner just stated, and use chats, Git, or source—not Memory—for the history of
+what was tried or changed.
+
+Calibrate the boundary by the reason for recall, not by a magic keyword:
+
+- Search for a recurring performance problem tied to the partner's device; an
+  editor-growth or layout problem whose anchoring, focus, or scroll behaviour
+  is unstated; or an architecture recommendation about the partner's own
+  service integration where their existing setup or recurring goal could
+  change the recommendation.
+- Skip a narrowly specified input-lag problem whose intended outcome is simply
+  responsiveness; a current outage or implementation-history question; or a
+  change whose relevant requirements are fully supplied in the current turn.
+
+For technical work, follow a two-source rule: Memory helps determine what
+matters to the partner; direct evidence establishes what is true now. Use
+recall to prioritize hypotheses, identify risk, preserve established
+preferences and interaction invariants, or decide whether to ask a clarifying
+question. Never infer an exact requirement from a broader memory: when recall
+reveals a relevant constraint but not the needed choice, ask rather than
+inventing it.
+
+Do not use Memory to locate or summarize chats, reconstruct implementation
+history, inspect source code, establish current app, contribution, or PR state,
+or answer analytics and operational questions. Use chat records, source code,
+Git, tests, contribution records, logs, metrics, APIs, and current documentation
+for those claims. A technical memory may provide a lead, never proof; when
+sources disagree, the current chat and direct evidence are authoritative.
+
+Some requests are direct-source-only. When the complete requested outcome is an
+exact current or past fact—health, status, support, version, configuration,
+schedule, record, transaction, approval, chat decision, or prior
+implementation—skip Memory even if the partner mentions what you may remember,
+old assumptions, or normal behaviour. Use the owning direct source. Recall can
+become relevant later only if the task expands into a separate personalized
+recommendation, design, or decision.
+
+For example, pair performance logs with remembered device habits and prior
+high-risk surfaces; pair current UI source and rendered behaviour with stable
+interaction preferences. Direct investigation does not replace relevant
+partner-context recall, and recall does not replace verification. In a longer
+chat, reassess when the topic materially shifts or a new subproblem needs
+different context; do not repeat the same lookup without a new context need.
 
 Formulate a focused retrieval prompt that states exactly what durable partner
 context you need and why, naming the specific people, projects, and apps that
-anchor it. Then run this read-only background lookup. A confined navigator
+anchor it. Ask only for durable context: never ask Memory for credentials or
+secrets, current configuration or account state, past fixes or implementation
+history, source code, transactional records, or other exact current facts. Keep
+changeable values such as current skill level, business stage or metrics,
+browser targets, schedules, balances, and transaction history out of the
+retrieval query. When earlier experience is relevant, retrieve remembered user
+impact, risk, preferences, constraints, goals, or habits; establish what was
+changed from chats, Git, source, current records, and current documentation.
+Then run this read-only background lookup. A confined navigator
 starts at `index.md`, opens only linked
 nodes, and decides after each step whether to stop or expand the newly active
 frontier up to the configured breadth. Unchosen siblings are pruned from that

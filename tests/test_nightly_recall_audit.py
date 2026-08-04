@@ -1737,14 +1737,29 @@ def test_memory_lookup_keeps_receipt_command_exact_without_serializing_work():
   assert "concurrently with those other tool calls" in prompt
 
 
-def test_memory_lookup_treats_direct_chat_code_and_data_as_authoritative():
+def test_memory_lookup_balances_partner_context_with_direct_evidence():
   prompt = (Path(memory_runner.__file__).parent / "memory-core.md").read_text()
 
-  assert "Do not ask Memory to locate or summarize a chat" in prompt
+  assert "A technically detailed request can still warrant recall" in prompt
+  assert "recurring performance problem tied to the partner's device" in prompt
+  assert "editor-growth or layout problem" in prompt
+  assert "Do not use Memory to locate or summarize chats" in prompt
   assert "inspect source code" in prompt
   assert "answer analytics and operational questions" in prompt
-  assert "corroborate it directly" in prompt
-  assert "direct code or data are authoritative over Memory" in prompt
+  assert "direct evidence establishes what is true now" in prompt
+  assert "current chat and direct evidence are authoritative" in prompt
+
+
+def test_memory_lookup_keeps_exact_facts_and_unsafe_queries_out_of_recall():
+  prompt = (Path(memory_runner.__file__).parent / "memory-core.md").read_text()
+
+  assert "Some requests are direct-source-only" in prompt
+  assert "exact current or past fact" in prompt
+  assert "skip Memory even if the partner mentions" in prompt
+  assert re.search(r"credentials or\s+secrets", prompt)
+  assert re.search(r"past fixes or implementation\s+history", prompt)
+  assert "transactional records" in prompt
+  assert re.search(r"Keep\s+changeable values", prompt)
 
 
 def test_prompt_budget_never_silently_drops_required_routes(
