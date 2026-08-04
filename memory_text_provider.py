@@ -266,3 +266,25 @@ def run_text(
   if not value:
     return TextResult(None, ProviderFailure("empty_output"))
   return TextResult(value)
+
+
+def json_object(text: str | None) -> dict | None:
+  """Return the first JSON object in a model reply, ignoring prose around it.
+
+  Every Memory agent asks a model for one JSON object and gets back a reply that
+  may carry a lead-in sentence, a code fence, or a trailing remark. Requiring the
+  whole reply to parse discarded otherwise-good work, and the two callers had
+  each grown their own copy of the same brittle check. `raw_decode` consumes
+  exactly one complete object and ignores whatever surrounds it, so only a
+  genuinely incomplete reply now fails - the one case worth reporting.
+  """
+  if not isinstance(text, str):
+    return None
+  start = text.find("{")
+  if start < 0:
+    return None
+  try:
+    value, _ = json.JSONDecoder().raw_decode(text, start)
+  except ValueError:
+    return None
+  return value if isinstance(value, dict) else None
