@@ -33,13 +33,12 @@ records, logs, APIs, or current documentation as appropriate. When sources
 disagree, direct evidence is authoritative. Never infer an exact requirement
 from a broader memory; ask rather than inventing it.
 
-Do not use Memory to locate or summarize chats, reconstruct implementation
-history, inspect source code, or establish current app, contribution,
-operational, or analytics state.
-
 For any current-state or exact-history question, use the owning source and skip
-Memory. Recall is relevant only for a distinct personalized recommendation,
-design, or decision that genuinely needs durable partner context.
+Memory. Do not use it to locate or summarize chats, reconstruct implementation
+history, inspect source code, or establish current app, contribution,
+operational, or analytics state. Recall is relevant only for a distinct
+personalized recommendation, design, or decision that genuinely needs durable
+partner context.
 
 Formulate a focused retrieval prompt describing the durable partner context
 needed and why, anchored to relevant people, projects, or apps. Never request
