@@ -1,5 +1,5 @@
 // OFFLINE RENDER HARNESS for app-memory.
-// Drives the REAL compiled makeSharedMemoryStore (from the esbuild bundle of
+// Drives the REAL compiled makeSharedMemoryStore (from the Rolldown bundle of
 // index.jsx) through the exact two effects the App runs — the graph subscribe
 // and the open-note subscribe — with:
 //   * a mocked Cache-Storage-style mirror (read-through cache), and

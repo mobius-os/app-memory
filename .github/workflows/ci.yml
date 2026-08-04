@@ -1,7 +1,7 @@
 name: CI
 
 # Validates the app on every push to main and every PR. Möbius mini-app tests
-# bundle index.jsx with esbuild and import the shell's frontend deps (react,
+# bundle index.jsx with Rolldown and import the shell's frontend deps (react,
 # marked, dompurify, …), so CI checks out mobius-os/mobius (public) and installs
 # its frontend once, then points MOBIUS_FRONTEND_NODE_MODULES at it.
 on:

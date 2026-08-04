@@ -1,23 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync } from 'node:fs'
-import { buildEnv, esbuildPath } from './test-deps.mjs'
+import { fileURLToPath } from 'node:url'
+import { bundleModule } from './test-deps.mjs'
 import { canReorderAgentSlots, reorderAgentSlots } from '../ui/backgroundAgentOrder.js'
 
 mkdirSync(new URL('./.build/', import.meta.url), { recursive: true })
-execFileSync(esbuildPath, [
-  '--bundle',
-  '--format=esm',
-  '--jsx=automatic',
-  '--platform=node',
-  'index.jsx',
-  '--outfile=tests/.build/index.mjs',
-], {
-  cwd: new URL('..', import.meta.url),
-  env: buildEnv(),
-  stdio: 'pipe',
-})
 
 const {
   buildLocalGraphData,
@@ -37,7 +25,10 @@ const {
   makeSharedMemoryStore,
   memoryNoteIntent,
   buildAgentGroups,
-} = await import('./.build/index.mjs')
+} = await bundleModule({
+  entry: fileURLToPath(new URL('../index.jsx', import.meta.url)),
+  outfile: fileURLToPath(new URL('./.build/index.mjs', import.meta.url)),
+})
 
 test('shouldShowNodeLabel hides ordinary nodes below every threshold except close zoom', () => {
   const node = { id: 'plain', importance: 6, mocs: [] }
