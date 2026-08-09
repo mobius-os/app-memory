@@ -1152,7 +1152,7 @@ export default function App({ appId, token }) {
         inert={selected || detailPresentation === 'direct' ? true : undefined}
         aria-hidden={selected || detailPresentation === 'direct' ? 'true' : undefined}
       >
-        <div style={S.brand} className="mg-brand">
+        <div style={S.brand} className="mg-brand" ref={(el) => el && window.mobius.immersive && window.mobius.immersive.holdToToggle(el)}>
           {/* The app's own glossy icon as the brand mark; falls back to the
               accent dot if this install has no custom icon (the route 404s). */}
           <img
