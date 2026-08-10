@@ -1868,20 +1868,25 @@ def test_memory_prompt_keeps_lookup_invocation_isolated():
   assert "own exact exec invocation" in prompt
   assert "pipes, redirects, or other shell operations" in prompt
   assert "isolation describes the command shape, not the schedule" in prompt
-  assert "concurrently with those other tool calls" in prompt
+  assert "Dispatch the Memory invocation in parallel" in prompt
 
 
 def test_memory_prompt_balances_recall_with_direct_evidence():
   prompt = MEMORY_CORE_PROMPT
 
   assert (
-    "Search early when missing durable partner context could materially change "
-    "the answer or approach."
+    "Memory is an additive context lane, never a gate in front of the work."
   ) in prompt
-  assert "A technically detailed request can still warrant recall" in prompt
+  assert (
+    "begin every independent investigation as if Memory were unavailable"
+  ) in prompt
+  assert (
+    "A technically detailed or fully specified request can still warrant recall"
+  ) in prompt
   assert "Complexity alone is not a cue." in prompt
   assert "owning sources establish what is true now and what happened" in prompt
-  assert "For any current-state or exact-history question" in prompt
+  assert "A separate Memory lookup may run in parallel" in prompt
+  assert "mention the concrete mismatch in the visible conversation" in prompt
   assert "Never infer an exact requirement from a broader memory" in prompt
 
 
