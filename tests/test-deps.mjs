@@ -24,6 +24,7 @@ function candidateNodeModules() {
   while (true) {
     candidates.push(join(dir, 'frontend', 'node_modules'))
     candidates.push(join(dir, 'mobius', 'frontend', 'node_modules'))
+    candidates.push(join(dir, 'platform', 'frontend', 'node_modules'))
     const parent = dirname(dir)
     if (parent === dir) break
     dir = parent
@@ -43,7 +44,7 @@ export function findFrontendNodeModules() {
   }
   throw new Error(
     'Could not find frontend test dependencies (rolldown, react). Run npm ci '
-      + 'in mobius/frontend or set MOBIUS_FRONTEND_NODE_MODULES.',
+      + 'in the Möbius frontend or set MOBIUS_FRONTEND_NODE_MODULES.',
   )
 }
 
