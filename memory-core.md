@@ -4,12 +4,16 @@ Memory is an Obsidian-style graph of durable facts. Its graph is never injected
 into a chat automatically. Recent chat Digests are separate from Memory and do
 not count as a Memory lookup.
 
-Use Memory selectively but decisively for durable context about the partner:
-preferences, constraints, people, goals, device or accessibility habits,
-recurring projects, stable decisions, and working style.
+Use Memory selectively but decisively when durable context could materially
+improve the work: preferences, constraints, people, goals, device or
+accessibility habits, recurring projects, stable decisions, prior user impact,
+and working style. Memory is an additive context lane, never a gate in front of
+the work.
 
-Search early when missing durable partner context could materially change the
-answer or approach. Common cues are:
+Launch one focused lookup early when missing that context could materially
+change priorities, tradeoffs, risk assessment, or the answer. At the same time,
+begin every independent investigation as if Memory were unavailable; do not
+wait for recall before reading the owning sources. Common cues are:
 
 - continuity language such as “again”, “restore”, or “like before”;
 - a request that depends on the partner's setup, habits, accessibility, people,
@@ -17,12 +21,11 @@ answer or approach. Common cues are:
 - an underdetermined design, architecture, or interaction choice where an
   established preference could rule out plausible options.
 
-A technically detailed request can still warrant recall when one of those cues
-is present. Skip when the current conversation already supplies the relevant
-context, or the task is self-contained and its desired outcome is fully
-specified. Complexity alone is not a cue. When recall is warranted, run one
-focused lookup and repeat only when a materially different subproblem needs
-different context.
+A technically detailed or fully specified request can still warrant recall
+when one of those cues is present. Skip when the current conversation already
+supplies the relevant durable context, or the task is self-contained and its
+desired outcome is fully specified. Complexity alone is not a cue. Repeat a
+lookup only when a materially different subproblem needs different context.
 
 For technical work, Memory helps determine what may matter to the partner;
 owning sources establish what is true now and what happened. Use recall to
@@ -30,15 +33,18 @@ prioritize investigation, preserve established preferences and interaction
 invariants, or decide whether to ask a clarifying question. Verify current
 state and exact history through chat records, source, Git, tests, contribution
 records, logs, APIs, or current documentation as appropriate. When sources
-disagree, direct evidence is authoritative. Never infer an exact requirement
-from a broader memory; ask rather than inventing it.
+disagree, follow the direct evidence and mention the concrete mismatch in the
+visible conversation so later Memory maintenance can correct or supersede the
+stale claim. Never infer an exact requirement from a broader memory; ask rather
+than inventing it.
 
-For any current-state or exact-history question, use the owning source and skip
-Memory. Do not use it to locate or summarize chats, reconstruct implementation
-history, inspect source code, or establish current app, contribution,
-operational, or analytics state. Recall is relevant only for a distinct
-personalized recommendation, design, or decision that genuinely needs durable
-partner context.
+Choose authority per subproblem. Investigate current state, exact history,
+source code, records, transactions, and operational facts through their owning
+sources whether or not recall is running. A separate Memory lookup may run in
+parallel for the personalized part of the same request. Never use Memory to
+locate chats or establish current app, contribution, operational, or analytics
+state; use it to inform the work, then verify changing facts through their
+owner.
 
 Formulate a focused retrieval prompt describing the durable partner context
 needed and why, anchored to relevant people, projects, or apps. Never request
@@ -67,12 +73,12 @@ slug.
 Run `memory_search.py` as its own exact exec invocation. Do not combine its
 command with `cd`, pipes, redirects, or other shell operations: the platform
 recognizes that confined shape to record a verified Memory read and its cited
-files. This isolation describes the command shape, not the schedule. When
-independent investigation is also useful, dispatch the Memory invocation
-concurrently with those other tool calls instead of waiting for it first. Join
-the result before the final recommendation only when it could change that
-recommendation. Run it serially only when the recall determines what to inspect
-or there is no independent work to begin.
+files. This isolation describes the command shape, not the schedule. Dispatch
+the Memory invocation in parallel with independent source reads, searches, or
+diagnostics; keep investigating without it, then join the result before the
+first material recommendation, design commitment, or final answer it could
+inform. Run it serially only when recall determines what to inspect or there is
+no independent work to begin.
 
 The navigator distinguishes routing from retrieval: a broad parent can be
 opened to reach a detailed child without being selected. The lookup returns the

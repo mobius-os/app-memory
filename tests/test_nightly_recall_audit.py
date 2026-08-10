@@ -765,11 +765,12 @@ def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
   (tmp_path / "notes").mkdir()
   (tmp_path / "mocs").mkdir()
   (tmp_path / "index.md").write_text(
-    "---\ntype: moc\ntitle: Memory\n---\n[[owned]]\n[[writer-owned]]\n",
+    "---\ntype: moc\ntitle: Memory\n---\n"
+    "[[maintaining-memory]]\n[[writer-owned]]\n",
     encoding="utf-8",
   )
   long_body = "\n".join(f"line {index}" for index in range(31))
-  (tmp_path / "notes" / "owned.md").write_text(
+  (tmp_path / "mocs" / "maintaining-memory.md").write_text(
     "---\ntype: note\ntitle: Owned\nmanaged_by: memory\n---\n" + long_body,
     encoding="utf-8",
   )
@@ -784,13 +785,16 @@ def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
   diagnostics = memory_runner._maintenance_diagnostics(tmp_path)
   flags = memory_runner._maintenance_flags(tmp_path)
 
-  owned = [item for item in diagnostics if item["path"] == "notes/owned.md"]
+  owned = [
+    item for item in diagnostics
+    if item["path"] == "mocs/maintaining-memory.md"
+  ]
   assert owned == [{
     "code": "graph.oversized_note",
     "kind": "oversized_note",
     "severity": "warning",
-    "node": "owned",
-    "path": "notes/owned.md",
+    "node": "maintaining-memory",
+    "path": "mocs/maintaining-memory.md",
     "owner": "memory",
     "actionable_by_writer": False,
     "lines": 31,
@@ -1230,7 +1234,13 @@ def test_run_reaches_consolidation_with_a_bounded_recall_audit_batch(
     "publish",
     lambda _staging: {"commit": "next", "changed": True},
   )
-  monkeypatch.setattr(memory_runner, "_acknowledge_pending_chats", lambda _items: None)
+  monkeypatch.setattr(
+    memory_runner,
+    "_acknowledge_pending_chats",
+    lambda _items: memory_runner.QueueAcknowledgement(
+      write_ok=True, before_count=0, removed_count=0, remaining_count=0,
+    ),
+  )
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
   )
@@ -1260,6 +1270,15 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
   published = []
   statuses = []
   graph = {"nodes": [], "edges": [], "problems": []}
+
+  def acknowledge(selected):
+    acknowledged.extend(chat["id"] for chat in selected)
+    return memory_runner.QueueAcknowledgement(
+      write_ok=True,
+      before_count=len(selected),
+      removed_count=len(selected),
+      remaining_count=0,
+    )
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
@@ -1321,7 +1340,7 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
   monkeypatch.setattr(
     memory_runner,
     "_acknowledge_pending_chats",
-    lambda selected: acknowledged.extend(chat["id"] for chat in selected),
+    acknowledge,
   )
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
@@ -1358,6 +1377,15 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   statuses = []
   graph = {"nodes": [], "edges": [], "problems": []}
   apply_count = 0
+
+  def acknowledge(selected):
+    acknowledged.extend(chat["id"] for chat in selected)
+    return memory_runner.QueueAcknowledgement(
+      write_ok=True,
+      before_count=len(selected),
+      removed_count=len(selected),
+      remaining_count=0,
+    )
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
@@ -1430,7 +1458,7 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   monkeypatch.setattr(
     memory_runner,
     "_acknowledge_pending_chats",
-    lambda selected: acknowledged.extend(chat["id"] for chat in selected),
+    acknowledge,
   )
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
@@ -1713,6 +1741,109 @@ def test_prompt_budget_preserves_routes_and_trims_note_bodies_before_chat(
   assert len(encoded) <= 1400
 
 
+def test_note_body_ranking_uses_bounded_chat_and_compact_metadata():
+  graph = [
+    {
+      "path": "notes/coffee.md", "title": "Coffee preferences",
+      "description": "Espresso workflow and grinder constraints",
+    },
+    {
+      "path": "notes/deploy.md", "title": "Deploy notes",
+      "description": "Server rollout history",
+    },
+  ]
+  bodies = [
+    {"path": "notes/deploy.md", "content": "deployment body"},
+    {"path": "notes/coffee.md", "content": "coffee body"},
+  ]
+  chats = [{
+    "id": "chat-one",
+    "title": "Dialing in espresso",
+    "messages": [{"role": "user", "text": "Remember my grinder constraints"}],
+    # Raw fields outside the bounded chat must not skew relevance.
+    "tool_dump": "deploy server rollout " * 100,
+  }]
+
+  ranked = memory_runner._rank_note_contents(graph, bodies, chats)
+
+  assert [item["path"] for item in ranked] == [
+    "notes/coffee.md", "notes/deploy.md",
+  ]
+
+
+def test_note_body_ranking_has_deterministic_path_tiebreaker():
+  bodies = [
+    {"path": "notes/zeta.md", "content": "z"},
+    {"path": "notes/alpha.md", "content": "a"},
+  ]
+  assert [
+    item["path"]
+    for item in memory_runner._rank_note_contents([], bodies, [])
+  ] == ["notes/alpha.md", "notes/zeta.md"]
+
+
+def test_ranked_note_bodies_yield_to_a_chat_at_the_prompt_boundary(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(memory_runner, "_MAX_PROMPT_DATA_CHARS", 1500)
+  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
+  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [
+    {
+      "id": "index", "path": "index.md", "title": "Memory",
+      "description": "Root", "content": "r" * 80,
+      "content_complete": True,
+    },
+    *[
+      {
+        "id": f"note-{index}", "path": f"notes/note-{index}.md",
+        "title": "Espresso grinder" if index == 0 else f"Other {index}",
+        "description": "Coffee constraint" if index == 0 else "Unrelated",
+        "content": "n" * 130, "content_complete": True,
+      }
+      for index in range(4)
+    ],
+  ])
+  chats = [{
+    "id": "chat-one",
+    "title": "Espresso",
+    "messages": [{
+      "role": "user", "text": "Remember my coffee grinder constraint",
+    }],
+  }]
+
+  encoded, included = memory_runner._proposal_envelope(tmp_path, chats, [])
+  payload = json.loads(encoded)
+
+  assert included == chats
+  assert 0 < len(payload["existing_note_contents"]) < 4
+  assert payload["existing_note_contents"][0]["path"] == "notes/note-0.md"
+
+
+def test_recall_stats_migration_compacts_without_new_audits(
+  monkeypatch, tmp_path,
+):
+  target = tmp_path / "recall-stats.json"
+  target.write_text(json.dumps({
+    "schema": 3,
+    "reads_audited": 1,
+    "recent": [{
+      "schema": 3,
+      "read_id": "read-one",
+      "at": "2026-08-01T00:00:00+00:00",
+      "outcome": "hit",
+      "live_frontier_at_stop": [{"large": "payload"}],
+    }],
+  }))
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", target)
+
+  assert memory_runner._migrate_recall_stats() is True
+  migrated = json.loads(target.read_text())
+  assert migrated["reads_audited"] == 1
+  assert migrated["recent"][0]["read_id"] == "read-one"
+  assert "live_frontier_at_stop" not in migrated["recent"][0]
+  assert memory_runner._migrate_recall_stats() is False
+
+
 def test_graph_catalog_never_silently_truncates_large_graphs(tmp_path):
   nodes = [
     {
@@ -1741,20 +1872,28 @@ def test_memory_prompt_keeps_lookup_invocation_isolated():
   assert "own exact exec invocation" in prompt
   assert "pipes, redirects, or other shell operations" in prompt
   assert "isolation describes the command shape, not the schedule" in prompt
-  assert "concurrently with those other tool calls" in prompt
+  assert "Dispatch the Memory invocation in parallel" in prompt
 
 
 def test_memory_prompt_balances_recall_with_direct_evidence():
   prompt = MEMORY_CORE_PROMPT
 
   assert (
-    "Search early when missing durable partner context could materially change "
-    "the answer or approach."
+    "Memory is an additive context lane, never a gate in front of the work."
   ) in prompt
-  assert "A technically detailed request can still warrant recall" in prompt
+  assert "could materially improve the work" in prompt
+  assert (
+    "begin every independent investigation as if Memory were unavailable"
+  ) in prompt
+  assert (
+    "A technically detailed or fully specified request can still warrant recall "
+    "when one of those cues is present."
+  ) in prompt
+  assert "the task is self-contained and its desired outcome is fully specified" in prompt
   assert "Complexity alone is not a cue." in prompt
   assert "owning sources establish what is true now and what happened" in prompt
-  assert "For any current-state or exact-history question" in prompt
+  assert "A separate Memory lookup may run in parallel" in prompt
+  assert "mention the concrete mismatch in the visible conversation" in prompt
   assert "Never infer an exact requirement from a broader memory" in prompt
 
 
