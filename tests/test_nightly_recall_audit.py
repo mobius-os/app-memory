@@ -373,6 +373,40 @@ def test_pending_chat_queue_preserves_more_than_the_old_fixed_window(
   assert memory_runner._load_pending_chat_ids() == ids
 
 
+def test_chat_intake_processes_the_pending_queue_in_order(monkeypatch, tmp_path):
+  pending = tmp_path / "pending-chat-ids.json"
+  pending.write_text(json.dumps({
+    "schema": 1,
+    "chat_ids": ["waiting-one", "waiting-two", "newly-discovered"],
+  }))
+  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
+  monkeypatch.setattr(
+    memory_runner,
+    "_discover_chat_ids",
+    lambda: (["newly-discovered"], True, True),
+  )
+  requested = []
+
+  def api(path):
+    chat_id = urllib.parse.unquote(
+      urllib.parse.urlsplit(path).path.rsplit("/", 1)[-1],
+    )
+    requested.append(chat_id)
+    return memory_runner.ApiResult({
+      "id": chat_id,
+      "title": chat_id,
+      "updated_at": "2026-08-10T00:00:00Z",
+      "messages": [{"role": "user", "text": chat_id}],
+    }, 200)
+
+  monkeypatch.setattr(memory_runner, "_api_result", api)
+
+  intake = memory_runner._collect_chat_intake(limit=2)
+
+  assert requested == ["waiting-one", "waiting-two"]
+  assert [chat["id"] for chat in intake.chats] == requested
+
+
 def test_deleted_chat_prompt_uses_non_linking_provenance(tmp_path):
   chat = {
     "id": "deleted-chat-id",
