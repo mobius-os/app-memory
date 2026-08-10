@@ -560,10 +560,26 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._remember_pending_chat_ids([chat["id"] for chat in chats])
 
       offered = runner._proposal_batch(staging, chats)
-      runner._acknowledge_pending_chats(offered)
+      outcome = runner._acknowledge_pending_chats(offered)
 
       self.assertEqual([chat["id"] for chat in offered], ["first"])
       self.assertEqual(runner._load_pending_chat_ids(), ["second"])
+      self.assertTrue(outcome.write_ok)
+      self.assertEqual(outcome.removed_count, 1)
+      self.assertEqual(outcome.remaining_count, 1)
+
+  def test_failed_queue_write_never_reports_acknowledged_chats(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, runner = _load(Path(raw))
+      runner._remember_pending_chat_ids(["first", "second"])
+      runner._write_pending_chat_ids = lambda *_args, **_kwargs: False
+
+      outcome = runner._acknowledge_pending_chats([{"id": "first"}])
+
+      self.assertFalse(outcome.write_ok)
+      self.assertEqual(outcome.removed_count, 0)
+      self.assertEqual(outcome.remaining_count, 2)
+      self.assertEqual(runner._load_pending_chat_ids(), ["first", "second"])
 
 
 

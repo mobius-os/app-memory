@@ -107,6 +107,10 @@ _MAX_SOURCE_CHATS = 100
 # scheduled window before chat consolidation starts. Oldest-first cursor
 # advancement below makes this durable progress, not sampling or dropping.
 _MAX_READ_AUDITS_PER_RUN = 24
+_RECENT_AUDIT_KEYS = (
+  "schema", "run_id", "read_id", "at", "question_sha256", "outcome",
+  "overreach", "miss_class", "reason", "host_selection_override",
+)
 # Audit evidence and chat summaries compete for the same model context but
 # have independent backlogs. Give each lane its own bounded proposal budget so
 # a busy recall day cannot starve chat consolidation (or vice versa).
@@ -186,6 +190,16 @@ class ChatIntake:
   discovery_complete: bool = True
   queue_write_ok: bool = True
   pending_count: int = 0
+  pending_before_ack_count: int = 0
+  acknowledged_count: int = 0
+
+
+@dataclass(frozen=True)
+class QueueAcknowledgement:
+  write_ok: bool
+  before_count: int
+  removed_count: int
+  remaining_count: int
 
 
 class ProposalValidationError(ValueError):
@@ -617,6 +631,27 @@ def _recall_stats() -> dict:
   return value if isinstance(value, dict) else {}
 
 
+def _compact_recent_audits(records: list[dict]) -> list[dict]:
+  return [
+    {key: item[key] for key in _RECENT_AUDIT_KEYS if key in item}
+    for item in records[-50:]
+    if isinstance(item, dict)
+  ]
+
+
+def _migrate_recall_stats() -> bool:
+  """Compact legacy hot-status records; full evidence remains in JSONL logs."""
+  stats = _recall_stats()
+  recent = stats.get("recent")
+  if not isinstance(recent, list):
+    return False
+  compact = _compact_recent_audits(recent)
+  if compact == recent:
+    return False
+  _write_json_atomic(_RECALL_STATS, {**stats, "recent": compact})
+  return True
+
+
 def _pending_read_traces() -> list[dict]:
   """Return every completed live read after the last successful audit."""
   cursor = str(_recall_stats().get("last_audited_at") or "")
@@ -953,6 +988,7 @@ def _collect_chat_intake(limit: int = _MAX_SOURCE_CHATS) -> ChatIntake:
     queue_ok = _discard_pending_chat_ids(discard) and queue_ok
   if empty:
     _log(f"discarded empty pending chat records count={len(empty)}")
+  remaining_pending = _load_pending_chat_ids()
   return ChatIntake(
     chats=chats,
     discovered_count=len(discovered),
@@ -961,7 +997,8 @@ def _collect_chat_intake(limit: int = _MAX_SOURCE_CHATS) -> ChatIntake:
     detail_failure_count=detail_failures,
     discovery_complete=discovery_complete,
     queue_write_ok=queue_ok,
-    pending_count=len(_load_pending_chat_ids()),
+    pending_count=len(remaining_pending),
+    pending_before_ack_count=len(remaining_pending),
   )
 
 
@@ -1044,16 +1081,23 @@ def _discard_pending_chat_ids(chat_ids: list[str]) -> bool:
   )
 
 
-def _acknowledge_pending_chats(chats: list[dict]) -> bool:
+def _acknowledge_pending_chats(chats: list[dict]) -> QueueAcknowledgement:
   """Remove only chats actually offered to a successful analyst run."""
   processed = {
     chat.get("id") for chat in chats
     if isinstance(chat, dict) and isinstance(chat.get("id"), str)
   }
-  remaining = [chat_id for chat_id in _load_pending_chat_ids() if chat_id not in processed]
-  return _write_pending_chat_ids(
+  before = _load_pending_chat_ids()
+  remaining = [chat_id for chat_id in before if chat_id not in processed]
+  write_ok = _write_pending_chat_ids(
     remaining,
     warning="published graph but could not acknowledge pending chat ids",
+  )
+  return QueueAcknowledgement(
+    write_ok=write_ok,
+    before_count=len(before),
+    removed_count=len(before) - len(remaining) if write_ok else 0,
+    remaining_count=len(remaining) if write_ok else len(before),
   )
 
 
@@ -1116,6 +1160,53 @@ def _graph_prompt_context(staging: Path) -> tuple[list[dict], list[dict]]:
   return required, note_contents
 
 
+_RELEVANCE_TERM_RE = re.compile(r"[a-z0-9]{4,}")
+
+
+def _relevance_terms(value: str) -> set[str]:
+  return set(_RELEVANCE_TERM_RE.findall(value.lower()))
+
+
+def _rank_note_contents(
+  required_graph: list[dict],
+  note_contents: list[dict],
+  chats: list[dict],
+) -> list[dict]:
+  """Rank editable bodies from bounded chat text and compact note metadata."""
+  bounded = []
+  for chat in chats:
+    item = _bounded_chat(chat)
+    if item is not None:
+      bounded.append(item)
+  query_text = " ".join(
+    [str(chat.get("title") or "") for chat in bounded]
+    + [
+      str(message.get("text") or "")
+      for chat in bounded
+      for message in chat.get("messages", [])
+      if isinstance(message, dict)
+    ]
+  )
+  query_terms = _relevance_terms(query_text)
+  metadata = {
+    str(item.get("path") or ""): " ".join(
+      str(item.get(key) or "")
+      for key in ("title", "description", "path")
+    )
+    for item in required_graph
+    if isinstance(item, dict)
+  }
+  return sorted(
+    note_contents,
+    key=lambda item: (
+      -len(query_terms & _relevance_terms(
+        metadata.get(str(item.get("path") or ""), ""),
+      )),
+      str(item.get("path") or ""),
+    ),
+  )
+
+
 def _graph_context_scale(staging: Path) -> dict[str, int]:
   required, note_contents = _graph_prompt_context(staging)
   return {
@@ -1146,6 +1237,8 @@ def _typed_maintenance_diagnostics(graph: dict) -> list[dict]:
     path = str(node.get("path") or "")[:240]
     owner = str(node.get("managed_by") or "memory-writer")[:80]
     kind = str(problem.get("kind") or "unknown")[:64]
+    if kind == "oversized_note" and path in _MANAGED_DOCS:
+      continue
     code = f"graph.{kind}"
     key = (code, path, owner)
     if key in seen:
@@ -1428,6 +1521,7 @@ def _proposal_envelope(
 ) -> tuple[str, list[dict]]:
   """Encode the prompt envelope and return the exact chats it contains."""
   required_graph, note_contents = _graph_prompt_context(staging)
+  note_contents = _rank_note_contents(required_graph, note_contents, chats)
   incomplete_routes = [
     item.get("path") for item in required_graph
     if (
@@ -2460,7 +2554,9 @@ def _record_recall_audits(
     "graph_edges": len(graph.get("edges") or []),
     "live_policy": {"selection": "one_pass", "depth": live_policy},
     "night_policy": {"breadth": night_policy[0], "depth": night_policy[1]},
-    "recent": (recent + records)[-50:],
+    # Full traversal/frontier evidence is append-only in recall-audit/*.jsonl.
+    # The hot status file keeps only bounded verdicts used by dashboards.
+    "recent": _compact_recent_audits(recent + records),
   }
   log = STATE / "recall-audit" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
   log.parent.mkdir(parents=True, exist_ok=True)
@@ -2563,6 +2659,11 @@ def _chat_intake_status(intake: ChatIntake) -> dict:
     "chat_discovery_complete": intake.discovery_complete,
     "chat_queue_write_ok": intake.queue_write_ok,
     "pending_chat_count": intake.pending_count,
+    "chat_queue_progress": {
+      "pending_before_ack": intake.pending_before_ack_count,
+      "acknowledged": intake.acknowledged_count,
+      "remaining": intake.pending_count,
+    },
   }
 
 
@@ -2766,6 +2867,11 @@ async def run() -> int:
       "previous_commit": run_previous_commit,
       "commit": run_previous_commit,
     })
+    try:
+      if _migrate_recall_stats():
+        _log("compacted legacy recall hot-status records")
+    except OSError as exc:
+      _log(f"WARN recall stats compaction failed: {exc!r}")
     baseline = build_graph(staging, usage=load_usage())
     changed, deleted = _reconcile_app_owned_docs(staging, SEED_DIR)
     # Build once so the analyst receives a catalog even on first legacy import.
@@ -2995,11 +3101,13 @@ async def run() -> int:
       # degradation, not grounds to misreport graph publication as failed.
       profile_status = {"status": "unavailable", "error": type(exc).__name__}
       _log(f"WARN personalization profile refresh failed: {exc!r}")
-    acknowledged = _acknowledge_pending_chats(proposal_chats)
+    acknowledgement = _acknowledge_pending_chats(proposal_chats)
     intake = replace(
       intake,
-      queue_write_ok=intake.queue_write_ok and acknowledged,
-      pending_count=len(_load_pending_chat_ids()),
+      queue_write_ok=intake.queue_write_ok and acknowledgement.write_ok,
+      pending_before_ack_count=acknowledgement.before_count,
+      pending_count=acknowledgement.remaining_count,
+      acknowledged_count=acknowledgement.removed_count,
     )
     status = {
       "schema": 1,

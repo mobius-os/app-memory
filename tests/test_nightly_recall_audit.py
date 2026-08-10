@@ -1230,7 +1230,13 @@ def test_run_reaches_consolidation_with_a_bounded_recall_audit_batch(
     "publish",
     lambda _staging: {"commit": "next", "changed": True},
   )
-  monkeypatch.setattr(memory_runner, "_acknowledge_pending_chats", lambda _items: None)
+  monkeypatch.setattr(
+    memory_runner,
+    "_acknowledge_pending_chats",
+    lambda _items: memory_runner.QueueAcknowledgement(
+      write_ok=True, before_count=0, removed_count=0, remaining_count=0,
+    ),
+  )
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
   )
@@ -1260,6 +1266,15 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
   published = []
   statuses = []
   graph = {"nodes": [], "edges": [], "problems": []}
+
+  def acknowledge(selected):
+    acknowledged.extend(chat["id"] for chat in selected)
+    return memory_runner.QueueAcknowledgement(
+      write_ok=True,
+      before_count=len(selected),
+      removed_count=len(selected),
+      remaining_count=0,
+    )
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
@@ -1321,7 +1336,7 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
   monkeypatch.setattr(
     memory_runner,
     "_acknowledge_pending_chats",
-    lambda selected: acknowledged.extend(chat["id"] for chat in selected),
+    acknowledge,
   )
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
@@ -1358,6 +1373,15 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   statuses = []
   graph = {"nodes": [], "edges": [], "problems": []}
   apply_count = 0
+
+  def acknowledge(selected):
+    acknowledged.extend(chat["id"] for chat in selected)
+    return memory_runner.QueueAcknowledgement(
+      write_ok=True,
+      before_count=len(selected),
+      removed_count=len(selected),
+      remaining_count=0,
+    )
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
@@ -1430,7 +1454,7 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   monkeypatch.setattr(
     memory_runner,
     "_acknowledge_pending_chats",
-    lambda selected: acknowledged.extend(chat["id"] for chat in selected),
+    acknowledge,
   )
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
@@ -1711,6 +1735,109 @@ def test_prompt_budget_preserves_routes_and_trims_note_bodies_before_chat(
   )
   assert len(payload["existing_note_contents"]) < 3
   assert len(encoded) <= 1400
+
+
+def test_note_body_ranking_uses_bounded_chat_and_compact_metadata():
+  graph = [
+    {
+      "path": "notes/coffee.md", "title": "Coffee preferences",
+      "description": "Espresso workflow and grinder constraints",
+    },
+    {
+      "path": "notes/deploy.md", "title": "Deploy notes",
+      "description": "Server rollout history",
+    },
+  ]
+  bodies = [
+    {"path": "notes/deploy.md", "content": "deployment body"},
+    {"path": "notes/coffee.md", "content": "coffee body"},
+  ]
+  chats = [{
+    "id": "chat-one",
+    "title": "Dialing in espresso",
+    "messages": [{"role": "user", "text": "Remember my grinder constraints"}],
+    # Raw fields outside the bounded chat must not skew relevance.
+    "tool_dump": "deploy server rollout " * 100,
+  }]
+
+  ranked = memory_runner._rank_note_contents(graph, bodies, chats)
+
+  assert [item["path"] for item in ranked] == [
+    "notes/coffee.md", "notes/deploy.md",
+  ]
+
+
+def test_note_body_ranking_has_deterministic_path_tiebreaker():
+  bodies = [
+    {"path": "notes/zeta.md", "content": "z"},
+    {"path": "notes/alpha.md", "content": "a"},
+  ]
+  assert [
+    item["path"]
+    for item in memory_runner._rank_note_contents([], bodies, [])
+  ] == ["notes/alpha.md", "notes/zeta.md"]
+
+
+def test_ranked_note_bodies_yield_to_a_chat_at_the_prompt_boundary(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(memory_runner, "_MAX_PROMPT_DATA_CHARS", 1500)
+  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
+  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [
+    {
+      "id": "index", "path": "index.md", "title": "Memory",
+      "description": "Root", "content": "r" * 80,
+      "content_complete": True,
+    },
+    *[
+      {
+        "id": f"note-{index}", "path": f"notes/note-{index}.md",
+        "title": "Espresso grinder" if index == 0 else f"Other {index}",
+        "description": "Coffee constraint" if index == 0 else "Unrelated",
+        "content": "n" * 130, "content_complete": True,
+      }
+      for index in range(4)
+    ],
+  ])
+  chats = [{
+    "id": "chat-one",
+    "title": "Espresso",
+    "messages": [{
+      "role": "user", "text": "Remember my coffee grinder constraint",
+    }],
+  }]
+
+  encoded, included = memory_runner._proposal_envelope(tmp_path, chats, [])
+  payload = json.loads(encoded)
+
+  assert included == chats
+  assert 0 < len(payload["existing_note_contents"]) < 4
+  assert payload["existing_note_contents"][0]["path"] == "notes/note-0.md"
+
+
+def test_recall_stats_migration_compacts_without_new_audits(
+  monkeypatch, tmp_path,
+):
+  target = tmp_path / "recall-stats.json"
+  target.write_text(json.dumps({
+    "schema": 3,
+    "reads_audited": 1,
+    "recent": [{
+      "schema": 3,
+      "read_id": "read-one",
+      "at": "2026-08-01T00:00:00+00:00",
+      "outcome": "hit",
+      "live_frontier_at_stop": [{"large": "payload"}],
+    }],
+  }))
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", target)
+
+  assert memory_runner._migrate_recall_stats() is True
+  migrated = json.loads(target.read_text())
+  assert migrated["reads_audited"] == 1
+  assert migrated["recent"][0]["read_id"] == "read-one"
+  assert "live_frontier_at_stop" not in migrated["recent"][0]
+  assert memory_runner._migrate_recall_stats() is False
 
 
 def test_graph_catalog_never_silently_truncates_large_graphs(tmp_path):
