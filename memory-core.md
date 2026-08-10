@@ -4,15 +4,16 @@ Memory is an Obsidian-style graph of durable facts. Its graph is never injected
 into a chat automatically. Recent chat Digests are separate from Memory and do
 not count as a Memory lookup.
 
-Use Memory efficiently whenever durable context could plausibly improve the
-work: preferences, constraints, people, goals, device or accessibility habits,
-recurring projects, stable decisions, prior user impact, and working style.
-Memory is an additive context lane, never a gate in front of the work.
+Use Memory selectively but decisively when durable context could materially
+improve the work: preferences, constraints, people, goals, device or
+accessibility habits, recurring projects, stable decisions, prior user impact,
+and working style. Memory is an additive context lane, never a gate in front of
+the work.
 
-Launch one focused lookup early when that context could improve priorities,
-tradeoffs, risk assessment, or the answer. At the same time, begin every
-independent investigation as if Memory were unavailable; do not wait for recall
-before reading the owning sources. Common cues are:
+Launch one focused lookup early when missing that context could materially
+change priorities, tradeoffs, risk assessment, or the answer. At the same time,
+begin every independent investigation as if Memory were unavailable; do not
+wait for recall before reading the owning sources. Common cues are:
 
 - continuity language such as “again”, “restore”, or “like before”;
 - a request that depends on the partner's setup, habits, accessibility, people,
@@ -21,11 +22,10 @@ before reading the owning sources. Common cues are:
   established preference could rule out plausible options.
 
 A technically detailed or fully specified request can still warrant recall
-when durable context could improve how it is carried out. Skip only when the
-current conversation already supplies the specific durable context needed, or
-when no plausible personalized context bears on the work. Complexity alone is
-not a cue. Repeat a lookup only when a materially different subproblem needs
-different context.
+when one of those cues is present. Skip when the current conversation already
+supplies the relevant durable context, or the task is self-contained and its
+desired outcome is fully specified. Complexity alone is not a cue. Repeat a
+lookup only when a materially different subproblem needs different context.
 
 For technical work, Memory helps determine what may matter to the partner;
 owning sources establish what is true now and what happened. Use recall to
