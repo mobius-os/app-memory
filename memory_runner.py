@@ -1237,8 +1237,6 @@ def _typed_maintenance_diagnostics(graph: dict) -> list[dict]:
     path = str(node.get("path") or "")[:240]
     owner = str(node.get("managed_by") or "memory-writer")[:80]
     kind = str(problem.get("kind") or "unknown")[:64]
-    if kind == "oversized_note" and path in _MANAGED_DOCS:
-      continue
     code = f"graph.{kind}"
     key = (code, path, owner)
     if key in seen:

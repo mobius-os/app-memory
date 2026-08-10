@@ -765,11 +765,12 @@ def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
   (tmp_path / "notes").mkdir()
   (tmp_path / "mocs").mkdir()
   (tmp_path / "index.md").write_text(
-    "---\ntype: moc\ntitle: Memory\n---\n[[owned]]\n[[writer-owned]]\n",
+    "---\ntype: moc\ntitle: Memory\n---\n"
+    "[[maintaining-memory]]\n[[writer-owned]]\n",
     encoding="utf-8",
   )
   long_body = "\n".join(f"line {index}" for index in range(31))
-  (tmp_path / "notes" / "owned.md").write_text(
+  (tmp_path / "mocs" / "maintaining-memory.md").write_text(
     "---\ntype: note\ntitle: Owned\nmanaged_by: memory\n---\n" + long_body,
     encoding="utf-8",
   )
@@ -784,13 +785,16 @@ def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
   diagnostics = memory_runner._maintenance_diagnostics(tmp_path)
   flags = memory_runner._maintenance_flags(tmp_path)
 
-  owned = [item for item in diagnostics if item["path"] == "notes/owned.md"]
+  owned = [
+    item for item in diagnostics
+    if item["path"] == "mocs/maintaining-memory.md"
+  ]
   assert owned == [{
     "code": "graph.oversized_note",
     "kind": "oversized_note",
     "severity": "warning",
-    "node": "owned",
-    "path": "notes/owned.md",
+    "node": "maintaining-memory",
+    "path": "mocs/maintaining-memory.md",
     "owner": "memory",
     "actionable_by_writer": False,
     "lines": 31,
