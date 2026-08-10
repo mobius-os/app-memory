@@ -15,9 +15,6 @@ function candidateNodeModules() {
     ...pathEntries(process.env.MOBIUS_FRONTEND_NODE_MODULES),
     ...pathEntries(process.env.NODE_PATH),
     join(appRoot, 'node_modules'),
-    join(appRoot, '..', '..', 'frontend', 'node_modules'),
-    join(appRoot, '..', '..', 'mobius', 'frontend', 'node_modules'),
-    join(appRoot, '..', 'mobius', 'frontend', 'node_modules'),
   ]
 
   let dir = appRoot
