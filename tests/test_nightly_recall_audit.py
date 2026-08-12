@@ -164,7 +164,7 @@ def test_chat_discovery_pages_to_the_durable_marker(monkeypatch, tmp_path):
 
   ids, complete, queue_ok = memory_runner._discover_chat_ids()
 
-  assert ids == ["new-2", "new-1"]
+  assert ids == ["new-1", "new-2"]
   assert complete is queue_ok is True
   assert len(calls) == 2
   assert all(
@@ -174,11 +174,46 @@ def test_chat_discovery_pages_to_the_durable_marker(monkeypatch, tmp_path):
     for call in calls
   )
   assert memory_runner._load_pending_chat_ids() == [
-    "backlog", "new-2", "new-1",
+    "backlog", "new-1", "new-2",
   ]
   assert json.loads(discovery.read_text())["newest"] == {
     "recency_at": "2026-07-30T02:00:00", "id": "new-2",
   }
+
+
+def test_fresh_discovery_queues_descending_pages_oldest_first(monkeypatch, tmp_path):
+  state = tmp_path / "app-state"
+  state.mkdir()
+  pending = state / "pending.json"
+  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
+  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", state / "discovery.json")
+
+  def api(path):
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+    if "before_id" not in query:
+      return memory_runner.ApiResult({
+        "items": [
+          {"id": "newest", "recency_at": "2026-07-30T03:00:00"},
+          {"id": "middle", "recency_at": "2026-07-30T02:00:00"},
+        ],
+        "next_before": {
+          "recency_at": "2026-07-30T02:00:00", "id": "middle",
+        },
+      }, 200)
+    return memory_runner.ApiResult({
+      "items": [
+        {"id": "oldest", "recency_at": "2026-07-30T01:00:00"},
+      ],
+      "next_before": None,
+    }, 200)
+
+  monkeypatch.setattr(memory_runner, "_api_result", api)
+
+  ids, complete, queue_ok = memory_runner._discover_chat_ids()
+
+  assert complete is queue_ok is True
+  assert ids == ["oldest", "middle", "newest"]
+  assert memory_runner._load_pending_chat_ids() == ids
 
 
 def test_chat_discovery_uses_ordered_watermark_and_skips_empty_rows(
@@ -224,10 +259,10 @@ def test_chat_discovery_uses_ordered_watermark_and_skips_empty_rows(
 
   ids, complete, queue_ok = memory_runner._discover_chat_ids()
 
-  assert ids == ["moved", "new"]
+  assert ids == ["new", "moved"]
   assert complete is queue_ok is True
   assert len(calls) == 1
-  assert memory_runner._load_pending_chat_ids() == ["moved", "new"]
+  assert memory_runner._load_pending_chat_ids() == ["new", "moved"]
   assert json.loads(discovery.read_text())["newest"] == {
     "recency_at": "2026-07-30T03:00:00", "id": "moved",
   }

@@ -948,7 +948,10 @@ def _discover_chat_ids() -> tuple[list[str], bool, bool]:
     page_keys.add(page_key)
     before = {"recency_at": page_key[0], "id": page_key[1]}
 
-  discovered = list(dict.fromkeys(discovered))
+  # The API is newest-first so keyset pagination can stop at the durable
+  # watermark. The pending queue is FIFO, however: reverse this completed
+  # discovery window before appending it behind work already waiting.
+  discovered = list(reversed(list(dict.fromkeys(discovered))))
   queue_ok = _remember_pending_chat_ids(discovered)
   if complete and newest is not None and queue_ok:
     queue_ok = _write_chat_discovery_marker(newest)
