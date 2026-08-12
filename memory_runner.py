@@ -120,11 +120,6 @@ _MAX_AUDIT_PROPOSAL_BATCHES_PER_RUN = 6
 # can exceed daily intake without inflating one prompt or publishing partial
 # graph states between passes.
 _MAX_CHAT_PROPOSAL_BATCHES_PER_RUN = 4
-# Reserve some processing capacity for newly discovered chats without starving
-# the durable FIFO backlog. Discovery itself is independently complete.
-_LATEST_CHAT_RESERVE = 30
-
-
 @dataclass(frozen=True)
 class ProposalOutcome:
   status: str
@@ -953,7 +948,10 @@ def _discover_chat_ids() -> tuple[list[str], bool, bool]:
     page_keys.add(page_key)
     before = {"recency_at": page_key[0], "id": page_key[1]}
 
-  discovered = list(dict.fromkeys(discovered))
+  # The API is newest-first so keyset pagination can stop at the durable
+  # watermark. The pending queue is FIFO, however: reverse this completed
+  # discovery window before appending it behind work already waiting.
+  discovered = list(reversed(list(dict.fromkeys(discovered))))
   queue_ok = _remember_pending_chat_ids(discovered)
   if complete and newest is not None and queue_ok:
     queue_ok = _write_chat_discovery_marker(newest)
@@ -963,11 +961,10 @@ def _discover_chat_ids() -> tuple[list[str], bool, bool]:
 def _collect_chat_intake(limit: int = _MAX_SOURCE_CHATS) -> ChatIntake:
   discovered, discovery_complete, queue_ok = _discover_chat_ids()
   pending = _load_pending_chat_ids()
-  recent_ids = discovered[:min(limit, _LATEST_CHAT_RESERVE)]
-  recent_set = set(recent_ids)
-  pending_budget = max(0, _MAX_SOURCE_CHATS - len(recent_ids))
-  older_ids = [chat_id for chat_id in pending if chat_id not in recent_set]
-  chat_ids = (older_ids[:pending_budget] + recent_ids)[:_MAX_SOURCE_CHATS]
+  # Discovery appends new work to the durable queue. Consume that queue in its
+  # existing order: a missed run may grow the backlog, but newer chats never
+  # jump over work that is already waiting.
+  chat_ids = pending[:limit]
   chats: list[dict] = []
   tombstones: list[str] = []
   empty: list[str] = []
