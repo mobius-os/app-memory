@@ -16,6 +16,9 @@ begin every independent investigation as if Memory were unavailable; do not
 wait for recall before reading the owning sources. Common cues are:
 
 - continuity language such as “again”, “restore”, or “like before”;
+- a regression attributed to earlier agent work, or repeated failed attempts on
+  the same feature, where prior user impact or known invariants could prevent
+  another speculative change;
 - a request that depends on the partner's setup, habits, accessibility, people,
   recurring projects, or workflow without supplying that context; or
 - an underdetermined design, architecture, or interaction choice where an
@@ -50,6 +53,9 @@ Formulate a focused retrieval prompt describing the durable partner context
 needed and why, anchored to relevant people, projects, or apps. Never request
 credentials or secrets, or ask Memory to establish current account or
 configuration state, exact records or transactions, or implementation history.
+Phrase the lookup around the single decision or risk that recalled context
+could change; do not bundle an audit of whether Memory is being used with the
+underlying preference, constraint, or prior impact you actually need.
 When earlier experience matters, retrieve its user impact, risks, preferences,
 constraints, goals, or habits, then verify what changed through the owning
 source. Then run this read-only background lookup. A confined navigator
