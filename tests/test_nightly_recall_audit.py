@@ -28,7 +28,7 @@ def _self_review():
 
 def _memory_contract():
   return {
-    "schema": 4,
+    "schema": 5,
     "data": {"shared_memory": "write"},
     "background": {
       "job": "fetch.sh",
@@ -923,6 +923,26 @@ def test_combined_proposal_preserves_each_batch_report():
     "read_audits": [{"read_id": "one"}, {"read_id": "two"}],
     "writer_self_reviews": [_self_review(), _self_review()],
   }
+
+
+def test_updated_note_text_preserves_updates_from_every_batch():
+  proposals = [
+    {
+      "updates": [
+        {"path": "notes/first.md", "content": "first source"},
+        {"path": "mocs/topic.md", "content": "not a note"},
+      ],
+    },
+    {
+      "updates": [
+        {"path": "notes/second.md", "content": "second source"},
+      ],
+    },
+  ]
+
+  assert memory_runner._updated_note_text(proposals) == [
+    "first source", "second source",
+  ]
 
 
 def test_writer_self_review_is_required_and_normalized():

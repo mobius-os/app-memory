@@ -474,7 +474,7 @@ def _app_active(app_id: int) -> bool:
     and value.get("id") == app_id
     and value.get("system_app") is True
     and isinstance(contract, dict)
-    and contract.get("schema") in {3, 4}
+    and contract.get("schema") in {3, 4, 5}
     and isinstance(data, dict)
     and data.get("shared_memory") == "write"
     and isinstance(background, dict)
@@ -1641,6 +1641,17 @@ def _combined_proposal(proposals: list[dict]) -> dict:
     "read_audits": read_audits,
     "writer_self_reviews": self_reviews,
   }
+
+
+def _updated_note_text(proposals: list[dict]) -> list[str]:
+  """Collect accepted note bodies across every consolidation batch."""
+  return [
+    str(update.get("content") or "")
+    for proposal in proposals
+    for update in proposal.get("updates", [])
+    if isinstance(update, dict)
+    and str(update.get("path") or "").startswith("notes/")
+  ]
 
 
 def _proposal_prompt(
@@ -3039,12 +3050,7 @@ async def run() -> int:
     deleted.extend(consolidation.deleted)
     _assert_no_topology_regression(baseline, candidate)
     changed.extend(_repair_orphans(staging, candidate))
-    updated_note_text = [
-      str(update.get("content") or "")
-      for update in proposal.get("updates", [])
-      if isinstance(update, dict)
-      and str(update.get("path") or "").startswith("notes/")
-    ]
+    updated_note_text = _updated_note_text(proposals)
     active_source_ids: set[str] = set()
     deleted_source_ids: set[str] = set()
     for text in updated_note_text:
