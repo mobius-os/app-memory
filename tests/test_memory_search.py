@@ -235,7 +235,7 @@ class MemorySearchContractTests(unittest.TestCase):
 
   def test_missing_graph_is_an_explicit_failed_result(self):
     with tempfile.TemporaryDirectory() as raw:
-      _store, search = _load(Path(raw))
+      store, search = _load(Path(raw))
       old_argv = sys.argv
       sys.argv = [str(REPO / "memory_search.py"), "quiet interface", "chat-1"]
       out = io.StringIO()
@@ -256,6 +256,13 @@ class MemorySearchContractTests(unittest.TestCase):
           "reason": search.RESULT_REASON_NOT_READY,
         },
       )
+      trace = json.loads(
+        (store.STATE / "read-trace" / "chat-1.json").read_text()
+      )
+      self.assertEqual(trace["status"], "failed")
+      self.assertEqual(trace["reason"], search.RESULT_REASON_NOT_READY)
+      self.assertIsNone(trace["commit"])
+      self.assertFalse((store.STATE / "read-log").exists())
 
   def test_corrupt_graph_is_failure_but_valid_no_match_is_empty(self):
     with tempfile.TemporaryDirectory() as raw:

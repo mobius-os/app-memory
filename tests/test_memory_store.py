@@ -38,6 +38,56 @@ def _publish(store, seed: Path, value: int = 0):
 
 
 class MemoryStoreTests(unittest.TestCase):
+  def test_graph_metadata_and_note_bodies_have_separate_read_caps(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      _, worktree = store.start_staging(seed)
+      graph = {
+        "nodes": [], "edges": [], "problems": [],
+        "padding": "x" * (store.MAX_NOTE_BYTES + 1),
+      }
+      (worktree / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+      (worktree / "notes" / "large.md").write_text(
+        "x" * (store.MAX_NOTE_BYTES + 1), encoding="utf-8",
+      )
+
+      pointer = store.publish(worktree)
+
+      self.assertEqual(
+        json.loads(store.read_revision_file(pointer["commit"], "graph.json"))[
+          "padding"
+        ],
+        graph["padding"],
+      )
+      with self.assertRaisesRegex(ValueError, "exceeds read cap"):
+        store.read_revision_file(pointer["commit"], "notes/large.md")
+
+  def test_publish_rejects_unreadable_graph_without_advancing_pointer(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      pointer = _publish(store, seed)
+      _, worktree = store.start_staging(seed)
+      (worktree / "graph.json").write_text(
+        json.dumps({
+          "nodes": [], "edges": [], "problems": [],
+          "padding": "x" * store.MAX_GRAPH_BYTES,
+        }),
+        encoding="utf-8",
+      )
+
+      with self.assertRaisesRegex(ValueError, "graph exceeds read cap"):
+        store.publish(worktree)
+
+      self.assertEqual(store.ready_pointer()["commit"], pointer["commit"])
+      self.assertEqual(
+        json.loads(store.read_revision_file(pointer["commit"], "graph.json"))["run"],
+        0,
+      )
+
   def test_failed_or_discarded_worktree_leaves_pinned_commit_readable(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))

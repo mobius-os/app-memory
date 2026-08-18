@@ -166,7 +166,9 @@ def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
   assert result.selected == ()
 
 
-def test_direct_live_catalog_keeps_the_selector_prompt_bounded():
+def test_direct_live_selector_bounds_prompt_and_keeps_late_matches_discoverable(
+  monkeypatch,
+):
   graph = {
     "nodes": [{
       "id": "index", "path": "index.md", "title": "Index",
@@ -177,16 +179,34 @@ def test_direct_live_catalog_keeps_the_selector_prompt_bounded():
   }
   graph["nodes"].extend({
     "id": f"note-{index}", "path": f"notes/{index}.md",
-    "title": f"Note {index}", "description": "x" * 800,
+    "title": f"Note {index}",
+    "description": ("late needle" if index == 199 else "x" * 800),
     "type": "note",
   } for index in range(200))
 
-  catalog, _positions = memory_search._direct_catalog(
-    memory_search.RevisionGraph("0" * 40, graph), 4,
+  bodies = {
+    "graph.json": json.dumps(graph),
+    "index.md": "# Index\n",
+    "notes/199.md": "The durable late answer.\n",
+  }
+  monkeypatch.setattr(
+    memory_search, "read_revision_file", lambda _commit, path: bodies[path],
+  )
+  prompts = []
+
+  result = memory_search.direct_live_traverse(
+    "Where is the late needle?", "0" * 40, depth_limit=4,
+    text_call=lambda prompt: prompts.append(prompt) or json.dumps({
+      "selected": ["note-199"],
+    }),
   )
 
-  assert len(json.dumps(catalog, ensure_ascii=False)) <= 65_000
-  assert len(catalog) < 201
+  assert len(prompts[0].encode("utf-8")) <= memory_search.MAX_SELECTOR_PROMPT_BYTES
+  assert '"id": "note-199"' in prompts[0]
+  assert '"id": "note-198"' not in prompts[0]
+  assert result.decisions[0]["catalog_nodes"] == 201
+  assert result.decisions[0]["selector_nodes"] < 201
+  assert [node.id for node in result.selected] == ["note-199"]
 
 
 def test_navigator_can_select_nodes_opened_at_the_depth_limit(monkeypatch):
@@ -594,10 +614,35 @@ def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
   logged = json.loads(next((tmp_path / "app-state" / "read-log").glob("*.jsonl")).read_text())
   assert latest == logged
   assert logged["schema"] == 3
+  assert logged["status"] == "completed"
   assert logged["question"] == "Which detailed fact matters?"
   assert logged["files"] == ["notes/b.md"]
   assert logged["traversal"]["opened"][1]["path"] == "mocs/a.md"
   assert logged["traversal"]["selected"] == ["notes/b.md"]
+
+
+def test_failed_read_is_observable_without_affecting_usage(monkeypatch, tmp_path):
+  monkeypatch.setattr(memory_store, "STATE", tmp_path / "app-state")
+
+  memory_store.record_read(
+    None,
+    "What should have been recalled?",
+    [],
+    "chat-1",
+    status="failed",
+    reason="not_ready",
+  )
+
+  trace = json.loads(
+    (tmp_path / "app-state" / "read-trace" / "chat-1.json").read_text()
+  )
+  assert trace["status"] == "failed"
+  assert trace["reason"] == "not_ready"
+  assert trace["commit"] is None
+  assert trace["files"] == []
+  assert trace["traversal"] == {}
+  assert not (tmp_path / "app-state" / "usage.json").exists()
+  assert not (tmp_path / "app-state" / "read-log").exists()
 
 
 def test_retrieve_distinguishes_not_ready_from_a_graph_read_failure(monkeypatch):

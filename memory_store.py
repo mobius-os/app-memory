@@ -32,6 +32,8 @@ _SAFE_REL = re.compile(
   r"sources/[0-9a-f]{32}\.json|graph\.json)$"
 )
 _TRACKED_PATHS = ("index.md", "graph.json", "mocs", "notes", "sources")
+MAX_NOTE_BYTES = 256_000
+MAX_GRAPH_BYTES = 4_000_000
 
 
 def _atomic_text(path: Path, text: str) -> None:
@@ -403,6 +405,10 @@ def _validate_tree(root: Path, *, require_graph: bool = False) -> None:
     raise ValueError(f"unsafe memory file: {graph}")
   if require_graph and not graph.is_file():
     raise ValueError(f"missing memory file: {graph}")
+  if graph.is_file() and graph.stat().st_size > MAX_GRAPH_BYTES:
+    # Readers enforce this same bound. Reject the candidate before Git or the
+    # atomic pointer can move so the last published graph remains readable.
+    raise ValueError("memory graph exceeds read cap")
   for directory in (root / "mocs", root / "notes"):
     if directory.is_symlink() or not directory.is_dir():
       raise ValueError(f"unsafe memory directory: {directory}")
@@ -517,7 +523,9 @@ def discard_staging(staging: Path | None) -> None:
       pass
 
 
-def read_revision_file(commit: str, rel: str, *, max_bytes: int = 256_000) -> str:
+def read_revision_file(
+  commit: str, rel: str, *, max_bytes: int | None = None,
+) -> str:
   """Read one regular blob from a reachable commit without a checkout."""
   if not _SAFE_REL.fullmatch(rel) or not _reachable_commit(commit):
     raise ValueError("unsupported memory revision or path")
@@ -537,7 +545,12 @@ def read_revision_file(commit: str, rel: str, *, max_bytes: int = 256_000) -> st
     size = int(size_proc.stdout.strip())
   except ValueError as exc:
     raise ValueError("invalid memory source size") from exc
-  if size > max_bytes:
+  read_cap = (
+    max_bytes if max_bytes is not None
+    else MAX_GRAPH_BYTES if rel == "graph.json"
+    else MAX_NOTE_BYTES
+  )
+  if size > read_cap:
     raise ValueError("memory source exceeds read cap")
   blob = _git("cat-file", "blob", object_sha)
   if len(blob.stdout) != size:
@@ -605,26 +618,34 @@ def _state_lock():
 
 
 def record_read(
-  commit: str,
+  commit: str | None,
   question: str,
   files: list[str],
   chat_id: str = "",
   *,
   traversal: dict | None = None,
+  status: str = "completed",
+  reason: str | None = None,
 ) -> None:
-  """Atomically record selected-node usage and one replayable read trace."""
-  clean_ids = [Path(rel).stem for rel in files if rel.startswith(("notes/", "mocs/"))]
+  """Record a completed recall or the latest per-chat failed attempt."""
+  if status not in {"completed", "failed"}:
+    raise ValueError("unsupported Memory read status")
+  clean_ids = (
+    [Path(rel).stem for rel in files if rel.startswith(("notes/", "mocs/"))]
+    if status == "completed" else []
+  )
   with _state_lock():
-    usage_path = STATE / "usage.json"
-    try:
-      usage = json.loads(usage_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-      usage = {}
-    if not isinstance(usage, dict):
-      usage = {}
-    for node_id in clean_ids:
-      usage[node_id] = int(usage.get(node_id, 0) or 0) + 1
-    _atomic_text(usage_path, json.dumps(usage, indent=2, sort_keys=True) + "\n")
+    if status == "completed":
+      usage_path = STATE / "usage.json"
+      try:
+        usage = json.loads(usage_path.read_text(encoding="utf-8"))
+      except (OSError, ValueError):
+        usage = {}
+      if not isinstance(usage, dict):
+        usage = {}
+      for node_id in clean_ids:
+        usage[node_id] = int(usage.get(node_id, 0) or 0) + 1
+      _atomic_text(usage_path, json.dumps(usage, indent=2, sort_keys=True) + "\n")
     safe_chat_id = re.sub(r"[^A-Za-z0-9_-]", "", chat_id)[:128]
     read_id = uuid.uuid4().hex
     at = datetime.now(UTC).isoformat()
@@ -633,12 +654,17 @@ def record_read(
       "read_id": read_id,
       "at": at,
       "commit": commit,
+      "status": status,
       "chat_id": safe_chat_id,
       "question": question[:8_000],
       "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
-      "files": files,
-      "traversal": traversal if isinstance(traversal, dict) else {},
+      "files": files if status == "completed" else [],
+      "traversal": (
+        traversal if status == "completed" and isinstance(traversal, dict) else {}
+      ),
     }
+    if status == "failed":
+      trace["reason"] = str(reason or "read_failed")[:80]
     # Keep one easy-to-inspect latest trace per chat, while the append-only
     # log retains every read for the nightly replay.
     trace_id = safe_chat_id or read_id
@@ -646,6 +672,10 @@ def record_read(
       STATE / "read-trace" / f"{trace_id}.json",
       json.dumps(trace, indent=2, sort_keys=True) + "\n",
     )
+    # Failed attempts are operational evidence, not replayable reads. Keep the
+    # latest per-chat receipt without feeding them into the nightly audit FIFO.
+    if status == "failed":
+      return
     log_path = STATE / "read-log" / f"{at[:10]}.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
