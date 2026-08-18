@@ -166,7 +166,9 @@ def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
   assert result.selected == ()
 
 
-def test_direct_live_catalog_keeps_every_reachable_node_visible():
+def test_direct_live_selector_bounds_prompt_and_keeps_late_matches_discoverable(
+  monkeypatch,
+):
   graph = {
     "nodes": [{
       "id": "index", "path": "index.md", "title": "Index",
@@ -177,18 +179,34 @@ def test_direct_live_catalog_keeps_every_reachable_node_visible():
   }
   graph["nodes"].extend({
     "id": f"note-{index}", "path": f"notes/{index}.md",
-    "title": f"Note {index}", "description": "x" * 800,
+    "title": f"Note {index}",
+    "description": ("late needle" if index == 199 else "x" * 800),
     "type": "note",
   } for index in range(200))
 
-  catalog, _positions = memory_search._direct_catalog(
-    memory_search.RevisionGraph("0" * 40, graph), 4,
+  bodies = {
+    "graph.json": json.dumps(graph),
+    "index.md": "# Index\n",
+    "notes/199.md": "The durable late answer.\n",
+  }
+  monkeypatch.setattr(
+    memory_search, "read_revision_file", lambda _commit, path: bodies[path],
+  )
+  prompts = []
+
+  result = memory_search.direct_live_traverse(
+    "Where is the late needle?", "0" * 40, depth_limit=4,
+    text_call=lambda prompt: prompts.append(prompt) or json.dumps({
+      "selected": ["note-199"],
+    }),
   )
 
-  assert len(catalog) == 201
-  assert {item["id"] for item in catalog} == {
-    "index", *(f"note-{index}" for index in range(200)),
-  }
+  assert len(prompts[0].encode("utf-8")) <= memory_search.MAX_SELECTOR_PROMPT_BYTES
+  assert '"id": "note-199"' in prompts[0]
+  assert '"id": "note-198"' not in prompts[0]
+  assert result.decisions[0]["catalog_nodes"] == 201
+  assert result.decisions[0]["selector_nodes"] < 201
+  assert [node.id for node in result.selected] == ["note-199"]
 
 
 def test_navigator_can_select_nodes_opened_at_the_depth_limit(monkeypatch):

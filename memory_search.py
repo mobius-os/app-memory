@@ -33,6 +33,7 @@ MAX_CONFIGURED_DEPTH = 12
 MAX_CONFIGURED_ROUNDS = 12
 AGENT_TIMEOUT = int(os.environ.get("MEMORY_READER_TIMEOUT", "90"))
 USAGE_PREFLIGHT_TIMEOUT = 1.25
+MAX_SELECTOR_PROMPT_BYTES = 64 * 1024
 
 RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
 RESULT_HIT = "hit"
@@ -267,6 +268,32 @@ CATALOG:
 """
 
 
+def _selector_catalog(question: str, catalog: list[dict]) -> list[dict]:
+  """Fit the strongest deterministic candidates into one bounded prompt."""
+  terms = _tokens(question)
+  ranked = sorted(
+    enumerate(catalog),
+    key=lambda pair: (
+      -_score(" ".join((
+        pair[1]["title"], pair[1]["description"], pair[1]["id"],
+      )), terms),
+      pair[0],
+    ),
+  )
+  selected = []
+  serialized_bytes = 2  # JSON list brackets.
+  empty_prompt_bytes = len(_direct_selector_prompt(question, []).encode("utf-8"))
+  for _index, item in ranked:
+    encoded_bytes = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
+    separator_bytes = 2 if selected else 0
+    if empty_prompt_bytes + serialized_bytes + separator_bytes + encoded_bytes \
+        > MAX_SELECTOR_PROMPT_BYTES:
+      continue
+    selected.append(item)
+    serialized_bytes += separator_bytes + encoded_bytes
+  return selected
+
+
 def _direct_lexical_selection(
   question: str, catalog: list[dict], positions: dict[str, tuple[int, str | None]],
 ) -> list[str]:
@@ -309,8 +336,10 @@ def direct_live_traverse(
   graph_data = json.loads(read_revision_file(commit, "graph.json"))
   graph = RevisionGraph(commit, graph_data)
   catalog, positions = _direct_catalog(graph, depth_limit)
+  selector_catalog = _selector_catalog(question, catalog)
+  prompt = _direct_selector_prompt(question, selector_catalog)
   decision_started = time.monotonic()
-  reply = text_call(_direct_selector_prompt(question, catalog)) if text_call else None
+  reply = text_call(prompt) if text_call else None
   elapsed_ms = max(0, round((time.monotonic() - decision_started) * 1000))
   if isinstance(reply, NavigatorCall):
     raw = reply.text
@@ -320,11 +349,15 @@ def direct_live_traverse(
     attempts = []
   action = json_object(raw)
   source = "model"
-  valid_ids = {item["id"] for item in catalog if item["id"] != "index"}
   requested = action.get("selected") if isinstance(action, dict) else None
   if not isinstance(requested, list):
     requested = _direct_lexical_selection(question, catalog, positions)
     source = "lexical_fallback"
+    valid_ids = {item["id"] for item in catalog if item["id"] != "index"}
+  else:
+    valid_ids = {
+      item["id"] for item in selector_catalog if item["id"] != "index"
+    }
   selected_ids = list(dict.fromkeys(
     node_id for node_id in requested
     if isinstance(node_id, str) and node_id in valid_ids
@@ -356,6 +389,8 @@ def direct_live_traverse(
     "elapsed_ms": elapsed_ms,
     "attempts": attempts,
     "catalog_nodes": len(catalog),
+    "selector_nodes": len(selector_catalog),
+    "selector_prompt_bytes": len(prompt.encode("utf-8")),
   }
   selected = tuple(by_id[node_id] for node_id in selected_ids)
   return TraversalResult(
