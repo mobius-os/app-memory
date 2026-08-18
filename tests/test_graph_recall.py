@@ -166,7 +166,7 @@ def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
   assert result.selected == ()
 
 
-def test_direct_live_catalog_keeps_the_selector_prompt_bounded():
+def test_direct_live_catalog_keeps_every_reachable_node_visible():
   graph = {
     "nodes": [{
       "id": "index", "path": "index.md", "title": "Index",
@@ -185,8 +185,10 @@ def test_direct_live_catalog_keeps_the_selector_prompt_bounded():
     memory_search.RevisionGraph("0" * 40, graph), 4,
   )
 
-  assert len(json.dumps(catalog, ensure_ascii=False)) <= 65_000
-  assert len(catalog) < 201
+  assert len(catalog) == 201
+  assert {item["id"] for item in catalog} == {
+    "index", *(f"note-{index}" for index in range(200)),
+  }
 
 
 def test_navigator_can_select_nodes_opened_at_the_depth_limit(monkeypatch):
@@ -594,10 +596,35 @@ def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
   logged = json.loads(next((tmp_path / "app-state" / "read-log").glob("*.jsonl")).read_text())
   assert latest == logged
   assert logged["schema"] == 3
+  assert logged["status"] == "completed"
   assert logged["question"] == "Which detailed fact matters?"
   assert logged["files"] == ["notes/b.md"]
   assert logged["traversal"]["opened"][1]["path"] == "mocs/a.md"
   assert logged["traversal"]["selected"] == ["notes/b.md"]
+
+
+def test_failed_read_is_observable_without_affecting_usage(monkeypatch, tmp_path):
+  monkeypatch.setattr(memory_store, "STATE", tmp_path / "app-state")
+
+  memory_store.record_read(
+    None,
+    "What should have been recalled?",
+    [],
+    "chat-1",
+    status="failed",
+    reason="not_ready",
+  )
+
+  trace = json.loads(
+    (tmp_path / "app-state" / "read-trace" / "chat-1.json").read_text()
+  )
+  assert trace["status"] == "failed"
+  assert trace["reason"] == "not_ready"
+  assert trace["commit"] is None
+  assert trace["files"] == []
+  assert trace["traversal"] == {}
+  assert not (tmp_path / "app-state" / "usage.json").exists()
+  assert not (tmp_path / "app-state" / "read-log").exists()
 
 
 def test_retrieve_distinguishes_not_ready_from_a_graph_read_failure(monkeypatch):

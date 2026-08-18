@@ -227,7 +227,6 @@ def _direct_catalog(
       positions[child] = (depth + 1, parent)
       queue.append(child)
   catalog = []
-  catalog_chars = 0
   for node_id, (depth, parent) in positions.items():
     metadata = graph.by_id[node_id]
     item = {
@@ -238,11 +237,7 @@ def _direct_catalog(
       "depth": depth,
       "parent": parent,
     }
-    item_chars = len(json.dumps(item, ensure_ascii=False))
-    if catalog and catalog_chars + item_chars > 64_000:
-      break
     catalog.append(item)
-    catalog_chars += item_chars
   return catalog, positions
 
 
@@ -1055,6 +1050,7 @@ def retrieve(question: str) -> RecallResult:
     return RecallResult(
       RESULT_FAILED,
       "Memory lookup failed.",
+      commit=commit,
       reason=RESULT_REASON_READ_FAILED,
     )
   return _answer(traversal)
@@ -1088,10 +1084,19 @@ def run() -> int:
   question, chat_id = args
   result = retrieve(question)
   print(result.answer)
-  if result.commit and result.traversal:
-    if result.files:
-      print("FILES: " + ", ".join(result.files))
-    try:
+  try:
+    if result.status == RESULT_FAILED:
+      record_read(
+        result.commit,
+        question,
+        [],
+        chat_id,
+        status="failed",
+        reason=result.reason,
+      )
+    elif result.commit and result.traversal:
+      if result.files:
+        print("FILES: " + ", ".join(result.files))
       record_read(
         result.commit,
         question,
@@ -1099,8 +1104,8 @@ def run() -> int:
         chat_id,
         traversal=result.traversal.trace(),
       )
-    except (OSError, ValueError):
-      sys.stderr.write("warning: Memory read history could not be recorded\n")
+  except (OSError, ValueError):
+    sys.stderr.write("warning: Memory read history could not be recorded\n")
   print(RESULT_PREFIX + json.dumps(
     _result_payload(result), ensure_ascii=True, separators=(",", ":"),
   ))
