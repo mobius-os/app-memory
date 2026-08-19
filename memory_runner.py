@@ -10,6 +10,7 @@ upserts, and atomically advances a pointer after committing a complete graph.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
@@ -110,6 +111,7 @@ _MAX_READ_AUDITS_PER_RUN = 24
 _RECENT_AUDIT_KEYS = (
   "schema", "run_id", "read_id", "at", "question_sha256", "outcome",
   "overreach", "miss_class", "reason", "host_selection_override",
+  "usefulness", "hindsight_reason",
 )
 # Audit evidence and chat summaries compete for the same model context but
 # have independent backlogs. Give each lane its own bounded proposal budget so
@@ -133,6 +135,7 @@ class ProposalOutcome:
 class AnalystResult:
   proposal: dict | None
   failure: ProviderFailure | None = None
+  receipt: dict | None = None
 
 
 @dataclass
@@ -469,12 +472,17 @@ def _app_active(app_id: int) -> bool:
   contract = value.get("capability_contract") if isinstance(value, dict) else None
   data = contract.get("data") if isinstance(contract, dict) else None
   background = contract.get("background") if isinstance(contract, dict) else None
+  schema = contract.get("schema") if isinstance(contract, dict) else None
   return bool(
     value
     and value.get("id") == app_id
     and value.get("system_app") is True
     and isinstance(contract, dict)
-    and contract.get("schema") in {3, 4, 5}
+    # The fields below are the compatibility contract this runner consumes.
+    # A newer additive envelope schema must not disable maintenance by itself.
+    and isinstance(schema, int)
+    and not isinstance(schema, bool)
+    and schema >= 3
     and isinstance(data, dict)
     and data.get("shared_memory") == "write"
     and isinstance(background, dict)
@@ -535,14 +543,14 @@ def _agent_choices(app_id: int) -> list[dict]:
     primary = {
       "provider": settings.get("provider"),
       "model": settings.get("model") or None,
-      "effort": settings.get("effort") or None,
+      "effort": None,
     }
   if settings.get("secondary_agent_mode") in ("custom", "app"):
     provider = settings.get("fallback_provider")
     fallback = ({
       "provider": provider,
       "model": settings.get("fallback_model") or None,
-      "effort": settings.get("fallback_effort") or None,
+      "effort": None,
     } if provider else None)
   choices = []
   seen = set()
@@ -691,6 +699,73 @@ def _read_audit_batch(records: list[dict]) -> tuple[list[dict], int]:
   return batch, max(0, len(records) - len(batch))
 
 
+def _audit_prompt_view(audit: dict) -> dict:
+  """Return the evidence needed for judgment without replaying route catalogs.
+
+  Frontier entries originate in the live and nightly navigator catalogs. Their
+  descriptions and other metadata already exist in ``existing_graph`` and can
+  dominate the prompt when copied into an audit. Keep stable route references
+  here, and keep decision semantics without provider usage receipts; selected
+  node bodies and hindsight remain intact because they carry outcome evidence.
+  """
+  value = copy.deepcopy(audit)
+
+  def compact_frontier(section: object) -> None:
+    if not isinstance(section, dict):
+      return
+    raw = section.get("frontier_at_stop")
+    if isinstance(raw, list):
+      compact = []
+      for item in raw:
+        if not isinstance(item, dict):
+          continue
+        # Current traces group candidate nodes by their source. Preserve those
+        # route references—the analyst needs them to diagnose misses—while
+        # dropping repeated titles and descriptions. Older flat traces remain
+        # readable through the same compact view.
+        if isinstance(item.get("nodes"), list):
+          compact.append({
+            key: item[key] for key in ("depth", "from") if key in item
+          } | {
+            "nodes": [
+              (
+                {"id": node["id"]}
+                if isinstance(node.get("id"), str) and node["id"]
+                else {"path": node["path"]}
+              )
+              for node in item["nodes"] if isinstance(node, dict)
+              and (
+                isinstance(node.get("id"), str)
+                or isinstance(node.get("path"), str)
+              )
+            ],
+          })
+        else:
+          compact.append({
+            key: item[key]
+            for key in ("id", "path", "title", "parent", "depth")
+            if key in item
+          })
+      section["frontier_at_stop"] = compact
+
+  compact_frontier(value.get("live"))
+  deep = value.get("deep")
+  compact_frontier(deep)
+  if isinstance(deep, dict) and isinstance(deep.get("decisions"), list):
+    deep["decisions"] = [
+      {
+        key: decision[key]
+        for key in (
+          "round", "active", "selected", "expanded", "finish", "reason",
+          "catalog_nodes", "stop_reason",
+        )
+        if key in decision
+      }
+      for decision in deep["decisions"] if isinstance(decision, dict)
+    ]
+  return value
+
+
 def _audit_prompt_batch(
   staging: Path, audits: list[dict],
 ) -> tuple[list[dict], int]:
@@ -712,11 +787,13 @@ def _audit_reads(
   commit: str,
   traces: list[dict],
   providers: ProviderPool | None = None,
+  hindsight_chats: dict[str, dict] | None = None,
 ) -> list[dict]:
   """Replay the bounded oldest live-read set with the nightly policy."""
   breadth, depth = _night_policy(app_id)
   text_call = _navigator_text_call(app_id, providers)
   audits: list[dict] = []
+  hindsight_chats = hindsight_chats or {}
   for trace in traces:
     deep = traverse(
       str(trace["question"]),
@@ -747,6 +824,10 @@ def _audit_reads(
     )
     host_selection_override = _host_selection_override(traversal, live_files)
     deep_files = [node.path for node in deep.selected]
+    hindsight = hindsight_chats.get(str(trace.get("chat_id") or ""))
+    bounded_hindsight = _bounded_chat(hindsight) if isinstance(hindsight, dict) else None
+    if isinstance(bounded_hindsight, dict):
+      bounded_hindsight.pop("id", None)
     audits.append({
       "read_id": str(trace["read_id"]),
       "at": str(trace["at"]),
@@ -802,8 +883,30 @@ def _audit_reads(
       "potential_misses": [
         path for path in deep_files if path not in live_files
       ],
+      "hindsight_chat": bounded_hindsight,
     })
   return audits
+
+
+def _recall_hindsight_chats(
+  traces: list[dict], known_chats: dict[str, dict],
+) -> dict[str, dict]:
+  """Resolve the later conversation for each recall without duplicating fetches."""
+  resolved = {}
+  seen = set()
+  for trace in traces:
+    chat_id = trace.get("chat_id") if isinstance(trace, dict) else None
+    if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", chat_id):
+      continue
+    if chat_id in seen:
+      continue
+    seen.add(chat_id)
+    chat = known_chats.get(chat_id)
+    if not isinstance(chat, dict):
+      chat, _status = _fetch_chat_detail(chat_id)
+    if isinstance(chat, dict):
+      resolved[chat_id] = chat
+  return resolved
 
 
 def _host_selection_override(traversal: object, selected_paths: list[str]) -> bool:
@@ -1530,13 +1633,29 @@ def _proposal_envelope(
       "complete Memory routing documents are required: "
       + ", ".join(str(path) for path in incomplete_routes[:5]),
     )
+  if read_audits:
+    # Audit evidence already carries complete selected-node bodies and the
+    # complete routing documents describe their neighbors. Ordinary catalog
+    # metadata duplicates those two sources; retain only stable ids so a
+    # growing graph cannot permanently starve hindsight. Exact paths remain in
+    # routing text, selected-node evidence, and every editable proposal.
+    required_graph = [
+      item if (
+        item.get("path") == "index.md"
+        or str(item.get("path") or "").startswith("mocs/")
+      ) else {"id": item.get("id")}
+      for item in required_graph
+    ]
   # The full root/MOC text and every note's compact identity are required:
   # without them a complete-file map update can unknowingly erase routes or a
   # chat batch can duplicate an existing fact. Full note bodies are useful but
   # independently trimable. Chat count must yield before routing truth does.
   payload = {
     "maintenance_flags": _maintenance_flags(staging),
-    "read_audits": read_audits or [],
+    "read_audits": [
+      _audit_prompt_view(audit)
+      for audit in (read_audits or []) if isinstance(audit, dict)
+    ],
     "existing_graph": required_graph,
     "existing_note_contents": note_contents,
     "redacted_recent_chats": [],
@@ -1730,6 +1849,20 @@ Complete all three nightly duties in one coherent pass:
    unsupported substitute. Adjacent but useful context is not an error. A miss
    must list the relevant missed nodes; overreach must list only materially
    overselected nodes.
+   When `hindsight_chat` is present, use the later conversation as the primary
+   evidence of whether recalled information actually helped the agent perform
+   the task. It may include messages from before and after the recall because
+   chat messages do not carry individual timestamps, so do not invent a causal
+   sequence. Instead judge whether the selected memories were substantively
+   useful to the eventual reasoning or outcome, whether the agent still had to
+   rediscover durable context that Memory already held, and whether irrelevant
+   recall created friction. Deep replay remains diagnostic evidence about graph
+   organization; it is not a substitute for this outcome-based hindsight.
+   Record `usefulness` as `helpful`, `mixed`, `unused`, `harmful`, or
+   `unknown`, and explain the concrete outcome evidence in `hindsight_reason`.
+   Use `unknown` when the conversation does not reveal whether the recall
+   affected the work; absence of praise or explicit citation is not evidence
+   that a memory was unused.
 3. While reviewing chats and replayed full node contents, update or delete facts
    that are demonstrably stale, superseded, or obsolete. A navigator's
    `stale_candidates` is a lead to verify, never proof by itself.
@@ -1738,11 +1871,14 @@ Before returning, record your own decision evidence while this run context is
 still present. `hardest_decision` names the most consequential judgment and why;
 `possibly_missed` names useful evidence you may not have incorporated, or
 `none`; `prompt_change` names one general instruction change that would have
-improved this run, or `none`. This is bounded testimony for the later Reflection
-review, not permission to weaken validation or publish uncertain facts.
+improved this run, or `none`; `next_experiment` names one specific, reversible
+change and the future evidence that would show whether it helped, or `none` when
+this batch created no real uncertainty worth testing. This is bounded testimony
+for the later Reflection review, not permission to weaken validation or publish
+uncertain facts.
 
 Return ONLY one JSON object with this shape:
-{{"summary":"...","self_review":{{"hardest_decision":"...","possibly_missed":"none | ...","prompt_change":"none | ..."}},"read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short reason"}}],"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"deletes":[]}}
+{{"summary":"...","self_review":{{"hardest_decision":"...","possibly_missed":"none | ...","prompt_change":"none | ...","next_experiment":"none | reversible change + expected evidence"}},"read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short graph-retrieval reason","usefulness":"helpful | mixed | unused | harmful | unknown","hindsight_reason":"short outcome-based reason"}}],"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"deletes":[]}}
 Return exactly one verdict for every supplied read audit and no invented ids.
 At most {_MAX_UPDATES} updates and {_MAX_DELETES} deletes. Update paths may be
 index.md, notes/<slug>.md, or mocs/<slug>.md. Delete paths may be notes/<slug>.md
@@ -1770,7 +1906,7 @@ def _text_proposal(choice: dict, prompt: str) -> AnalystResult:
       f"{provider or 'unknown'} analyst ({model or 'default'}) "
       f"failed: {result.failure.code}"
     )
-    return AnalystResult(None, result.failure)
+    return AnalystResult(None, result.failure, result.receipt)
   raw = str(result.text or "")
   value = json_object(raw)
   if value is None:
@@ -1778,8 +1914,10 @@ def _text_proposal(choice: dict, prompt: str) -> AnalystResult:
       f"{provider or 'unknown'} analyst ({model or 'default'}) returned no JSON "
       f"object in {len(raw)} chars; head={raw[:200]!r} tail={raw[-120:]!r}"
     )
-    return AnalystResult(None, ProviderFailure("invalid_output"))
-  return AnalystResult(value)
+    return AnalystResult(
+      None, ProviderFailure("invalid_output"), result.receipt,
+    )
+  return AnalystResult(value, receipt=result.receipt)
 
 
 def _proposal(
@@ -1829,6 +1967,8 @@ def _proposal(
       attempt["skipped_reason"] = unavailable.code
       continue
     result = _text_proposal(choice, prompt)
+    if isinstance(result.receipt, dict):
+      attempt["usage_receipt"] = result.receipt
     if result.failure is not None:
       attempt["failure_code"] = result.failure.code
       if providers.health.observe(provider, model, result.failure):
@@ -1895,6 +2035,8 @@ def _normalize_audit_verdicts(
     overreach = item.get("overreach")
     overselected_nodes = item.get("overselected_nodes", [])
     reason = item.get("reason", "")
+    usefulness = item.get("usefulness", "unknown")
+    hindsight_reason = item.get("hindsight_reason", "")
     if (
       not isinstance(read_id, str)
       or read_id not in expected
@@ -1910,6 +2052,8 @@ def _normalize_audit_verdicts(
       or (overreach and not overselected_nodes)
       or (not overreach and bool(overselected_nodes))
       or not isinstance(reason, str)
+      or usefulness not in {"helpful", "mixed", "unused", "harmful", "unknown"}
+      or not isinstance(hindsight_reason, str)
     ):
       raise ProposalValidationError(
         "invalid_read_audits", "invalid or invented read audit verdict",
@@ -1922,6 +2066,8 @@ def _normalize_audit_verdicts(
       "missed_nodes": list(dict.fromkeys(missed_nodes))[:100],
       "overselected_nodes": list(dict.fromkeys(overselected_nodes))[:100],
       "reason": re.sub(r"\s+", " ", reason).strip()[:1000],
+      "usefulness": usefulness,
+      "hindsight_reason": re.sub(r"\s+", " ", hindsight_reason).strip()[:1000],
     })
   if seen != expected:
     raise ProposalValidationError(
@@ -2118,7 +2264,9 @@ def _normalize_proposal(
       "invalid_self_review", "writer self-review must be an object",
     )
   self_review = {}
-  for field_name in ("hardest_decision", "possibly_missed", "prompt_change"):
+  for field_name in (
+    "hardest_decision", "possibly_missed", "prompt_change", "next_experiment",
+  ):
     value = raw_self_review.get(field_name)
     if not isinstance(value, str) or not value.strip():
       raise ProposalValidationError(
@@ -2367,6 +2515,7 @@ def _append_update_log(
   graph: dict,
   provider: str | None,
   model: str | None,
+  model_work: dict,
 ) -> None:
   STATE.mkdir(parents=True, exist_ok=True)
   path = STATE / "update-log" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
@@ -2380,6 +2529,7 @@ def _append_update_log(
     "commit": pointer["commit"],
     "provider": provider,
     "model": model,
+    "model_work": model_work,
     "summary": str(proposal.get("summary") or "")[:1000],
     "changed_paths": changed,
     "deleted_paths": deleted,
@@ -2456,6 +2606,13 @@ def _record_recall_audits(
   selection_miss_count = 0
   override_count = 0
   candidate_count = 0
+  prior_usefulness = prior.get("usefulness_counts")
+  if not isinstance(prior_usefulness, dict):
+    prior_usefulness = {}
+  usefulness_counts = {
+    key: int(prior_usefulness.get(key, 0) or 0)
+    for key in ("helpful", "mixed", "unused", "harmful", "unknown")
+  }
   for audit in read_audits:
     read_id = str(audit["read_id"])
     verdict = verdicts[read_id]
@@ -2497,6 +2654,10 @@ def _record_recall_audits(
       no_memory_count += 1
     if audit.get("live", {}).get("host_selection_override") is True:
       override_count += 1
+    usefulness = str(verdict.get("usefulness") or "unknown")
+    if usefulness not in usefulness_counts:
+      usefulness = "unknown"
+    usefulness_counts[usefulness] += 1
     record = {
       "schema": 3,
       "run_id": run_id,
@@ -2523,6 +2684,8 @@ def _record_recall_audits(
       "miss_class": miss_class,
       "overselected_nodes": list(verdict.get("overselected_nodes") or []),
       "reason": str(verdict.get("reason") or ""),
+      "usefulness": usefulness,
+      "hindsight_reason": str(verdict.get("hindsight_reason") or ""),
     }
     records.append(record)
   total = int(prior.get("reads_audited", 0) or 0) + len(records)
@@ -2542,6 +2705,11 @@ def _record_recall_audits(
     "last_audited_at": max(str(item["at"]) for item in read_audits),
     "reads_audited": total,
     "candidate_misses": candidate_total,
+    "usefulness_counts": usefulness_counts,
+    "hindsight_assessed": sum(
+      usefulness_counts[key]
+      for key in ("helpful", "mixed", "unused", "harmful")
+    ),
     "misses": missed_total,
     "miss_rate": missed_total / total if total else 0.0,
     "overreaches": overreach_total,
@@ -2657,6 +2825,118 @@ def _provider_summary(
   return list(groups.values())
 
 
+def _aggregate_model_work(receipts: list[dict]) -> dict:
+  """Aggregate exact provider receipts without turning them into a score."""
+  token_totals: dict[str, int | float] = {}
+  reported_costs = []
+  input_chars = 0
+  output_chars = 0
+  attempts = []
+  for item in receipts:
+    receipt = item.get("receipt")
+    if not isinstance(receipt, dict):
+      continue
+    input_chars += int(receipt.get("input_chars") or 0)
+    output_chars += int(receipt.get("output_chars") or 0)
+    usage = receipt.get("usage")
+    if isinstance(usage, dict):
+      for key, value in usage.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+          token_totals[str(key)] = token_totals.get(str(key), 0) + value
+    cost = receipt.get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+      reported_costs.append(cost)
+    attempts.append({
+      **{key: value for key, value in item.items() if key != "receipt"},
+      "input_chars": receipt.get("input_chars"),
+      "output_chars": receipt.get("output_chars"),
+      "usage": usage,
+      "cost_usd": cost,
+    })
+  return {
+    "schema": 1,
+    "attempt_count": len(attempts),
+    "usage_reported_attempts": sum(
+      1 for item in attempts if isinstance(item.get("usage"), dict)
+    ),
+    "cost_reported_attempts": len(reported_costs),
+    "reported_cost_usd": sum(reported_costs) if reported_costs else None,
+    "input_chars": input_chars,
+    "output_chars": output_chars,
+    "token_usage": token_totals,
+    "attempts": attempts,
+  }
+
+
+def _model_work_receipt(outcomes: list[ProposalOutcome]) -> dict:
+  """Aggregate consolidation receipts through the shared receipt boundary."""
+  receipts = []
+  for batch_index, outcome in enumerate(outcomes, start=1):
+    for attempt in outcome.attempted_agents:
+      receipt = attempt.get("usage_receipt")
+      if not isinstance(receipt, dict):
+        continue
+      receipts.append({
+        "batch": batch_index,
+        "provider": attempt.get("provider"),
+        "model": attempt.get("model"),
+        "outcome": (
+          attempt.get("outcome") or attempt.get("failure_code")
+          or attempt.get("rejection_code") or "invoked"
+        ),
+        "receipt": receipt,
+      })
+  return _aggregate_model_work(receipts)
+
+
+def _recall_audit_model_work(read_audits: list[dict]) -> dict:
+  """Aggregate nightly deep-replay calls used to judge earlier recalls."""
+  receipts = []
+  for audit in read_audits:
+    deep = audit.get("deep") if isinstance(audit, dict) else None
+    decisions = deep.get("decisions") if isinstance(deep, dict) else None
+    if not isinstance(decisions, list):
+      continue
+    for decision in decisions:
+      attempts = decision.get("attempts") if isinstance(decision, dict) else None
+      if not isinstance(attempts, list):
+        continue
+      for attempt in attempts:
+        receipt = attempt.get("usage_receipt") if isinstance(attempt, dict) else None
+        if isinstance(receipt, dict):
+          receipts.append({
+            "read_id": audit.get("read_id"),
+            "provider": attempt.get("provider"),
+            "outcome": attempt.get("outcome") or "invoked",
+            "receipt": receipt,
+          })
+  return _aggregate_model_work(receipts)
+
+
+def _recall_model_work(read_traces: list[dict]) -> dict:
+  """Aggregate the original live-recall calls selected for nightly audit."""
+  receipts = []
+  for trace in read_traces:
+    traversal = trace.get("traversal") if isinstance(trace, dict) else None
+    decisions = traversal.get("decisions") if isinstance(traversal, dict) else None
+    if not isinstance(decisions, list):
+      continue
+    for decision in decisions:
+      attempts = decision.get("attempts") if isinstance(decision, dict) else None
+      if not isinstance(attempts, list):
+        continue
+      for attempt in attempts:
+        receipt = attempt.get("usage_receipt") if isinstance(attempt, dict) else None
+        if isinstance(receipt, dict):
+          receipts.append({
+            "read_id": trace.get("read_id"),
+            "provider": attempt.get("provider"),
+            "outcome": attempt.get("outcome") or "invoked",
+            "receipt": receipt,
+          })
+  return _aggregate_model_work(receipts)
+
+
 def _chat_intake_status(intake: ChatIntake) -> dict:
   return {
     "chat_discovered_count": intake.discovered_count,
@@ -2712,10 +2992,18 @@ def _consolidate_batches(
     ):
       batch_audits, _ = _audit_prompt_batch(staging, remaining_audits)
       if not batch_audits:
-        raise ProposalValidationError(
-          "routing_context_over_budget",
-          "one Memory recall audit exceeds the analyst prompt budget",
+        # Distinguish a poison audit from routing context that cannot fit at
+        # all. The former belongs to one independent work lane and must not
+        # freeze chat consolidation or maintenance; the latter means no safe
+        # analyst proposal can run and remains a hard failure.
+        _proposal_envelope(staging, [], [])
+        deferred_reason = "read_audit_over_budget"
+        deferred_detail = (
+          "oldest Memory recall audit exceeds the analyst prompt budget"
         )
+        rejected_audit_count = 1
+        audit_batch_count = _MAX_AUDIT_PROPOSAL_BATCHES_PER_RUN
+        continue
       batch = []
       work_kind = "audit"
     elif (
@@ -2983,8 +3271,12 @@ async def run() -> int:
     pending_read_audit_count = len(pending_read_traces)
     read_traces, _ = _read_audit_batch(pending_read_traces)
     providers = ProviderPool.for_app(app_id)
+    hindsight_chats = await asyncio.to_thread(
+      _recall_hindsight_chats, read_traces, intake_by_id,
+    )
     read_audits = await asyncio.to_thread(
       _audit_reads, app_id, str(previous["commit"]), read_traces, providers,
+      hindsight_chats,
     )
     consolidation = await asyncio.to_thread(
       _consolidate_batches,
@@ -3142,6 +3434,9 @@ async def run() -> int:
       "provider_summary": _provider_summary(
         consolidation.provider_outcomes, deferred_attempts,
       ),
+      "model_work": _model_work_receipt(consolidation.provider_outcomes),
+      "recall_audit_model_work": _recall_audit_model_work(proposal_audits),
+      "recall_model_work": _recall_model_work(read_traces),
       "graph_scale": graph_scale,
       "personalization_profile": profile_status,
       "owner_maintenance": [
@@ -3172,6 +3467,7 @@ async def run() -> int:
         graph,
         outcome.provider,
         outcome.model,
+        status["model_work"],
       )
       _record_recall_audits(
         run_id,

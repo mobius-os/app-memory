@@ -7,6 +7,19 @@ import { canReorderAgentSlots, reorderAgentSlots } from '../ui/backgroundAgentOr
 
 mkdirSync(new URL('./.build/', import.meta.url), { recursive: true })
 
+test('retrieval settings keep defaults quiet and reveal custom raw limits only in advanced controls', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.match(source, /Memory tunes its own recall/)
+  assert.doesNotMatch(source, /Audited reads|Miss rate|Overreach|Host overrides/)
+  assert.doesNotMatch(source, /Balanced defaults|Custom limits active/)
+  assert.match(source, /<details className="mg-advanced-policy">/)
+  assert.match(source, /Advanced search limits\{hasCustomRecallLimits \? ' · Custom' : ''\}/)
+  assert.match(source, /Tune recall only when testing a specific hypothesis/)
+  assert.match(source, /Reset to defaults/)
+  assert.match(source, /settingsSection === 'retrieval'[\s\S]*settingsStatus !== 'ready'/)
+  assert.match(source, /if \(!settingsLoaded\)[\s\S]*setSettingsStatus\('error'\)/)
+})
+
 const {
   buildLocalGraphData,
   computeRendererFitTransform,
@@ -251,35 +264,29 @@ test('settings expose app-level background agent overrides', () => {
   assert.ok(manifest.source_files.includes('ui/backgroundAgentOrder.js'))
   assert.ok(source.indexOf("{ key: 'claude', label: 'Claude Code' }")
     < source.indexOf("{ key: 'codex', label: 'OpenAI Codex' }"))
-  assert.match(source, /Boolean\(providerValue \|\| modelValue \|\| effortValue\)/)
-  assert.match(source, /Boolean\(fallbackProviderValue \|\| fallbackModelValue \|\| fallbackEffortValue\)/)
-  assert.match(source, /effort: primaryAgentMode === 'app' \? effortForProvider/)
-  assert.match(source, /fallback_effort: secondaryAgentMode === 'app'/)
-  assert.match(source, /<EffortStepper/)
+  assert.match(source, /Boolean\(providerValue \|\| modelValue\)/)
+  assert.match(source, /Boolean\(fallbackProviderValue \|\| fallbackModelValue\)/)
+  assert.match(source, /effort: null/)
+  assert.match(source, /fallback_effort: null/)
+  assert.doesNotMatch(source, /EffortStepper|EFFORT_LEVELS|agentEffort/)
   const picker = readFileSync(new URL('../ui/ModelPicker.jsx', import.meta.url), 'utf8')
-  const effort = readFileSync(new URL('../ui/EffortStepper.jsx', import.meta.url), 'utf8')
   const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
   assert.match(picker, /role="dialog"/)
   assert.match(picker, /aria-modal="true"/)
   assert.match(picker, /event\.key !== 'Tab'/)
   assert.match(picker, /function ClaudeLogo/)
   assert.match(picker, /function OpenAILogo/)
-  assert.match(picker, /mobius-model-trigger__effort/)
+  assert.doesNotMatch(picker, /effort/i)
   assert.match(picker, /Default from settings/)
   assert.match(picker, /aria-label=\{triggerLabel\}/)
   assert.match(picker, /aria-pressed=\{useSettingsDefault\}/)
   assert.match(picker, /aria-pressed=\{selected\}/)
-  assert.match(picker, /effortLabel \? `, \$\{effortLabel\} effort`/)
   assert.match(picker, /\{open && createPortal\([\s\S]*document\.body,\s*\)\}/)
   assert.match(picker, /event\.target === event\.currentTarget\) closeSheet\(\)/)
   assert.match(picker, /mobius-model-sheet__close" onClick=\{closeSheet\}/)
   assert.match(picker, /closeRef\.current\?\.focus\?\.\(\)/)
   assert.match(picker, /triggerRef\.current\?\.focus\?\.\(\)/)
   assert.match(theme, /\.mobius-model-sheet__backdrop\s*\{[\s\S]*position:fixed[\s\S]*z-index:1000/)
-  assert.match(effort, /role="radiogroup"/)
-  assert.match(effort, /role="radio"/)
-  assert.match(effort, /e\.key === 'Home'/)
-  assert.match(effort, /e\.key === 'End'/)
   assert.match(runner, /primary_agent_mode.*in \("custom", "app"\)/)
   assert.match(runner, /secondary_agent_mode.*in \("custom", "app"\)/)
   assert.match(runner, /def _settings/)
@@ -288,8 +295,8 @@ test('settings expose app-level background agent overrides', () => {
 })
 
 test('agent order swaps exact overrides and refuses inherited positional rows', () => {
-  const primary = { mode: 'app', provider: 'claude', model: 'claude-primary', effort: 'high' }
-  const fallback = { mode: 'app', provider: 'codex', model: 'codex-fallback', effort: 'medium' }
+  const primary = { mode: 'app', provider: 'claude', model: 'claude-primary' }
+  const fallback = { mode: 'app', provider: 'codex', model: 'codex-fallback' }
   const before = [primary, fallback]
   const after = reorderAgentSlots(before, 1, 0)
   assert.equal(canReorderAgentSlots(before), true)

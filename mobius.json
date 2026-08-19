@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "2.3.7",
+  "version": "2.4.0",
   "description": "Build and retrieve an optional graph of durable facts without injecting it into every chat.",
   "author": "mobius-os",
   "license": "MIT",
@@ -77,7 +77,6 @@
     "ui/ChatGlyph.jsx",
     "ui/TextGlyph.jsx",
     "ui/NetworkGlyph.jsx",
-    "ui/EffortStepper.jsx",
     "ui/BackgroundAgentList.jsx",
     "ui/SourceContext.jsx",
     "ui/backgroundAgentOrder.js",

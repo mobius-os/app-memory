@@ -441,7 +441,11 @@ def test_live_reader_auto_fails_over_before_lexical_fallback(monkeypatch):
       or (
         TextResult(None, ProviderFailure("timeout"))
         if provider == "claude"
-        else TextResult('{"finish":true}')
+        else TextResult('{"finish":true}', receipt={
+          "input_chars": 100, "output_chars": 15,
+          "usage": {"input_tokens": 30, "output_tokens": 4},
+          "cost_usd": None,
+        })
       )
     ),
   )
@@ -456,6 +460,9 @@ def test_live_reader_auto_fails_over_before_lexical_fallback(monkeypatch):
     "timeout", "ok",
   ]
   assert all(attempt["elapsed_ms"] >= 0 for attempt in result.attempts)
+  assert result.attempts[1]["usage_receipt"]["usage"] == {
+    "input_tokens": 30, "output_tokens": 4,
+  }
   assert calls == ["claude", "codex"]
 
 

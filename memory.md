@@ -23,6 +23,12 @@ app-state/run-status.json             latest scheduled-run outcome
 app-state/run-log/YYYY-MM-DD.jsonl    append-only operational outcomes
 ```
 
+Read traces retain each navigator attempt's provider-reported token/cost
+receipt when available. Scheduled run status and update logs aggregate the
+same receipts across consolidation batches beside chat/audit workload. Missing
+provider fields mean “not reported,” not zero; these numbers are evidence for
+qualitative review, never a recall-quality score.
+
 Published commits are immutable. Readers pin the commit named by `.ready` and
 read its blobs directly; maintenance edits one private worktree and advances
 `.ready` atomically only after the full tree and graph are committed. A failed
@@ -45,6 +51,14 @@ be reachable from `index.md`. Put a short answer beside each link so a parent
 often answers the question without opening the child.
 
 ## Scheduled consolidation
+
+The mission is to make future recall more useful to the partner, not to
+maximize notes, reads, a recall rate, or any other single metric. Treat counts,
+misses, graph size, and search effort as evidence for judgment. Preserve useful
+context while keeping recall proportionate: first ask whether a miss is caused
+by missing knowledge, weak organization, or insufficient search effort, and
+prefer a clearer graph route over permanently spending more compute when it
+would solve the same problem.
 
 The Memory app's confined runner owns consolidation. It receives only
 structurally redacted chat logs through its declared capability and may propose

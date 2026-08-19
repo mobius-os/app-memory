@@ -22,5 +22,5 @@ export function agentSlotLabel(slot, groups, inheritedLabel) {
   const group = groups?.find((item) => item.key === slot.provider)
   const model = group?.models?.find((item) => item.id === slot.model)
   const identity = model?.name || slot.model || group?.label || slot.provider
-  return slot.effort ? `${identity}, ${slot.effort} effort` : identity
+  return identity
 }
