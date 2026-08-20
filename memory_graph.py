@@ -66,7 +66,7 @@ def _slug_for(path: Path, root: Path) -> str:
 
 
 def _source_catalog(root: Path) -> tuple[dict[str, dict], dict[str, dict]]:
-  """Index host-owned source snapshots without copying their text into graph.json."""
+  """Index compact supporting-chat metadata for note provenance."""
   by_id: dict[str, dict] = {}
   by_chat_id: dict[str, dict] = {}
   directory = root / "sources"
@@ -86,19 +86,22 @@ def _source_catalog(root: Path) -> tuple[dict[str, dict], dict[str, dict]]:
       continue
     if not isinstance(value, dict) or value.get("source_id") != source_id:
       continue
+    active_chat_id = value.get("chat_id")
+    deleted = bool(
+      value.get("deleted_at")
+      or value.get("source_unavailable_at")
+      or not active_chat_id
+    )
     ref = {
       "source_id": source_id,
-      "file": f"sources/{source_id}.json",
-      "kind": (
-        "deleted"
-        if value.get("deleted_at") or not value.get("chat_id")
-        else "active"
-      ),
-      "title": str(value.get("title") or "")[:300],
-      "snapshot_count": len(value.get("snapshots") or []),
+      "kind": "deleted" if deleted else "active",
+      "last_activity": str(value.get("last_activity") or "")[:80],
     }
+    if not deleted:
+      ref["chat_id"] = str(active_chat_id)[:128]
+      ref["title"] = str(value.get("title") or "")[:300]
     by_id[source_id] = ref
-    chat_id = value.get("chat_id")
+    chat_id = active_chat_id
     if isinstance(chat_id, str) and chat_id:
       by_chat_id[chat_id] = ref
   return by_id, by_chat_id
@@ -119,15 +122,15 @@ def _source_refs(tokens: object, by_id: dict[str, dict], by_chat_id: dict[str, d
       ref = by_chat_id.get(chat_id)
       refs.append(dict(ref) if ref else {
         "kind": "active",
+        "chat_id": chat_id,
         "title": "",
-        "snapshot_count": 0,
+        "last_activity": "",
       })
       continue
     if token == "deleted-chat":
       refs.append({
         "kind": "legacy_deleted",
-        "title": "",
-        "snapshot_count": 0,
+        "last_activity": "",
       })
       continue
     if token.startswith("deleted-chat:"):
@@ -135,8 +138,7 @@ def _source_refs(tokens: object, by_id: dict[str, dict], by_chat_id: dict[str, d
       ref = by_id.get(source_id)
       refs.append({**ref, "kind": "deleted"} if ref else {
         "kind": "deleted",
-        "title": "",
-        "snapshot_count": 0,
+        "last_activity": "",
       })
   return refs
 
@@ -173,6 +175,9 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
     description = str(fm.get("description") or "")
     mocs = fm.get("mocs") if isinstance(fm.get("mocs"), list) else []
     importance = fm.get("importance") if isinstance(fm.get("importance"), int) else 1
+    source_refs = _source_refs(
+      fm.get("source"), sources_by_id, sources_by_chat_id,
+    )
     node = {
       "id": node_id,
       "title": title,
@@ -181,9 +186,7 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
       "path": rel,
       "mocs": mocs,
       "tags": fm.get("tags") if isinstance(fm.get("tags"), list) else [],
-      "source_refs": _source_refs(
-        fm.get("source"), sources_by_id, sources_by_chat_id,
-      ),
+      "source_refs": source_refs,
       "importance": max(1, importance),
       "access_count": int(usage.get(node_id, 0)),
       "updated": str(fm.get("updated") or fm.get("as-of") or ""),
@@ -206,6 +209,12 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
           "entries": len(entries),
         })
     else:
+      if source_refs and not description.strip():
+        problems.append({
+          "kind": "missing_description",
+          "severity": "warning",
+          "node": node_id,
+        })
       prose_lines = _prose_line_count(text)
       if prose_lines > MAX_NOTE_PROSE_LINES:
         problems.append({

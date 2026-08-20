@@ -353,7 +353,8 @@ class MemoryRunnerTests(unittest.TestCase):
       )
       # mocs points at a map that does not exist -> bare_map_entry.
       (staging / "notes" / "filed-nowhere.md").write_text(
-        "---\ntitle: Filed nowhere\ntype: note\nmocs: [ghost-map]\n---\nShort.\n",
+        "---\ntitle: Filed nowhere\ntype: note\nmocs: [ghost-map]\n"
+        "source: [chat:missing]\n---\nShort.\n",
         encoding="utf-8",
       )
 
@@ -365,6 +366,8 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertGreater(by_kind["oversized_note"]["lines"], 30)
       self.assertIn("bare_map_entry", by_kind)
       self.assertEqual(by_kind["bare_map_entry"]["node"], "filed-nowhere")
+      self.assertIn("missing_description", by_kind)
+      self.assertEqual(by_kind["missing_description"]["node"], "filed-nowhere")
       # Every reported problem is a warning, so none of them block publication
       # under the same predicate the runner uses.
       for problem in graph["problems"]:

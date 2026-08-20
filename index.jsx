@@ -32,7 +32,6 @@ import {
   renderWikiLinks,
   restrictNoteHtml,
   safeMemoryPath,
-  safeMemorySourcePath,
   stripFrontmatter,
   timeToDailyCron,
 } from './domain.js'
@@ -47,7 +46,7 @@ import { TextGlyph } from './ui/TextGlyph.jsx'
 import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
 import { BackgroundAgentList } from './ui/BackgroundAgentList.jsx'
-import { SourceContext } from './ui/SourceContext.jsx'
+import { SupportingChats } from './ui/SupportingChats.jsx'
 import { agentSlotLabel, canReorderAgentSlots, reorderAgentSlots } from './ui/backgroundAgentOrder.js'
 
 export { makeSharedMemoryStore } from './storage.js'
@@ -60,7 +59,6 @@ export {
   parseDailyCronTime,
   renderWikiLinks,
   safeMemoryPath,
-  safeMemorySourcePath,
   shouldShowScreenLabel,
   shouldShowNodeLabel,
   timeToDailyCron,
@@ -128,7 +126,6 @@ export default function App({ appId, token }) {
   const [detailPresentation, setDetailPresentation] = useState('overlay'); // overlay | direct
   const [intentError, setIntentError] = useState('');
   const [noteState, setNoteState] = useState({ status: 'idle', md: '', fm: {}, revalidating: false });
-  const [sourceState, setSourceState] = useState({ status: 'idle', items: [] });
   const [hoverId, setHoverId] = useState(null);
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
@@ -440,40 +437,6 @@ export default function App({ appId, token }) {
     return unsub;
   }, [revision, selected, store]);
 
-  // Source snapshots are host-owned companions to the note, pinned to the
-  // same immutable revision. Notes created before source retention still show
-  // an honest unavailable state instead of silently implying provenance text.
-  useEffect(() => {
-    if (!selected || !revision) {
-      setSourceState({ status: 'idle', items: [] });
-      return undefined;
-    }
-    const refs = Array.isArray(selected.source_refs) ? selected.source_refs : [];
-    if (!refs.length) {
-      setSourceState({ status: 'ready', items: [] });
-      return undefined;
-    }
-    let alive = true;
-    setSourceState({ status: 'loading', items: [] });
-    Promise.all(refs.map(async (ref) => {
-      const rel = safeMemorySourcePath(ref?.file);
-      if (!rel) return { ref, record: null, error: null };
-      const result = await store.getJSON(rel, { revision });
-      return {
-        ref,
-        record: result.present && result.value && typeof result.value === 'object'
-          ? result.value
-          : null,
-        error: result.error || null,
-      };
-    })).then((items) => {
-      if (alive) setSourceState({ status: 'ready', items });
-    }).catch((error) => {
-      if (alive) setSourceState({ status: 'error', items: [], error });
-    });
-    return () => { alive = false; };
-  }, [revision, selected, store]);
-
   // --- Lazy-load the markdown renderer the first time we need it. ---
   useEffect(() => {
     if ((marked && purify) || !selected) return;
@@ -514,6 +477,11 @@ export default function App({ appId, token }) {
     }
     return null; // renderer not ready yet -> fall back to plain text below
   }, [noteState, marked, purify, graph]);
+
+  const openSupportingChat = useCallback((chatId) => {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(chatId || ''))) return;
+    window.parent.postMessage({ type: 'moebius:open-chat', chatId }, '*');
+  }, []);
 
   const onNoteClick = useCallback((e) => {
     const a = e.target?.closest?.('a[href^="#memory-node-"]');
@@ -1863,7 +1831,11 @@ export default function App({ appId, token }) {
                       {noteHtml != null
                         ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
                         : <pre style={S.pre}>{noteState.md}</pre>}
-                      <SourceContext state={sourceState} />
+                      <SupportingChats
+                        refs={selected?.source_refs}
+                        contribution={selected?.description}
+                        onOpenChat={openSupportingChat}
+                      />
                     </>
                   )}
                 </div>

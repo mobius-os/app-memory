@@ -1449,28 +1449,8 @@ def _source_archive_path(staging: Path, source_id: str) -> Path:
   return staging / "sources" / f"{source_id}.json"
 
 
-def _source_snapshot(chat: dict) -> dict | None:
-  """The exact bounded, redacted chat fields supplied to the analyst."""
-  bounded = _bounded_chat(chat)
-  if bounded is None:
-    return None
-  bounded.pop("id", None)
-  encoded = json.dumps(bounded, ensure_ascii=False, sort_keys=True)
-  return {
-    "hash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
-    "captured_at": datetime.now(UTC).isoformat(),
-    "input": bounded,
-  }
-
-
-def _archive_chat_source(
-  staging: Path,
-  chat: dict,
-  *,
-  reviewed: bool,
-  capture_kind: str,
-) -> tuple[str, bool]:
-  """Append one deduplicated source snapshot and scrub ids on deletion."""
+def _record_chat_source(staging: Path, chat: dict) -> tuple[str, bool]:
+  """Store only the metadata needed to identify one supporting chat."""
   chat_id = chat.get("id") if isinstance(chat, dict) else None
   if not isinstance(chat_id, str):
     raise ValueError("source chat is missing an id")
@@ -1485,48 +1465,77 @@ def _archive_chat_source(
   except (OSError, UnicodeError, ValueError):
     raise ValueError(f"invalid Memory source archive: {path.name}")
   record = existing if isinstance(existing, dict) else {}
-  snapshots = (
-    list(record.get("snapshots"))
-    if isinstance(record.get("snapshots"), list)
-    else []
-  )
-  snapshot = _source_snapshot(chat)
-  if snapshot is None:
-    raise ValueError("source chat could not be bounded")
-  found = next(
-    (
-      item for item in snapshots
-      if isinstance(item, dict) and item.get("hash") == snapshot["hash"]
-    ),
-    None,
-  )
-  if found is None:
-    snapshot["reviewed"] = bool(reviewed)
-    snapshot["capture_kind"] = str(capture_kind)[:32]
-    snapshots.append(snapshot)
-  elif reviewed and not found.get("reviewed"):
-    found["reviewed"] = True
-    found["reviewed_at"] = datetime.now(UTC).isoformat()
-    found["capture_kind"] = "analyst"
   deleted_at = str(chat.get("deleted_at") or "") or None
+  last_activity = str(
+    chat.get("updated_at") or record.get("last_activity") or ""
+  )[:80]
   next_record = {
-    "schema": 1,
+    "schema": 2,
     "source_id": source_id,
-    "title": str(chat.get("title") or "")[:300],
-    "updated_at": str(chat.get("updated_at") or "")[:80],
+    "last_activity": last_activity,
     "deleted_at": deleted_at,
-    "snapshots": snapshots,
   }
-  # Current source records keep an active backlink. Once deleted, only the
-  # opaque HMAC id survives; the raw chat id is absent from the current graph.
+  # Active sources remain directly navigable. Deletion removes both the chat
+  # backlink and title; the UI shows only "Deleted chat" and last activity.
   if deleted_at is None:
     next_record["chat_id"] = chat_id
+    next_record["title"] = str(chat.get("title") or "")[:300]
   encoded = json.dumps(next_record, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
   previous = path.read_text(encoding="utf-8") if path.is_file() else None
   if encoded == previous:
     return source_id, False
   path.write_text(encoded, encoding="utf-8")
   return source_id, True
+
+
+def _migrate_source_records(staging: Path) -> list[str]:
+  """Replace legacy transcript snapshots with compact supporting-chat metadata."""
+  changed = []
+  directory = staging / "sources"
+  if directory.is_symlink() or not directory.is_dir():
+    return changed
+  for path in sorted(directory.glob("*.json")):
+    source_id = path.stem
+    if (
+      not _SOURCE_ARCHIVE_ID_RE.fullmatch(source_id)
+      or path.is_symlink()
+      or not path.is_file()
+    ):
+      continue
+    try:
+      value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+      raise ValueError(f"invalid Memory source record: {path.name}") from exc
+    if not isinstance(value, dict) or value.get("source_id") != source_id:
+      raise ValueError(f"invalid Memory source record: {path.name}")
+    deleted = bool(
+      value.get("deleted_at")
+      or value.get("source_unavailable_at")
+      or not value.get("chat_id")
+    )
+    next_record = {
+      "schema": 2,
+      "source_id": source_id,
+      "last_activity": str(
+        value.get("last_activity") or value.get("updated_at") or ""
+      )[:80],
+      "deleted_at": str(value.get("deleted_at") or "") or None,
+    }
+    if value.get("source_unavailable_at"):
+      next_record["source_unavailable_at"] = str(
+        value["source_unavailable_at"]
+      )[:80]
+    if not deleted:
+      next_record["chat_id"] = str(value["chat_id"])[:128]
+      next_record["title"] = str(value.get("title") or "")[:300]
+    encoded = json.dumps(
+      next_record, ensure_ascii=False, indent=2, sort_keys=True,
+    ) + "\n"
+    previous = path.read_text(encoding="utf-8")
+    if encoded != previous:
+      path.write_text(encoded, encoding="utf-8")
+      changed.append(f"sources/{path.name}")
+  return changed
 
 
 def _archived_source_ids(staging: Path) -> set[str]:
@@ -1607,6 +1616,8 @@ def _retire_unavailable_chat_source(
     return source_id, False
   next_record = dict(record)
   next_record.pop("chat_id", None)
+  next_record.pop("title", None)
+  next_record["schema"] = 2
   next_record["source_unavailable_at"] = datetime.now(UTC).isoformat()
   _write_json_atomic(path, next_record)
   return source_id, True
@@ -3173,8 +3184,10 @@ async def run() -> int:
         _log("compacted legacy recall hot-status records")
     except OSError as exc:
       _log(f"WARN recall stats compaction failed: {exc!r}")
+    source_migrations = _migrate_source_records(staging)
     baseline = build_graph(staging, usage=load_usage())
     changed, deleted = _reconcile_app_owned_docs(staging, SEED_DIR)
+    changed = source_migrations + changed
     # Build once so the analyst receives a catalog even on first legacy import.
     prepared = build_graph(staging, usage=load_usage())
     if previous is None:
@@ -3199,10 +3212,8 @@ async def run() -> int:
       )
     intake = await asyncio.to_thread(_collect_chat_intake)
     chats = intake.chats
-    # Backfill only chats that already support a durable note. This gives old
-    # memories a source view without turning Memory into a transcript archive.
-    # New chats are archived later only when an accepted proposal actually
-    # cites them.
+    # Record metadata only for chats that support a durable note. New chats are
+    # recorded later only when an accepted proposal actually cites them.
     source_changes: list[str] = []
     known_source_chats = _known_chat_sources(staging)
     archived_active = _archived_active_chat_ids(staging)
@@ -3239,8 +3250,8 @@ async def run() -> int:
           unavailable_source_ids.add(chat_id)
       if source_chat is None:
         continue
-      source_id, source_changed = _archive_chat_source(
-        staging, source_chat, reviewed=False, capture_kind="backfill",
+      source_id, source_changed = _record_chat_source(
+        staging, source_chat,
       )
       if source_changed:
         source_changes.append(f"sources/{source_id}.json")
@@ -3373,8 +3384,8 @@ async def run() -> int:
       )
       if not cited:
         continue
-      _, source_changed = _archive_chat_source(
-        staging, source_chat, reviewed=True, capture_kind="analyst",
+      _, source_changed = _record_chat_source(
+        staging, source_chat,
       )
       if source_changed:
         changed.append(f"sources/{source_id}.json")

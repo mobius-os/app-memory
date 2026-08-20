@@ -78,7 +78,7 @@
     "ui/TextGlyph.jsx",
     "ui/NetworkGlyph.jsx",
     "ui/BackgroundAgentList.jsx",
-    "ui/SourceContext.jsx",
+    "ui/SupportingChats.jsx",
     "ui/backgroundAgentOrder.js",
     "ui/ModelPicker.jsx",
     "seed-memory/index.md",

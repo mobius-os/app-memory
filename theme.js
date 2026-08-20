@@ -666,89 +666,44 @@ export const CSS = `
   .mobius-model-sheet { border-radius:16px; }
 }
 
-/* Retained source context stays collapsed inside the note scroll until the
-   owner deliberately opens it. */
-.mg-source-context { margin-top:24px; padding-top:18px; border-top:1px solid var(--border); }
-.mg-source-heading {
-  display:flex; align-items:flex-start; justify-content:space-between;
-  gap:14px; margin-bottom:12px;
+/* Supporting chats are provenance, not a second transcript reader. */
+.mg-supporting { margin-top:26px; padding-top:18px; border-top:1px solid var(--border); }
+.mg-supporting-heading {
+  display:flex; align-items:center; justify-content:space-between;
+  gap:12px; margin-bottom:7px;
 }
-.mg-source-heading > div { display:flex; flex-direction:column; gap:3px; }
-.mg-source-heading strong { color:var(--text); font-size:13px; line-height:1.3; }
-.mg-source-heading span { color:var(--muted); font-size:11.5px; line-height:1.45; }
-.mg-source-count,
-.mg-source-state {
-  flex:0 0 auto; display:inline-grid; place-items:center; min-width:26px;
-  min-height:26px; padding:0 8px; border:1px solid var(--border);
-  border-radius:999px; background:var(--surface2); color:var(--muted);
-  font-size:10.5px; font-weight:720;
+.mg-supporting-heading strong { color:var(--text); font-size:13px; line-height:1.3; }
+.mg-supporting-heading > span {
+  color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums;
 }
-.mg-source-list { display:flex; flex-direction:column; gap:9px; }
-.mg-source-card,
-.mg-source-unavailable {
-  overflow:hidden; border:1px solid var(--border); border-radius:12px;
-  background:color-mix(in srgb,var(--surface2) 68%,var(--surface));
+.mg-supporting-list { margin:0 !important; padding:0 !important; list-style:none; }
+.mg-supporting-item {
+  display:flex; align-items:flex-start; gap:16px; padding:13px 0;
+  border-top:1px solid var(--border);
 }
-.mg-source-card > summary {
-  min-height:58px; display:flex; align-items:center; gap:12px;
-  padding:10px 11px 10px 14px; cursor:pointer; list-style:none;
-}
-.mg-source-card > summary::-webkit-details-marker { display:none; }
-.mg-source-card > summary::before {
-  content:""; width:7px; height:7px; flex:0 0 auto;
-  border-right:1.5px solid var(--muted); border-bottom:1.5px solid var(--muted);
-  transform:rotate(-45deg); transition:transform .16s ease;
-}
-.mg-source-card[open] > summary::before { transform:rotate(45deg) translate(-1px,-1px); }
-.mg-source-summary-copy {
-  min-width:0; flex:1; display:flex; flex-direction:column; gap:2px;
-}
-.mg-source-summary-copy strong {
-  overflow:hidden; color:var(--text); font-size:12.5px; line-height:1.3;
+.mg-supporting-main { min-width:0; flex:1; display:flex; flex-direction:column; gap:3px; }
+.mg-supporting-main > strong {
+  overflow:hidden; color:var(--text); font-size:12.5px; line-height:1.35;
   text-overflow:ellipsis; white-space:nowrap;
 }
-.mg-source-summary-copy span { color:var(--muted); font-size:10.75px; }
-.mg-source-state.is-deleted {
-  border-color:color-mix(in srgb,var(--accent) 26%,var(--border));
-  background:color-mix(in srgb,var(--accent) 8%,var(--surface2));
-  color:var(--accent);
+.mg-supporting-main > span { color:var(--muted); font-size:10.75px; line-height:1.4; }
+.mg-supporting-main > p {
+  margin:5px 0 0 !important; color:var(--muted); font-size:11.5px; line-height:1.5;
 }
-.mg-source-snapshots { padding:0 10px 10px; border-top:1px solid var(--border); }
-.mg-source-snapshot { padding:13px 3px 3px; }
-.mg-source-snapshot + .mg-source-snapshot { margin-top:10px; border-top:1px solid var(--border); }
-.mg-source-snapshot-head {
-  display:flex; align-items:baseline; justify-content:space-between;
-  gap:12px; margin:0 4px 9px;
+.mg-supporting-main > p b { margin-right:5px; color:var(--text); font-weight:650; }
+.mg-supporting-item > button {
+  flex:0 0 auto; min-height:44px; padding:0 11px; border:1px solid var(--border);
+  border-radius:9px; background:transparent; color:var(--accent); cursor:pointer;
+  font:600 11.5px/1 var(--font); transition:border-color .15s ease, background .15s ease;
 }
-.mg-source-snapshot-head strong { color:var(--text); font-size:11px; }
-.mg-source-snapshot-head span { color:var(--muted); font-size:10.5px; }
-.mg-source-caveat {
-  margin:0 4px 10px; color:var(--muted); font-size:10.75px; line-height:1.45;
+.mg-supporting-item > button:focus-visible {
+  outline:2px solid var(--accent); outline-offset:2px;
 }
-.mg-source-messages { display:flex; flex-direction:column; gap:7px; }
-.mg-source-message {
-  padding:9px 10px; border:1px solid var(--border); border-radius:10px;
-  background:var(--surface);
-}
-.mg-source-message.is-user {
-  border-color:color-mix(in srgb,var(--accent) 20%,var(--border));
-  background:color-mix(in srgb,var(--accent) 5%,var(--surface));
-}
-.mg-source-message > span {
-  display:block; margin-bottom:4px; color:var(--muted); font-size:9.5px;
-  font-weight:760; letter-spacing:.04em; text-transform:uppercase;
-}
-.mg-source-message > p {
-  margin:0; color:var(--text); font-size:11.5px; line-height:1.5;
-  white-space:pre-wrap; word-break:break-word;
-}
-.mg-source-unavailable { display:flex; flex-direction:column; gap:4px; padding:12px 14px; }
-.mg-source-unavailable strong { color:var(--text); font-size:12px; }
-.mg-source-unavailable span { color:var(--muted); font-size:11px; line-height:1.45; }
-.mg-source-loading {
-  height:58px; border:1px solid var(--border); border-radius:12px;
-  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--text) 5%,transparent),transparent),var(--surface2);
-  background-size:220% 100%; animation:mg-shimmer 1.4s linear infinite;
+@media (hover:hover) and (pointer:fine) {
+  .mg-supporting-item > button:hover {
+    border-color:color-mix(in srgb,var(--accent) 55%,var(--border));
+    background:color-mix(in srgb,var(--accent) 7%,transparent);
+  }
 }
 
 @media (hover: hover) {
@@ -854,7 +809,7 @@ export const CSS = `
 }
 /* mobius-ui:ReducedMotion v1 — keep in sync; library candidate. Diverge below the marker only. */
 @media (prefers-reduced-motion: reduce) {
-  .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-source-loading, .mg-panel, .mg-scrim, .mg-star-hub, .mg-settings-deck, .mg-settings-backdrop { animation: none !important; }
+  .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub, .mg-settings-deck, .mg-settings-backdrop { animation: none !important; }
   .mg-svg-node, .mg-svg-label, .mg-legend-chevron { transition: none !important; }
 }
 /* /mobius-ui:ReducedMotion */
