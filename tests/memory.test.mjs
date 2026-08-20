@@ -20,6 +20,22 @@ test('retrieval settings keep defaults quiet and reveal custom raw limits only i
   assert.match(source, /if \(!settingsLoaded\)[\s\S]*setSettingsStatus\('error'\)/)
 })
 
+test('supporting chats show provenance without duplicating transcript excerpts', () => {
+  const source = readFileSync(new URL('../ui/SupportingChats.jsx', import.meta.url), 'utf8')
+  const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const manifest = JSON.parse(readFileSync(new URL('../mobius.json', import.meta.url), 'utf8'))
+
+  assert.match(source, /Supporting chats/)
+  assert.match(source, /Last activity/)
+  assert.match(source, /Contributed/)
+  assert.match(source, /Open chat/)
+  assert.doesNotMatch(source, /snapshot|message\.text|excerpt/i)
+  assert.match(app, /contribution=\{selected\?\.description\}/)
+  assert.doesNotMatch(app, /contribution=\{selected\?\.description \|\| selected\?\.title\}/)
+  assert.ok(manifest.source_files.includes('ui/SupportingChats.jsx'))
+  assert.ok(!manifest.source_files.includes('ui/SourceContext.jsx'))
+})
+
 const {
   buildLocalGraphData,
   computeRendererFitTransform,

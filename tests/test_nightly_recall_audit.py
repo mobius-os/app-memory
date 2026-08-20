@@ -646,7 +646,7 @@ def test_deleted_chat_backlinks_are_anonymized_and_deduplicated(
   assert memory_runner._known_deleted_source(tmp_path) is True
 
 
-def test_source_archive_retains_reviewed_text_and_scrubs_deleted_chat_id(
+def test_source_record_keeps_metadata_only_and_scrubs_deleted_chat_identity(
   tmp_path, monkeypatch,
 ):
   monkeypatch.setattr(
@@ -665,30 +665,61 @@ def test_source_archive_retains_reviewed_text_and_scrubs_deleted_chat_id(
     ],
   }
 
-  source_id, changed = memory_runner._archive_chat_source(
-    staging, active, reviewed=True, capture_kind="analyst",
-  )
+  source_id, changed = memory_runner._record_chat_source(staging, active)
   assert changed is True
   path = staging / "sources" / f"{source_id}.json"
   record = json.loads(path.read_text())
   assert record["chat_id"] == "chat-source-one"
-  assert record["snapshots"][0]["reviewed"] is True
-  assert record["snapshots"][0]["input"]["messages"] == active["messages"]
+  assert record["title"] == "A useful conversation"
+  assert record["last_activity"] == "2026-07-30T00:00:00"
+  assert "snapshots" not in record
+  assert "messages" not in path.read_text()
 
   deleted = {
     **active,
     "deleted_at": "2026-07-31T00:00:00",
   }
-  next_source_id, changed = memory_runner._archive_chat_source(
-    staging, deleted, reviewed=False, capture_kind="retention",
-  )
+  next_source_id, changed = memory_runner._record_chat_source(staging, deleted)
   assert next_source_id == source_id
   assert changed is True
   record = json.loads(path.read_text())
   assert "chat_id" not in record
+  assert "title" not in record
   assert "chat-source-one" not in path.read_text()
   assert record["deleted_at"] == "2026-07-31T00:00:00"
-  assert len(record["snapshots"]) == 2
+  assert record["last_activity"] == "2026-07-30T00:00:00"
+
+
+def test_source_record_migration_removes_historical_excerpt_data(tmp_path):
+  staging = tmp_path / "repository"
+  (staging / "sources").mkdir(parents=True)
+  source_id = "a" * 32
+  path = staging / "sources" / f"{source_id}.json"
+  path.write_text(json.dumps({
+    "schema": 1,
+    "source_id": source_id,
+    "chat_id": "active-chat",
+    "title": "A useful chat",
+    "updated_at": "2026-08-19T12:00:00+00:00",
+    "deleted_at": None,
+    "snapshots": [{
+      "input": {"messages": [{"role": "user", "text": "private excerpt"}]},
+    }],
+  }))
+
+  changed = memory_runner._migrate_source_records(staging)
+
+  assert changed == [f"sources/{source_id}.json"]
+  record = json.loads(path.read_text())
+  assert record == {
+    "schema": 2,
+    "source_id": source_id,
+    "chat_id": "active-chat",
+    "title": "A useful chat",
+    "last_activity": "2026-08-19T12:00:00+00:00",
+    "deleted_at": None,
+  }
+  assert "private excerpt" not in path.read_text()
 
 
 def test_purged_source_retirement_scrubs_chat_id_without_a_detail_record(
@@ -706,9 +737,7 @@ def test_purged_source_retirement_scrubs_chat_id_without_a_detail_record(
     "deleted_at": None,
     "messages": [{"role": "user", "text": "A durable fact."}],
   }
-  source_id, _ = memory_runner._archive_chat_source(
-    staging, chat, reviewed=True, capture_kind="analyst",
-  )
+  source_id, _ = memory_runner._record_chat_source(staging, chat)
 
   next_source_id, changed = memory_runner._retire_unavailable_chat_source(
     staging, "purged-source",
@@ -762,7 +791,7 @@ def test_source_catalog_marks_a_scrubbed_archive_deleted(tmp_path):
     "title": "Purged source",
     "deleted_at": None,
     "source_unavailable_at": "2026-08-01T00:00:00+00:00",
-    "snapshots": [],
+    "last_activity": "2026-07-30T00:00:00+00:00",
   }))
 
   by_id, by_chat_id = memory_graph._source_catalog(tmp_path)
@@ -823,18 +852,18 @@ def test_graph_catalog_links_note_to_source_archive(tmp_path):
     "source_id": source_id,
     "chat_id": "active-chat",
     "title": "Source conversation",
+    "last_activity": "2026-08-01T12:00:00+00:00",
     "deleted_at": None,
-    "snapshots": [{"hash": "x"}],
   }))
 
   graph = memory_graph.build(tmp_path)
   fact = next(node for node in graph["nodes"] if node["id"] == "fact")
   assert fact["source_refs"] == [{
     "source_id": source_id,
-    "file": f"sources/{source_id}.json",
     "kind": "active",
+    "chat_id": "active-chat",
     "title": "Source conversation",
-    "snapshot_count": 1,
+    "last_activity": "2026-08-01T12:00:00+00:00",
   }]
 
 
