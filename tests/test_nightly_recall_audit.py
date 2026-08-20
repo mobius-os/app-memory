@@ -1260,6 +1260,44 @@ def test_oversized_recall_audit_does_not_freeze_chat_consolidation(
   assert result.rejected_audit_count == 1
 
 
+def test_oversized_oldest_audit_does_not_starve_later_hindsight(
+  monkeypatch, tmp_path,
+):
+  graph = {"nodes": [], "edges": [], "problems": []}
+  oversized = {"read_id": "oversized-audit"}
+  fitting = {"read_id": "fitting-audit"}
+  proposal = {
+    "updates": [], "deletes": [], "summary": "Reviewed later hindsight.",
+    "followups": [], "read_audits": [{"read_id": "fitting-audit"}],
+    "self_review": _self_review(),
+  }
+  outcome = memory_runner.ProposalOutcome(
+    "ok", proposal, "codex", "gpt-test", [],
+  )
+
+  def audit_batch(_staging, remaining):
+    return ([], len(remaining)) if remaining[0] is oversized else ([remaining[0]], 0)
+
+  monkeypatch.setattr(memory_runner, "_audit_prompt_batch", audit_batch)
+  monkeypatch.setattr(
+    memory_runner, "_proposal_envelope", lambda *_args: ("{}", []),
+  )
+  monkeypatch.setattr(memory_runner, "_proposal", lambda *_args: outcome)
+  monkeypatch.setattr(
+    memory_runner, "_apply_validated_proposal",
+    lambda _staging, value, **_kwargs: (value, [], [], graph),
+  )
+
+  result = memory_runner._consolidate_batches(
+    57, tmp_path, graph, [], [oversized, fitting],
+    memory_runner.ProviderPool([]),
+  )
+
+  assert result.accepted_audits == [fitting]
+  assert result.rejected_audit_count == 1
+  assert result.deferred_reason == "read_audit_over_budget"
+
+
 def test_unfit_routing_context_remains_a_hard_failure(
   monkeypatch, tmp_path,
 ):

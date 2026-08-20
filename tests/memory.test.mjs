@@ -268,6 +268,8 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(source, /Boolean\(fallbackProviderValue \|\| fallbackModelValue\)/)
   assert.match(source, /effort: null/)
   assert.match(source, /fallback_effort: null/)
+  assert.match(source, /const agentPayload = agentStatus === 'ready' \? \{/)
+  assert.match(source, /\.\.\.currentSettings,\s*\.\.\.agentPayload,/)
   assert.doesNotMatch(source, /EffortStepper|EFFORT_LEVELS|agentEffort/)
   const picker = readFileSync(new URL('../ui/ModelPicker.jsx', import.meta.url), 'utf8')
   const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')

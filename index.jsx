@@ -947,8 +947,11 @@ export default function App({ appId, token }) {
     if (retrievalSave) setSettingsMessage('');
     else setAgentMessage('');
     const { live_breadth: _retiredLiveBreadth, ...currentSettings } = agentSettingsExtra;
-    const payload = {
-      ...currentSettings,
+    // Retrieval settings remain independently usable when provider discovery
+    // is unavailable. In that degraded state the agent controls still hold
+    // their mount defaults, so preserve the loaded agent fields verbatim
+    // instead of replacing them with those defaults.
+    const agentPayload = agentStatus === 'ready' ? {
       primary_agent_mode: primaryAgentMode === 'app' ? 'app' : 'system',
       provider: primaryAgentMode === 'app' ? (agentProvider || 'claude') : null,
       model: primaryAgentMode === 'app' ? (agentModel || null) : null,
@@ -959,6 +962,10 @@ export default function App({ appId, token }) {
         ? (secondaryAgentModel || null)
         : null,
       fallback_effort: null,
+    } : {};
+    const payload = {
+      ...currentSettings,
+      ...agentPayload,
       live_depth: policyNumber(liveDepth, 4),
       night_breadth: policyNumber(nightBreadth, 6),
       night_depth: policyNumber(nightDepth, 6),
@@ -998,6 +1005,7 @@ export default function App({ appId, token }) {
     agentSaving,
     agentSettingsExtra,
     settingsSection,
+    agentStatus,
     primaryAgentMode,
     agentProvider,
     agentModel,

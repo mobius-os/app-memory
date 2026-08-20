@@ -3001,8 +3001,15 @@ def _consolidate_batches(
         deferred_detail = (
           "oldest Memory recall audit exceeds the analyst prompt budget"
         )
-        rejected_audit_count = 1
-        audit_batch_count = _MAX_AUDIT_PROPOSAL_BATCHES_PER_RUN
+        # Rotate only this poison item out of the current lane. It remains
+        # pending for a future run, but later bounded audits can still advance
+        # now instead of queueing forever behind the oldest oversized record.
+        # Dropping it only from this in-memory run leaves the durable trace
+        # pending, so the next scheduled run may retry after the graph or
+        # compaction changes without cycling over the same poison item now.
+        remaining_audits.pop(0)
+        rejected_audit_count += 1
+        audit_batch_count += 1
         continue
       batch = []
       work_kind = "audit"
