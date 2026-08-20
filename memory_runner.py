@@ -709,6 +709,10 @@ def _audit_prompt_view(audit: dict) -> dict:
   node bodies and hindsight remain intact because they carry outcome evidence.
   """
   value = copy.deepcopy(audit)
+  # Canonical chat ids are host-side validation data. The analyst receives
+  # only the short source handle carried beside the bounded hindsight chat.
+  value.pop("hindsight_source_id", None)
+  value.pop("hindsight_source_deleted", None)
 
   def compact_frontier(section: object) -> None:
     if not isinstance(section, dict):
@@ -826,8 +830,17 @@ def _audit_reads(
     deep_files = [node.path for node in deep.selected]
     hindsight = hindsight_chats.get(str(trace.get("chat_id") or ""))
     bounded_hindsight = _bounded_chat(hindsight) if isinstance(hindsight, dict) else None
+    hindsight_source_id = None
+    hindsight_source_deleted = False
     if isinstance(bounded_hindsight, dict):
-      bounded_hindsight.pop("id", None)
+      hindsight_source_id = bounded_hindsight.pop("id", None)
+      hindsight_source_deleted = bool(bounded_hindsight.get("deleted_at"))
+      if isinstance(hindsight_source_id, str) and hindsight_source_id:
+        bounded_hindsight["source_handle"] = (
+          f"deleted:h{len(audits) + 1:02d}"
+          if hindsight_source_deleted
+          else f"chat:h{len(audits) + 1:02d}"
+        )
     audits.append({
       "read_id": str(trace["read_id"]),
       "at": str(trace["at"]),
@@ -884,6 +897,8 @@ def _audit_reads(
         path for path in deep_files if path not in live_files
       ],
       "hindsight_chat": bounded_hindsight,
+      "hindsight_source_id": hindsight_source_id,
+      "hindsight_source_deleted": hindsight_source_deleted,
     })
   return audits
 
@@ -1940,8 +1955,29 @@ def _proposal(
 ) -> ProposalOutcome:
   prompt = _proposal_prompt(staging, chats, read_audits)
   source_handles = _source_handles(chats)
-  allowed_chat_ids = set(source_handles.values()) | _known_chat_sources(staging)
   deleted_handles = _deleted_source_handles(chats)
+  # Hindsight is a later conversation, not necessarily one of this proposal's
+  # queued consolidation chats. Give it the same closed-set citation path so a
+  # writer can promote a verified lesson instead of repeating an uncitable
+  # follow-up on every subsequent night.
+  for audit in read_audits or []:
+    if not isinstance(audit, dict):
+      continue
+    source_id = audit.get("hindsight_source_id")
+    hindsight = audit.get("hindsight_chat")
+    handle_value = (
+      hindsight.get("source_handle") if isinstance(hindsight, dict) else None
+    )
+    if not isinstance(source_id, str) or not source_id:
+      continue
+    if not isinstance(handle_value, str) or ":" not in handle_value:
+      continue
+    prefix, handle = handle_value.split(":", 1)
+    if prefix == "chat":
+      source_handles.setdefault(handle, source_id)
+    elif prefix == "deleted":
+      deleted_handles.setdefault(handle, source_id)
+  allowed_chat_ids = set(source_handles.values()) | _known_chat_sources(staging)
   deleted_source_handles = {
     handle: _source_archive_id(chat_id)
     for handle, chat_id in deleted_handles.items()
@@ -1953,9 +1989,18 @@ def _proposal(
     str(chat["id"])
     for chat in chats
     if chat.get("deleted_at") and isinstance(chat.get("id"), str)
+  } | {
+    str(audit["hindsight_source_id"])
+    for audit in (read_audits or []) if isinstance(audit, dict)
+    and audit.get("hindsight_source_deleted")
+    and isinstance(audit.get("hindsight_source_id"), str)
   }
   allow_deleted_source = (
     any(chat.get("deleted_at") for chat in chats)
+    or any(
+      isinstance(audit, dict) and audit.get("hindsight_source_deleted")
+      for audit in (read_audits or [])
+    )
     or _known_deleted_source(staging)
   )
   attempted = []

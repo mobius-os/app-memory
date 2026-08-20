@@ -945,6 +945,8 @@ def test_audit_prompt_view_deduplicates_frontier_catalog_metadata(
 ):
   audit = {
     "read_id": "read-1",
+    "hindsight_source_id": "private-chat-id",
+    "hindsight_source_deleted": False,
     "question": "What would help?",
     "live": {
       "selected": ["notes/useful.md"],
@@ -995,7 +997,98 @@ def test_audit_prompt_view_deduplicates_frontier_catalog_metadata(
   assert supplied["deep"]["decisions"] == [{
     "round": 1, "selected": ["useful"], "reason": "Relevant.",
   }]
+  assert "hindsight_source_id" not in supplied
+  assert "hindsight_source_deleted" not in supplied
   assert audit["live"]["frontier_at_stop"][0]["description"] == "x" * 2_000
+
+
+def test_hindsight_source_handle_can_cite_the_later_chat(monkeypatch, tmp_path):
+  providers = memory_runner.ProviderPool([
+    {"provider": "claude", "model": "claude-test", "effort": None},
+  ])
+  audit = {
+    "read_id": "read-1",
+    "hindsight_source_id": "later-chat",
+    "hindsight_source_deleted": False,
+    "hindsight_chat": {
+      "source_handle": "chat:h01",
+      "messages": [{"role": "user", "text": "That context fixed it."}],
+    },
+  }
+  proposal = {
+    "updates": [{
+      "path": "notes/lesson-from-hindsight.md",
+      "content": (
+        "---\ntitle: Lesson from hindsight\ntype: note\n"
+        "mocs: [about-the-user]\nsource: [chat:h01]\n---\nUseful lesson.\n"
+      ),
+    }],
+    "deletes": [],
+    "summary": "Promoted the verified later outcome.",
+    "followups": [],
+    "read_audits": [{
+      "read_id": "read-1", "outcome": "ok", "overreach": False,
+      "missed_nodes": [], "overselected_nodes": [],
+      "reason": "The later chat established the outcome.",
+    }],
+    "self_review": _self_review(),
+  }
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
+  monkeypatch.setattr(
+    memory_runner, "run_text",
+    lambda *_args, **_kwargs: TextResult(json.dumps(proposal)),
+  )
+
+  result = memory_runner._proposal(57, tmp_path, [], [audit], providers)
+
+  assert result.status == "ok"
+  assert "source: [chat:later-chat]" in result.proposal["updates"][0]["content"]
+
+
+def test_deleted_hindsight_source_uses_only_opaque_provenance(monkeypatch, tmp_path):
+  providers = memory_runner.ProviderPool([
+    {"provider": "claude", "model": "claude-test", "effort": None},
+  ])
+  audit = {
+    "read_id": "read-1",
+    "hindsight_source_id": "deleted-later-chat",
+    "hindsight_source_deleted": True,
+    "hindsight_chat": {
+      "source_handle": "deleted:h01", "deleted_at": "2026-08-20T00:00:00Z",
+      "messages": [{"role": "user", "text": "That context fixed it."}],
+    },
+  }
+  proposal = {
+    "updates": [{
+      "path": "notes/deleted-hindsight.md",
+      "content": (
+        "---\ntitle: Deleted hindsight\ntype: note\n"
+        "mocs: [about-the-user]\nsource: [deleted:h01]\n---\nUseful lesson.\n"
+      ),
+    }],
+    "deletes": [], "summary": "Promoted verified hindsight.", "followups": [],
+    "read_audits": [{
+      "read_id": "read-1", "outcome": "ok", "overreach": False,
+      "missed_nodes": [], "overselected_nodes": [], "reason": "Verified.",
+    }],
+    "self_review": _self_review(),
+  }
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
+  monkeypatch.setattr(memory_runner, "_known_deleted_source_ids", lambda _path: set())
+  monkeypatch.setattr(memory_runner, "_known_deleted_source", lambda _path: False)
+  monkeypatch.setattr(
+    memory_runner, "run_text",
+    lambda *_args, **_kwargs: TextResult(json.dumps(proposal)),
+  )
+
+  result = memory_runner._proposal(57, tmp_path, [], [audit], providers)
+  content = result.proposal["updates"][0]["content"]
+
+  assert result.status == "ok"
+  assert "source: [deleted-chat:" in content
+  assert "deleted-later-chat" not in content
 
 
 def test_audit_prompt_view_preserves_grouped_frontier_route_references():
