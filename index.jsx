@@ -13,7 +13,7 @@
 // shell navigation state, and mounts the graph, list, and note-panel UI.
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { ChevronDown, SettingsCog } from '@openai/apps-sdk-ui/components/Icon'
-import { EFFORT_LEVELS, NOTE_BASE, PALETTE, S, defaultEffort } from './constants.js'
+import { NOTE_BASE, PALETTE, S } from './constants.js'
 import { CSS } from './theme.js'
 import { makeSharedMemoryStore } from './storage.js'
 import {
@@ -46,7 +46,6 @@ import { ChatGlyph } from './ui/ChatGlyph.jsx'
 import { TextGlyph } from './ui/TextGlyph.jsx'
 import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
-import { EffortStepper } from './ui/EffortStepper.jsx'
 import { BackgroundAgentList } from './ui/BackgroundAgentList.jsx'
 import { SourceContext } from './ui/SourceContext.jsx'
 import { agentSlotLabel, canReorderAgentSlots, reorderAgentSlots } from './ui/backgroundAgentOrder.js'
@@ -110,17 +109,6 @@ function isKnownAgentProvider(provider) {
   return AGENT_PROVIDER_META.some((meta) => meta.key === provider);
 }
 
-function effortForProvider(provider, value) {
-  const levels = EFFORT_LEVELS[provider] || [];
-  return levels.some((level) => level.value === value)
-    ? value
-    : defaultEffort(provider);
-}
-
-function effortLabel(provider, value) {
-  return (EFFORT_LEVELS[provider] || []).find((level) => level.value === value)?.label || value;
-}
-
 function policyNumber(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? Math.max(1, Math.min(12, parsed)) : fallback;
@@ -165,23 +153,23 @@ export default function App({ appId, token }) {
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState('');
   const [agentStatus, setAgentStatus] = useState('idle'); // idle | loading | ready | error
+  const [settingsStatus, setSettingsStatus] = useState('idle'); // shared settings document
+  const [settingsMessage, setSettingsMessage] = useState('');
   const [agentGroups, setAgentGroups] = useState(null);
   const [connectedProviders, setConnectedProviders] = useState(null);
   const [agentSettingsExtra, setAgentSettingsExtra] = useState({});
   const [primaryAgentMode, setPrimaryAgentMode] = useState('system');
   const [agentProvider, setAgentProvider] = useState('claude');
   const [agentModel, setAgentModel] = useState('');
-  const [agentEffort, setAgentEffort] = useState(defaultEffort('claude'));
   const [secondaryAgentMode, setSecondaryAgentMode] = useState('system');
   const [secondaryAgentProvider, setSecondaryAgentProvider] = useState('');
   const [secondaryAgentModel, setSecondaryAgentModel] = useState('');
-  const [secondaryAgentEffort, setSecondaryAgentEffort] = useState('');
   const [agentSaving, setAgentSaving] = useState(false);
   const [agentMessage, setAgentMessage] = useState('');
   const [liveDepth, setLiveDepth] = useState(4);
   const [nightBreadth, setNightBreadth] = useState(6);
   const [nightDepth, setNightDepth] = useState(6);
-  const [recallStats, setRecallStats] = useState(null);
+  const hasCustomRecallLimits = liveDepth !== 4 || nightBreadth !== 6 || nightDepth !== 6;
   const [localDepth, setLocalDepth] = useState(1);
   // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
   // Defaults to 'text' — the user arrives here from the global graph, so they
@@ -652,15 +640,17 @@ export default function App({ appId, token }) {
   }, [agentGroups, connectedProviders]);
 
   const loadAgentSettings = useCallback(async () => {
+    let settingsLoaded = false;
     setAgentStatus('loading');
+    setSettingsStatus('loading');
     setAgentMessage('');
+    setSettingsMessage('');
     try {
       const headers = authHeaders;
-      const [settingsRes, statusRes, modelsRes, statsRes] = await Promise.all([
+      const [settingsRes, statusRes, modelsRes] = await Promise.all([
         fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, { headers }),
         fetch('/api/auth/providers/status', { headers }).catch(() => null),
         fetch('/api/auth/providers/models', { headers }).catch(() => null),
-        fetch(`${NOTE_BASE}app-state/recall-stats.json`, { headers }).catch(() => null),
       ]);
       if (!settingsRes.ok && settingsRes.status !== 404) {
         throw new Error('Could not load agent settings.');
@@ -669,17 +659,12 @@ export default function App({ appId, token }) {
       const safeSettings = settings && typeof settings === 'object' && !Array.isArray(settings)
         ? settings
         : {};
+      settingsLoaded = true;
+      setSettingsStatus('ready');
       setAgentSettingsExtra(safeSettings);
       setLiveDepth(policyNumber(safeSettings.live_depth, 4));
       setNightBreadth(policyNumber(safeSettings.night_breadth, 6));
       setNightDepth(policyNumber(safeSettings.night_depth, 6));
-      if (statsRes?.ok) {
-        const value = await statsRes.json();
-        setRecallStats(value && typeof value === 'object' ? value : null);
-      } else {
-        setRecallStats(null);
-      }
-
       let connected = null;
       if (statusRes?.ok) {
         const data = await statusRes.json();
@@ -702,27 +687,21 @@ export default function App({ appId, token }) {
       const modelValue = typeof safeSettings.model === 'string'
         ? safeSettings.model.trim()
         : '';
-      const effortValue = typeof safeSettings.effort === 'string'
-        ? safeSettings.effort.trim()
-        : '';
       const fallbackProviderValue = typeof safeSettings.fallback_provider === 'string'
         ? safeSettings.fallback_provider.trim()
         : '';
       const fallbackModelValue = typeof safeSettings.fallback_model === 'string'
         ? safeSettings.fallback_model.trim()
         : '';
-      const fallbackEffortValue = typeof safeSettings.fallback_effort === 'string'
-        ? safeSettings.fallback_effort.trim()
-        : '';
 
       const primaryMode = safeSettings.primary_agent_mode === 'custom'
         || safeSettings.primary_agent_mode === 'app'
-        || (safeSettings.primary_agent_mode !== 'system' && Boolean(providerValue || modelValue || effortValue))
+        || (safeSettings.primary_agent_mode !== 'system' && Boolean(providerValue || modelValue))
         ? 'app'
         : 'system';
       const secondaryMode = safeSettings.secondary_agent_mode === 'custom'
         || safeSettings.secondary_agent_mode === 'app'
-        || (safeSettings.secondary_agent_mode !== 'system' && Boolean(fallbackProviderValue || fallbackModelValue || fallbackEffortValue))
+        || (safeSettings.secondary_agent_mode !== 'system' && Boolean(fallbackProviderValue || fallbackModelValue))
         ? 'app'
         : 'system';
       setPrimaryAgentMode(primaryMode);
@@ -731,7 +710,6 @@ export default function App({ appId, token }) {
       if (isKnownAgentProvider(providerValue)) {
         setAgentProvider(providerValue);
         setAgentModel(modelValue);
-        setAgentEffort(effortForProvider(providerValue, effortValue));
       } else {
         const chosen = groups.find((group) => (!connected || connected.has(group.key)) && group.models?.length)
           || groups.find((group) => group.models?.length)
@@ -739,18 +717,20 @@ export default function App({ appId, token }) {
         if (chosen) {
           setAgentProvider(chosen.key);
           setAgentModel(chosen.models?.[0]?.id || '');
-          setAgentEffort(defaultEffort(chosen.key));
         }
       }
       if (isKnownAgentProvider(fallbackProviderValue)) {
         setSecondaryAgentProvider(fallbackProviderValue);
         setSecondaryAgentModel(fallbackModelValue);
-        setSecondaryAgentEffort(effortForProvider(fallbackProviderValue, fallbackEffortValue));
       }
       setAgentStatus('ready');
     } catch (err) {
       setAgentStatus('error');
       setAgentMessage(err.message || 'Could not load agent settings.');
+      if (!settingsLoaded) {
+        setSettingsStatus('error');
+        setSettingsMessage(err.message || 'Could not load settings.');
+      }
     }
   }, [appId, authHeaders]);
 
@@ -913,7 +893,6 @@ export default function App({ appId, token }) {
     if (chosen) {
       setAgentProvider(chosen.key);
       setAgentModel(chosen.models?.[0]?.id || '');
-      setAgentEffort(defaultEffort(chosen.key));
     }
   }, [agentGroups, agentProvider, agentModel, chooseAgentGroup]);
 
@@ -928,7 +907,6 @@ export default function App({ appId, token }) {
     if (chosen) {
       setSecondaryAgentProvider(chosen.key);
       setSecondaryAgentModel(chosen.models?.[0]?.id || '');
-      setSecondaryAgentEffort(defaultEffort(chosen.key));
     }
   }, [agentGroups, agentProvider, secondaryAgentProvider, secondaryAgentModel, chooseAgentGroup]);
 
@@ -937,12 +915,10 @@ export default function App({ appId, token }) {
       mode: primaryAgentMode,
       provider: agentProvider,
       model: agentModel,
-      effort: agentEffort,
     }, {
       mode: secondaryAgentMode,
       provider: secondaryAgentProvider,
       model: secondaryAgentModel,
-      effort: secondaryAgentEffort,
     }];
     const ordered = reorderAgentSlots(slots, fromIndex, toIndex);
     if (ordered === slots) return false;
@@ -950,43 +926,46 @@ export default function App({ appId, token }) {
     setPrimaryAgentMode(primary.mode);
     setAgentProvider(primary.provider);
     setAgentModel(primary.model);
-    setAgentEffort(primary.effort);
     setSecondaryAgentMode(secondary.mode);
     setSecondaryAgentProvider(secondary.provider);
     setSecondaryAgentModel(secondary.model);
-    setSecondaryAgentEffort(secondary.effort);
     setAgentMessage('');
     return true;
   }, [
     primaryAgentMode,
     agentProvider,
     agentModel,
-    agentEffort,
     secondaryAgentMode,
     secondaryAgentProvider,
     secondaryAgentModel,
-    secondaryAgentEffort,
   ]);
 
   const saveAgentSettings = useCallback(async () => {
     if (agentSaving) return;
     setAgentSaving(true);
-    setAgentMessage('');
+    const retrievalSave = settingsSection === 'retrieval';
+    if (retrievalSave) setSettingsMessage('');
+    else setAgentMessage('');
     const { live_breadth: _retiredLiveBreadth, ...currentSettings } = agentSettingsExtra;
-    const payload = {
-      ...currentSettings,
+    // Retrieval settings remain independently usable when provider discovery
+    // is unavailable. In that degraded state the agent controls still hold
+    // their mount defaults, so preserve the loaded agent fields verbatim
+    // instead of replacing them with those defaults.
+    const agentPayload = agentStatus === 'ready' ? {
       primary_agent_mode: primaryAgentMode === 'app' ? 'app' : 'system',
       provider: primaryAgentMode === 'app' ? (agentProvider || 'claude') : null,
       model: primaryAgentMode === 'app' ? (agentModel || null) : null,
-      effort: primaryAgentMode === 'app' ? effortForProvider(agentProvider, agentEffort) : null,
+      effort: null,
       secondary_agent_mode: secondaryAgentMode === 'app' ? 'app' : 'system',
       fallback_provider: secondaryAgentMode === 'app' ? (secondaryAgentProvider || null) : null,
       fallback_model: secondaryAgentMode === 'app' && secondaryAgentProvider
         ? (secondaryAgentModel || null)
         : null,
-      fallback_effort: secondaryAgentMode === 'app' && secondaryAgentProvider
-        ? effortForProvider(secondaryAgentProvider, secondaryAgentEffort)
-        : null,
+      fallback_effort: null,
+    } : {};
+    const payload = {
+      ...currentSettings,
+      ...agentPayload,
       live_depth: policyNumber(liveDepth, 4),
       night_breadth: policyNumber(nightBreadth, 6),
       night_depth: policyNumber(nightDepth, 6),
@@ -1006,10 +985,17 @@ export default function App({ appId, token }) {
         throw new Error(detail || 'Could not save agent settings.');
       }
       setAgentSettingsExtra(payload);
-      setAgentMessage('Settings saved');
-      setTimeout(() => setAgentMessage(''), 2200);
+      if (retrievalSave) {
+        setSettingsMessage('Settings saved');
+        setTimeout(() => setSettingsMessage(''), 2200);
+      } else {
+        setAgentMessage('Settings saved');
+        setTimeout(() => setAgentMessage(''), 2200);
+      }
     } catch (err) {
-      setAgentMessage(err.message || 'Could not save agent settings.');
+      const message = err.message || 'Could not save settings.';
+      if (retrievalSave) setSettingsMessage(message);
+      else setAgentMessage(message);
     } finally {
       setAgentSaving(false);
     }
@@ -1018,14 +1004,14 @@ export default function App({ appId, token }) {
     authHeaders,
     agentSaving,
     agentSettingsExtra,
+    settingsSection,
+    agentStatus,
     primaryAgentMode,
     agentProvider,
     agentModel,
-    agentEffort,
     secondaryAgentMode,
     secondaryAgentProvider,
     secondaryAgentModel,
-    secondaryAgentEffort,
     liveDepth,
     nightBreadth,
     nightDepth,
@@ -1131,8 +1117,8 @@ export default function App({ appId, token }) {
   const selectedUpdated = relDate(noteState.fm.updated);
   const visibleAgentGroups = agentGroups || [];
   const agentSlots = [
-    { mode: primaryAgentMode, provider: agentProvider, model: agentModel, effort: agentEffort },
-    { mode: secondaryAgentMode, provider: secondaryAgentProvider, model: secondaryAgentModel, effort: secondaryAgentEffort },
+    { mode: primaryAgentMode, provider: agentProvider, model: agentModel },
+    { mode: secondaryAgentMode, provider: secondaryAgentProvider, model: secondaryAgentModel },
   ];
   const canReorderAgents = canReorderAgentSlots(agentSlots);
   const agentLabels = [
@@ -1267,7 +1253,7 @@ export default function App({ appId, token }) {
                 {[
                   ['schedule', 'Schedule', 'When nightly review runs'],
                   ['agents', 'Background agents', 'Models and priority'],
-                  ['retrieval', 'Retrieval', 'Live and nightly search limits'],
+                  ['retrieval', 'Recall', 'How Memory finds context'],
                 ].map(([key, label, hint]) => (
                   <button
                     key={key}
@@ -1287,41 +1273,18 @@ export default function App({ appId, token }) {
                   <div className="mg-settings-section">
                     <div className="mg-section-intro">
                       <div>
-                        <div className="mg-settings-kicker">Graph retrieval</div>
-                        <h3>How far Memory can explore</h3>
+                        <h3>Memory tunes its own recall</h3>
                       </div>
                       <p>
-                        Live reads choose once from the root-reachable catalog. Depth limits which layers are eligible; breadth remains a nightly replay control.
+                        It reviews what helped, what it missed, and what was unnecessary. Reflection reports the useful conclusions rather than exposing the machinery here.
                       </p>
                     </div>
 
-                    <div className="mg-stat-grid" aria-label="Retrieval quality">
-                      <div className="mg-stat-card">
-                        <span>Audited reads</span>
-                        <strong>{Number(recallStats?.reads_audited || 0)}</strong>
-                      </div>
-                      <div className="mg-stat-card">
-                        <span>Miss rate</span>
-                        <strong>{Math.round(Number(recallStats?.miss_rate ?? recallStats?.important_miss_rate ?? 0) * 100)}%</strong>
-                      </div>
-                      <div className="mg-stat-card">
-                        <span>Overreach</span>
-                        <strong>{Math.round(Number(recallStats?.overreach_rate || 0) * 100)}%</strong>
-                      </div>
-                      <div className="mg-stat-card">
-                        <span>Host overrides</span>
-                        <strong>{Math.round(Number(recallStats?.model_to_host_selection_override_rate || 0) * 100)}%</strong>
-                      </div>
-                    </div>
-
-                    {agentStatus === 'idle' || agentStatus === 'loading' ? (
-                      <div className="mg-settings-loading">Loading retrieval settings…</div>
-                    ) : agentStatus === 'error' ? (
-                      <div className="mg-settings-callout is-error">
-                        <span>{agentMessage}</span>
-                        <button type="button" onClick={loadAgentSettings}>Retry</button>
-                      </div>
-                    ) : (
+                    <details className="mg-advanced-policy">
+                      <summary>
+                        <span>Advanced search limits{hasCustomRecallLimits ? ' · Custom' : ''}</span>
+                        <small>Tune recall only when testing a specific hypothesis.</small>
+                      </summary>
                       <div className="mg-policy-grid">
                         <fieldset className="mg-policy-card">
                           <legend>Live reads <span>One-pass semantic recall</span></legend>
@@ -1339,7 +1302,7 @@ export default function App({ appId, token }) {
                               value={liveDepth}
                               onChange={(event) => {
                                 setLiveDepth(policyNumber(event.target.value, 4));
-                                setAgentMessage('');
+                                setSettingsMessage('');
                               }}
                             />
                           </label>
@@ -1356,7 +1319,7 @@ export default function App({ appId, token }) {
                               value={nightBreadth}
                               onChange={(event) => {
                                 setNightBreadth(policyNumber(event.target.value, 6));
-                                setAgentMessage('');
+                                setSettingsMessage('');
                               }}
                             />
                           </label>
@@ -1370,13 +1333,26 @@ export default function App({ appId, token }) {
                               value={nightDepth}
                               onChange={(event) => {
                                 setNightDepth(policyNumber(event.target.value, 6));
-                                setAgentMessage('');
+                                setSettingsMessage('');
                               }}
                             />
                           </label>
                         </fieldset>
                       </div>
-                    )}
+                      <div className="mg-advanced-policy-foot">
+                        <p>Higher limits may reveal more context, but can add latency and provider work. Change one hypothesis at a time and judge it from later outcomes.</p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLiveDepth(4);
+                            setNightBreadth(6);
+                            setNightDepth(6);
+                            setSettingsMessage('');
+                          }}
+                          disabled={!hasCustomRecallLimits}
+                        >Reset to defaults</button>
+                      </div>
+                    </details>
                   </div>
                 )}
 
@@ -1479,17 +1455,10 @@ export default function App({ appId, token }) {
                             navKey="memory-primary-model"
                             useSettingsDefault={primaryAgentMode === 'system'}
                             onSettingsDefault={() => setPrimaryAgentModeChoice('system')}
-                            effortLabel={primaryAgentMode === 'system' ? '' : effortLabel(agentProvider, agentEffort)}
-                            efforts={EFFORT_LEVELS[agentProvider] || []}
-                            effort={agentEffort}
-                            effortControl={primaryAgentMode === 'system' ? null : (
-                              <EffortStepper provider={agentProvider} value={agentEffort} onChange={setAgentEffort} />
-                            )}
                             onChange={(nextProvider, nextModel) => {
                               setPrimaryAgentModeChoice('app');
                               setAgentProvider(nextProvider);
                               setAgentModel(nextModel);
-                              setAgentEffort(effortForProvider(nextProvider, agentEffort));
                               setAgentMessage('');
                             }}
                           />
@@ -1504,21 +1473,10 @@ export default function App({ appId, token }) {
                             navKey="memory-secondary-model"
                             useSettingsDefault={secondaryAgentMode === 'system'}
                             onSettingsDefault={() => setSecondaryAgentModeChoice('system')}
-                            effortLabel={secondaryAgentMode === 'system' ? '' : effortLabel(secondaryAgentProvider, secondaryAgentEffort)}
-                            efforts={EFFORT_LEVELS[secondaryAgentProvider] || []}
-                            effort={secondaryAgentEffort}
-                            effortControl={secondaryAgentMode === 'system' ? null : (
-                              <EffortStepper
-                                provider={secondaryAgentProvider}
-                                value={secondaryAgentEffort}
-                                onChange={setSecondaryAgentEffort}
-                              />
-                            )}
                             onChange={(nextProvider, nextModel) => {
                               setSecondaryAgentModeChoice('app');
                               setSecondaryAgentProvider(nextProvider);
                               setSecondaryAgentModel(nextModel);
-                              setSecondaryAgentEffort(effortForProvider(nextProvider, secondaryAgentEffort));
                               setAgentMessage('');
                             }}
                           />
@@ -1532,9 +1490,15 @@ export default function App({ appId, token }) {
 
             <footer className="mg-settings-foot">
               <span className={`mg-settings-message${(
-                settingsSection === 'schedule' ? scheduleMessage === 'Saved' : agentMessage === 'Settings saved'
+                settingsSection === 'schedule'
+                  ? scheduleMessage === 'Saved'
+                  : settingsSection === 'retrieval'
+                    ? settingsMessage === 'Settings saved'
+                    : agentMessage === 'Settings saved'
               ) ? ' is-ok' : ''}`} role="status" aria-live="polite">
-                {settingsSection === 'schedule' ? scheduleMessage : agentMessage}
+                {settingsSection === 'schedule'
+                  ? scheduleMessage
+                  : settingsSection === 'retrieval' ? settingsMessage : agentMessage}
               </span>
               <button
                 className="mg-settings-save"
@@ -1543,7 +1507,9 @@ export default function App({ appId, token }) {
                 disabled={
                   settingsSection === 'schedule'
                     ? scheduleSaving || scheduleStatus !== 'ready'
-                    : agentSaving || agentStatus !== 'ready'
+                    : settingsSection === 'retrieval'
+                      ? agentSaving || settingsStatus !== 'ready'
+                      : agentSaving || agentStatus !== 'ready' || settingsStatus !== 'ready'
                 }
               >
                 {(settingsSection === 'schedule' ? scheduleSaving : agentSaving)

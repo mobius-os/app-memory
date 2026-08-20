@@ -33,6 +33,10 @@ class MemoryTextProviderTests(unittest.TestCase):
         "type": "agent_message", "text": "first",
       }}),
       json.dumps({"type": "agent_message", "content": " second"}),
+      json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 120, "cached_input_tokens": 40,
+        "output_tokens": 12,
+      }}),
     ])
     captured = {}
     with (
@@ -52,6 +56,15 @@ class MemoryTextProviderTests(unittest.TestCase):
 
     self.assertEqual(text.text, "first second")
     self.assertIsNone(text.failure)
+    self.assertEqual(text.receipt, {
+      "input_chars": 12,
+      "output_chars": 12,
+      "usage": {
+        "input_tokens": 120, "cached_input_tokens": 40,
+        "output_tokens": 12,
+      },
+      "cost_usd": None,
+    })
     command = captured["cmd"]
     self.assertIn("read-only", command)
     self.assertEqual(command[-1], "-")
@@ -74,13 +87,23 @@ class MemoryTextProviderTests(unittest.TestCase):
         "APP_TOKEN": "app-secret",
       }, clear=True),
       mock.patch.object(
-        provider.subprocess, "Popen", self._popen("answer", captured),
+        provider.subprocess, "Popen", self._popen(json.dumps({
+          "result": "answer",
+          "total_cost_usd": 0.75,
+          "usage": {"input_tokens": 90, "output_tokens": 8},
+        }), captured),
       ),
     ):
       text = provider.run_text("claude", "navigate", effort="high")
 
     self.assertEqual(text.text, "answer")
     self.assertIsNone(text.failure)
+    self.assertEqual(text.receipt, {
+      "input_chars": 8,
+      "output_chars": 6,
+      "usage": {"input_tokens": 90, "output_tokens": 8},
+      "cost_usd": 0.75,
+    })
     command = captured["cmd"]
     self.assertIn("--tools", command)
     self.assertEqual(command[command.index("--tools") + 1], "")
@@ -127,7 +150,7 @@ class MemoryTextProviderTests(unittest.TestCase):
         commands.append(cmd)
 
       def communicate(self, value=None, timeout=None):
-        return '{"updates":[]}', ""
+        return json.dumps({"result": '{"updates":[]}'}), ""
 
     with (
       mock.patch.dict(os.environ, {"CLAUDE_CLI_PATH": "/usr/bin/claude"}, clear=True),

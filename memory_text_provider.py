@@ -33,6 +33,7 @@ class ProviderFailure:
 class TextResult:
   text: str | None
   failure: ProviderFailure | None = None
+  receipt: dict | None = None
 
 
 class RunProviderHealth:
@@ -147,6 +148,41 @@ def _codex_agent_text(stdout: str) -> str:
   return "".join(parts)
 
 
+def _numeric_usage(value: object) -> dict | None:
+  if not isinstance(value, dict):
+    return None
+  result = {
+    str(key)[:80]: item
+    for key, item in list(value.items())[:40]
+    if isinstance(item, (int, float)) and not isinstance(item, bool)
+  }
+  return result or None
+
+
+def _codex_usage(stdout: str) -> dict | None:
+  for raw_line in reversed(stdout.splitlines()):
+    try:
+      event = json.loads(raw_line)
+    except (TypeError, ValueError):
+      continue
+    if event.get("type") == "turn.completed":
+      return _numeric_usage(event.get("usage"))
+  return None
+
+
+def _claude_result(stdout: str) -> tuple[str, dict | None, float | None] | None:
+  try:
+    payload = json.loads(stdout)
+  except (TypeError, ValueError):
+    return None
+  if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
+    return None
+  cost = payload.get("total_cost_usd")
+  if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+    cost = None
+  return payload["result"], _numeric_usage(payload.get("usage")), cost
+
+
 def available_provider(requested: str = "auto") -> str | None:
   requested = (requested or "auto").strip().lower()
   if requested in ("none", "off", "deterministic"):
@@ -186,7 +222,7 @@ def run_text(
       key: value for key, value in os.environ.items()
       if key in ("PATH", "HOME", "LANG", "LC_ALL", "CLAUDE_CONFIG_DIR")
     }
-    cmd = [executable, "-p", "--tools", "", "--output-format", "text"]
+    cmd = [executable, "-p", "--tools", "", "--output-format", "json"]
     if model:
       cmd += ["--model", str(model)]
     normalized_effort = str(effort or "").strip().lower()
@@ -194,7 +230,6 @@ def run_text(
       normalized_effort = "xhigh"
     if normalized_effort in {"low", "medium", "high", "xhigh", "max"}:
       cmd += ["--effort", normalized_effort]
-    parser = lambda stdout: stdout
   elif provider == "codex":
     executable = os.environ.get("CODEX_CLI_PATH") or shutil.which("codex")
     if not executable:
@@ -223,7 +258,6 @@ def run_text(
         f"model_reasoning_effort={json.dumps(normalized_effort)}",
       ))
     cmd.append("-")
-    parser = _codex_agent_text
   else:
     return TextResult(
       None, ProviderFailure("unsupported_provider", True, "provider"),
@@ -262,10 +296,25 @@ def run_text(
         proc.returncode, stdout or "", stderr or "",
       ),
     )
-  value = parser(stdout or "").strip()
+  usage = None
+  cost_usd = None
+  if provider == "claude":
+    parsed = _claude_result(stdout or "")
+    if parsed is None:
+      return TextResult(None, ProviderFailure("invalid_output"))
+    value, usage, cost_usd = parsed
+  else:
+    value = _codex_agent_text(stdout or "")
+    usage = _codex_usage(stdout or "")
+  value = value.strip()
   if not value:
     return TextResult(None, ProviderFailure("empty_output"))
-  return TextResult(value)
+  return TextResult(value, receipt={
+    "input_chars": len(prompt),
+    "output_chars": len(value),
+    "usage": usage,
+    "cost_usd": cost_usd,
+  })
 
 
 def json_object(text: str | None) -> dict | None:

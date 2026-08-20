@@ -72,6 +72,7 @@ def _reviewed(proposal):
       "hardest_decision": "Which detail was durable.",
       "possibly_missed": "none",
       "prompt_change": "none",
+      "next_experiment": "none",
     },
   }
 
@@ -853,7 +854,7 @@ class MemoryRunnerTests(unittest.TestCase):
         {"provider": "claude", "model": "claude-custom", "effort": None},
       ])
 
-  def test_agent_choices_deduplicate_exact_identity_but_keep_distinct_effort(self):
+  def test_app_agent_override_ignores_historical_effort(self):
     with tempfile.TemporaryDirectory() as raw:
       data_dir = Path(raw)
       _store, runner = _load(data_dir)
@@ -873,13 +874,14 @@ class MemoryRunnerTests(unittest.TestCase):
       path = settings_dir / "settings.json"
       path.write_text(json.dumps(settings))
       self.assertEqual(runner._agent_choices(7), [
+        {"provider": "codex", "model": "same", "effort": None},
         {"provider": "codex", "model": "same", "effort": "high"},
       ])
 
       settings["effort"] = "medium"
       path.write_text(json.dumps(settings))
       self.assertEqual(runner._agent_choices(7), [
-        {"provider": "codex", "model": "same", "effort": "medium"},
+        {"provider": "codex", "model": "same", "effort": None},
         {"provider": "codex", "model": "same", "effort": "high"},
       ])
 

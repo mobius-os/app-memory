@@ -29,10 +29,6 @@ export function ModelPicker({
   allowProviderDefault = false,
   useSettingsDefault = false,
   onSettingsDefault,
-  effortControl = null,
-  effortLabel = '',
-  efforts = [],
-  effort = '',
 }) {
   const [open, setOpen] = useState(false)
   const sheetRef = useRef(null)
@@ -44,10 +40,9 @@ export function ModelPicker({
   const modelName = useSettingsDefault
     ? 'Default from settings'
     : (activeModel?.name || (model ? model : activeGroup ? `${activeGroup.label} default` : 'Choose model'))
-  const effortIndex = Math.max(0, efforts.findIndex((item) => item.value === effort))
   const triggerLabel = useSettingsDefault
     ? `${title}: Default from settings`
-    : `${title}: ${modelName}${effortLabel ? `, ${effortLabel} effort` : ''}`
+    : `${title}: ${modelName}`
 
   const closeSheet = useCallback(() => {
     const handle = navRef.current
@@ -132,20 +127,6 @@ export function ModelPicker({
             <span className="mobius-model-trigger__id">{model || 'Provider default'}</span>
           )}
         </span>
-        {!useSettingsDefault && effortLabel && efforts.length > 0 && (
-          <span className="mobius-model-trigger__effort-visual" aria-hidden="true">
-            {efforts.map((item, index) => (
-              <span
-                key={item.value}
-                className={
-                  'mobius-model-trigger__effort-dot'
-                  + (index <= effortIndex ? ' is-filled' : '')
-                  + (index === effortIndex ? ' is-active' : '')
-                }
-              />
-            ))}
-          </span>
-        )}
       </button>
       {open && createPortal(
         <div
@@ -224,7 +205,7 @@ export function ModelPicker({
                             disabled={disabled}
                             onClick={() => {
                               onChange(group.key, item.id)
-                              if (!effortControl) closeSheet()
+                              closeSheet()
                             }}
                           >
                             <span className="mobius-model-sheet__row-icon" aria-hidden="true"><ProviderLogo provider={group.key} /></span>
@@ -234,9 +215,6 @@ export function ModelPicker({
                             </span>
                             {selected && <span className="mobius-model-sheet__check" aria-hidden="true" />}
                           </button>
-                          {selected && effortControl && (
-                            <div className="mobius-model-sheet__effort">{effortControl}</div>
-                          )}
                         </div>
                       )
                     })}

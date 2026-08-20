@@ -1017,14 +1017,17 @@ def _live_text_call() -> Callable[[str], NavigatorCall] | None:
       result = run_text(name, prompt, timeout=AGENT_TIMEOUT)
       elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
       health.observe(name, None, result.failure)
-      attempts.append({
+      attempt = {
         "provider": name,
         "outcome": "ok" if result.text else (
           result.failure.code if result.failure else "empty_output"
         ),
         "skipped": False,
         "elapsed_ms": elapsed_ms,
-      })
+      }
+      if isinstance(result.receipt, dict):
+        attempt["usage_receipt"] = result.receipt
+      attempts.append(attempt)
       if result.text:
         return NavigatorCall(result.text, tuple(attempts))
     return NavigatorCall(None, tuple(attempts))
