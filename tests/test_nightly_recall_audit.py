@@ -1079,6 +1079,9 @@ def test_deleted_hindsight_source_uses_only_opaque_provenance(monkeypatch, tmp_p
   monkeypatch.setattr(memory_runner, "_known_deleted_source_ids", lambda _path: set())
   monkeypatch.setattr(memory_runner, "_known_deleted_source", lambda _path: False)
   monkeypatch.setattr(
+    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
+  )
+  monkeypatch.setattr(
     memory_runner, "run_text",
     lambda *_args, **_kwargs: TextResult(json.dumps(proposal)),
   )
