@@ -2446,17 +2446,17 @@ def test_memory_prompt_balances_recall_with_direct_evidence():
   prompt = MEMORY_CORE_PROMPT
 
   assert (
-    "Memory is an additive context lane, never a gate in front of the work."
+    "never a gate in front of the work, and never something to ration"
   ) in prompt
   assert "could materially improve the work" in prompt
   assert (
     "begin every independent investigation as if Memory were unavailable"
   ) in prompt
+  assert "When any cue above is present, recall by default" in prompt
   assert (
-    "A technically detailed or fully specified request can still warrant recall "
-    "when one of those cues is present."
+    '"Self-contained" means cue-free in that sense, never merely '
+    "that the outcome is well specified"
   ) in prompt
-  assert "the task is self-contained and its desired outcome is fully specified" in prompt
   assert "Complexity alone is not a cue." in prompt
   assert "owning sources establish what is true now and what happened" in prompt
   assert "A separate Memory lookup may run in parallel" in prompt

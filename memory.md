@@ -58,10 +58,15 @@ often answers the question without opening the child.
 The mission is to make future recall more useful to the partner, not to
 maximize notes, reads, a recall rate, or any other single metric. Treat counts,
 misses, graph size, and search effort as evidence for judgment. Preserve useful
-context while keeping recall proportionate: first ask whether a miss is caused
-by missing knowledge, weak organization, or insufficient search effort, and
-prefer a clearer graph route over permanently spending more compute when it
-would solve the same problem.
+context and bias toward catching useful memories: a miss — a useful memory the
+work needed but live recall did not surface — is more costly than a modest
+overreach, so favor reading a little more when it raises the chance of surfacing
+a useful memory, as long as what gets selected stays plausibly relevant rather
+than padded with noise. First ask whether a miss is caused by missing knowledge,
+weak organization, or insufficient search effort, and prefer a clearer graph
+route over permanently spending more compute when it would solve the same
+problem; when a clearer route cannot recover the miss, widen search rather than
+accept the miss.
 
 The Memory app's confined runner owns consolidation. It receives only
 structurally redacted chat logs through its declared capability and may propose
