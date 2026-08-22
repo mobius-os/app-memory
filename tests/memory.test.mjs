@@ -45,74 +45,57 @@ const {
   shouldShowScreenLabel,
   renderWikiLinks,
   nodeRadius,
-  shouldShowNodeLabel,
   safeMemoryPath,
   neutralizeMemoryMarkdown,
   parseDailyCronTime,
   timeToDailyCron,
   MEMORY_SANITIZE_OPTIONS,
+  effectiveReadCount,
   makeSharedMemoryStore,
   memoryNoteIntent,
+  sortMemoryNodes,
   buildAgentGroups,
 } = await bundleModule({
   entry: fileURLToPath(new URL('../index.jsx', import.meta.url)),
   outfile: fileURLToPath(new URL('./.build/index.mjs', import.meta.url)),
 })
 
-test('shouldShowNodeLabel hides ordinary nodes below every threshold except close zoom', () => {
-  const node = { id: 'plain', importance: 6, mocs: [] }
-  assert.equal(shouldShowNodeLabel(0.9499, node, null), false)
-  assert.equal(shouldShowNodeLabel(0.95, node, null), true)
-})
-
-test('shouldShowNodeLabel always shows small-graph labels when marked', () => {
-  assert.equal(shouldShowNodeLabel(0.001, { id: 'plain', showLabelAlways: true }, null), true)
-  assert.equal(shouldShowNodeLabel(undefined, { id: 'plain', showLabelAlways: true }, null), true)
-})
-
-test('shouldShowNodeLabel shows MOC-linked nodes at 0.24 and above', () => {
-  const node = { id: 'linked', importance: 1, mocs: ['projects'] }
-  assert.equal(shouldShowNodeLabel(0.2399, node, null), false)
-  assert.equal(shouldShowNodeLabel(0.24, node, null), true)
-})
-
-test('shouldShowNodeLabel always shows hovered nodes', () => {
-  const node = { id: 'hovered', importance: 1, mocs: [] }
-  assert.equal(shouldShowNodeLabel(0.001, node, 'hovered'), true)
-})
-
-test('shouldShowNodeLabel always shows MOC and local-center nodes', () => {
-  assert.equal(shouldShowNodeLabel(0.001, { id: 'hub', type: 'moc' }, null), true)
-  assert.equal(shouldShowNodeLabel(0.001, { id: 'center', localDepth: 0 }, null), true)
-})
-
-test('shouldShowNodeLabel shows important nodes at 0.18', () => {
-  const important = { id: 'important', importance: 7, mocs: [] }
-  const almostImportant = { id: 'almost', importance: 6.99, mocs: [] }
-  assert.equal(shouldShowNodeLabel(0.1799, important, null), false)
-  assert.equal(shouldShowNodeLabel(0.18, important, null), true)
-  assert.equal(shouldShowNodeLabel(0.18, almostImportant, null), false)
-})
-
-test('shouldShowNodeLabel rejects malformed scales for threshold labels', () => {
-  assert.equal(shouldShowNodeLabel(Number.NaN, { id: 'x', mocs: ['m'] }, null), false)
-  assert.equal(shouldShowNodeLabel(Infinity, { id: 'x' }, null), false)
-})
-
-test('nodeRadius uses importance and access count for ordinary nodes', () => {
-  assert.equal(nodeRadius({ importance: 1, access_count: 0 }), 4.55)
-  assert.equal(nodeRadius({ importance: 5, access_count: 0 }), 10.75)
-  assert.equal(nodeRadius({ importance: 1, access_count: 7 }), 9.2)
+test('nodeRadius uses observed reads and ignores legacy importance metadata', () => {
+  assert.equal(nodeRadius({ access_count: 0 }), 4.55)
+  assert.equal(nodeRadius({ importance: 99, access_count: 0 }), 4.55)
+  assert.equal(nodeRadius({ access_count: 7 }), 9.2)
 })
 
 test('nodeRadius applies the MOC multiplier', () => {
-  assert.equal(nodeRadius({ type: 'moc', importance: 5, access_count: 0 }), 15.049999999999999)
+  assert.ok(Math.abs(nodeRadius({ type: 'moc', access_count: 0 }) - 6.37) < 1e-9)
 })
 
 test('nodeRadius guards sparse and malformed node data', () => {
   assert.equal(nodeRadius(), 4.55)
-  assert.equal(nodeRadius({ importance: -5, access_count: -2 }), 4.55)
-  assert.equal(nodeRadius({ importance: Number.NaN, access_count: Infinity }), 4.55)
+  assert.equal(nodeRadius({ access_count: -2 }), 4.55)
+  assert.equal(nodeRadius({ access_count: Infinity }), 4.55)
+})
+
+test('effectiveReadCount uses the newest valid cumulative counter', () => {
+  assert.equal(effectiveReadCount({ id: 'a', access_count: 2 }, { a: 7 }), 7)
+  assert.equal(effectiveReadCount({ id: 'a', access_count: 4 }, { a: -1 }), 4)
+  assert.equal(effectiveReadCount({ id: 'a', access_count: 'bad' }, { a: '9' }), 0)
+  assert.equal(effectiveReadCount({ id: 'a', access_count: 5 }, { a: 2 }), 5)
+})
+
+test('viewer follows the live usage ledger without replacing its graph revision', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.match(source, /store\.subscribe\('app-state\/usage\.json'/)
+  assert.match(source, /usageCountsRef\.current = usageCounts/)
+  assert.doesNotMatch(source, /displayGraph|setGraph\([^)]*usage/i)
+})
+
+test('Memory list sorts the canonical graph byte field', () => {
+  const rows = sortMemoryNodes([
+    { id: 'small', title: 'Small', bytes: 900 },
+    { id: 'large', title: 'Large', bytes: 2400 },
+  ], 'bytes', 'desc')
+  assert.deepEqual(rows.map((row) => row.id), ['large', 'small'])
 })
 
 test('daily cron helpers round-trip Memory schedule times', () => {
@@ -439,7 +422,7 @@ test('SVG graph layout is deterministic, finite, and does not mutate input', () 
       id: `node-${index}`,
       title: `Node ${index}`,
       type: index % 15 === 0 ? 'moc' : 'note',
-      importance: (index % 10) + 1,
+      access_count: index % 10,
     })),
     links: Array.from({ length: 59 }, (_, index) => ({
       source: `node-${index}`,

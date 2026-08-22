@@ -20,8 +20,8 @@ import {
   MEMORY_SANITIZE_OPTIONS,
   buildLocalGraphData,
   cssVar,
+  effectiveReadCount,
   escapeHtml,
-  fmtBytes,
   hashStr,
   memoryNoteIntent,
   neutralizeMemoryMarkdown,
@@ -36,8 +36,7 @@ import {
   timeToDailyCron,
 } from './domain.js'
 import { MemoryGraphRenderer } from './graph/render.jsx'
-import { Th } from './ui/Th.jsx'
-import { ImportanceDots } from './ui/ImportanceDots.jsx'
+import { MemoryList, sortMemoryNodes } from './ui/MemoryList.jsx'
 import { EmptyConstellation } from './ui/EmptyConstellation.jsx'
 import { GraphGlyph } from './ui/GraphGlyph.jsx'
 import { ListGlyph } from './ui/ListGlyph.jsx'
@@ -53,6 +52,7 @@ export { makeSharedMemoryStore } from './storage.js'
 export {
   MEMORY_SANITIZE_OPTIONS,
   buildLocalGraphData,
+  effectiveReadCount,
   memoryNoteIntent,
   neutralizeMemoryMarkdown,
   nodeRadius,
@@ -60,9 +60,9 @@ export {
   renderWikiLinks,
   safeMemoryPath,
   shouldShowScreenLabel,
-  shouldShowNodeLabel,
   timeToDailyCron,
 } from './domain.js'
+export { sortMemoryNodes } from './ui/MemoryList.jsx'
 export {
   computeRendererFitTransform,
   layoutRendererGraphData,
@@ -114,6 +114,7 @@ function policyNumber(value, fallback) {
 
 export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
+  const [usageCounts, setUsageCounts] = useState({});
   const [revision, setRevision] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | initializing | ready | empty | error
   const [errMsg, setErrMsg] = useState('');
@@ -205,6 +206,8 @@ export default function App({ appId, token }) {
   // so without these the open/empty signals would inflate on a single session.
   const openedSignaledRef = useRef(false);
   const emptySignaledRef = useRef(false);
+  const usageCountsRef = useRef(usageCounts);
+  usageCountsRef.current = usageCounts;
 
   const wrapRef = useRef(null);
   const localWrapRef = useRef(null);
@@ -226,6 +229,29 @@ export default function App({ appId, token }) {
     () => makeSharedMemoryStore({ getToken: () => token }),
     [token],
   );
+
+  // Reads are counted by the recall path as soon as a read completes. Keep the
+  // immutable graph revision pinned, but subscribe to that small mutable ledger
+  // so the open viewer reflects new reads without waiting for nightly publish.
+  useEffect(() => {
+    const unsub = store.subscribe('app-state/usage.json', ({ body, present, error }) => {
+      if (error && body == null) return; // keep the published/cached counters
+      if (!present || body == null) {
+        setUsageCounts({});
+        return;
+      }
+      try {
+        const value = JSON.parse(body);
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          setUsageCounts(value);
+        }
+      } catch {
+        // A malformed mutable ledger must not take down an otherwise valid
+        // immutable graph; the published counters remain the safe fallback.
+      }
+    });
+    return unsub;
+  }, [store]);
 
   // Pin every render to the immutable Git commit selected by the atomic
   // pointer. A missing pointer means first-install initialization is still in
@@ -369,8 +395,13 @@ export default function App({ appId, token }) {
     return cssVar('--muted', '#8a8a93');
   }, [mocColors]);
 
-  // --- Node radius from importance + usage. ---
-  const radiusForNode = useCallback((n) => nodeRadius(n), []);
+  // --- Node radius from observed usage. ---
+  // Keep this callback stable so a new read can resize a node without making
+  // the renderer recompute layout and reset the reader's pan/zoom position.
+  const radiusForNode = useCallback((n) => nodeRadius({
+    ...n,
+    access_count: effectiveReadCount(n, usageCountsRef.current),
+  }), []);
 
   // The renderer receives its own node objects so layout coordinates never
   // leak back into the immutable graph revision.
@@ -1035,21 +1066,6 @@ export default function App({ appId, token }) {
     try { panelNavRef.current?.close?.(); } catch {}
   }, []);
 
-  // --- List view: sorted rows with plain usage/size metadata. ---
-  const sortedNodes = useMemo(() => {
-    if (!graph) return [];
-    const rows = [...graph.nodes];
-    rows.sort((a, b) => {
-      let av, bv;
-      if (sortKey === 'title') { av = (a.title || a.id).toLowerCase(); bv = (b.title || b.id).toLowerCase(); }
-      else { av = a[sortKey] || 0; bv = b[sortKey] || 0; }
-      if (av < bv) return sortDir === 'asc' ? -1 : 1;
-      if (av > bv) return sortDir === 'asc' ? 1 : -1;
-      return 0;
-    });
-    return rows;
-  }, [graph, sortKey, sortDir]);
-
   const toggleSort = (key) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     else { setSortKey(key); setSortDir(key === 'title' ? 'asc' : 'desc'); }
@@ -1620,55 +1636,15 @@ export default function App({ appId, token }) {
         )}
 
         {status === 'ready' && view === 'list' && (
-          <div style={S.listWrap} className="mg-scroll">
-            <table style={S.table}>
-              <thead>
-                <tr>
-                  <Th label="Note" active={sortKey === 'title'} dir={sortDir} onSort={() => toggleSort('title')} align="left" />
-                  <Th label="Type" />
-                  <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onSort={() => toggleSort('importance')} />
-                  <Th label="Reads" active={sortKey === 'access_count'} dir={sortDir} onSort={() => toggleSort('access_count')} />
-                  <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onSort={() => toggleSort('size_bytes')} />
-                </tr>
-              </thead>
-              <tbody>
-                {sortedNodes.map((n) => (
-                  <tr
-                    key={n.id}
-                    style={S.tr}
-                    onClick={() => openPanel(n)}
-                    className="mg-row"
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Open ${n.title || n.id}`}
-                    onKeyDown={(e) => {
-                      // Enter/Space activate the row like a button; preventDefault
-                      // on Space stops the list pane scrolling instead of opening.
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        openPanel(n);
-                      }
-                    }}
-                  >
-                    <td style={S.tdTitle}>
-                      <span style={{ ...S.rowDot, background: colorForNode(n) }} />
-                      <span style={S.rowTitleText}>{n.title || n.id}</span>
-                    </td>
-                    <td style={S.td}>
-                      <span style={{ ...S.typeTag, ...(n.type === 'moc' ? S.typeMoc : {}) }}>
-                        {n.type === 'moc' ? 'hub' : 'note'}
-                      </span>
-                    </td>
-                    <td style={{ ...S.td, ...S.tdNum }}>
-                      <ImportanceDots value={n.importance || 1} />
-                    </td>
-                    <td style={{ ...S.td, ...S.tdMeta }}>{n.access_count || 0}</td>
-                    <td style={{ ...S.td, ...S.tdMeta }}>{fmtBytes(n.size_bytes)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <MemoryList
+            nodes={graph.nodes}
+            usageCounts={usageCounts}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={toggleSort}
+            colorForNode={colorForNode}
+            onOpenNode={openPanel}
+          />
         )}
       </main>
 
@@ -1714,8 +1690,7 @@ export default function App({ appId, token }) {
                   <div style={S.panelTitle} id="mg-panel-title">{selected.title || selected.id}</div>
                   <div style={S.panelMetaLine}>
                     <span>{selected.type === 'moc' ? 'Hub' : 'Note'}</span>
-                    <span>Weight <ImportanceDots value={selected.importance || 1} /></span>
-                    <span>{selected.access_count || 0} reads</span>
+                    <span>{effectiveReadCount(selected, usageCounts)} reads</span>
                     {noteState.status === 'ready' && (
                       <span>{Array.from(noteState.md).length.toLocaleString()} characters</span>
                     )}

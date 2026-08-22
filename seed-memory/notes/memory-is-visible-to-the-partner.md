@@ -1,7 +1,6 @@
 ---
 title: Memory is visible to the partner
 type: note
-importance: 4
 access_count: 0
 last_accessed: null
 tags: [meta]
