@@ -70,7 +70,7 @@
     "graph/render.jsx",
     "graph/viewport.mjs",
     "ui/Th.jsx",
-    "ui/ImportanceDots.jsx",
+    "ui/MemoryList.jsx",
     "ui/EmptyConstellation.jsx",
     "ui/GraphGlyph.jsx",
     "ui/ListGlyph.jsx",

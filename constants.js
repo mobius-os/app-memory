@@ -213,7 +213,7 @@ export const S = {
   },
 
   listWrap: { position: 'absolute', inset: 0, overflowY: 'auto', padding: '0 0 24px' },
-  table: { width: '100%', borderCollapse: 'collapse', fontSize: 13 },
+  table: { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 13 },
   th: {
     position: 'sticky', top: 0, zIndex: 1, background: 'var(--surface)',
     color: 'var(--muted)', fontWeight: 650, fontSize: 11.5, textTransform: 'none',
@@ -236,11 +236,10 @@ export const S = {
   sortCaret: { marginLeft: 5, fontSize: 11, color: 'var(--accent)' },
   tr: { cursor: 'pointer', borderBottom: '1px solid var(--border-light, var(--border))' },
   td: { padding: '10px 12px', verticalAlign: 'middle', color: 'var(--text)' },
-  tdNum: { textAlign: 'right' },
   tdTitle: {
-    padding: '10px 12px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 9,
-    maxWidth: 300, minWidth: 150,
+    padding: '10px 12px', fontWeight: 600, minWidth: 0,
   },
+  rowTitle: { display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 },
   rowTitleText: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   tdMeta: {
     textAlign: 'right', color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
@@ -259,13 +258,6 @@ export const S = {
     background: 'var(--accent-dim, rgba(167,139,250,0.15))', color: 'var(--accent)',
     borderColor: 'transparent',
   },
-
-  dotsWrap: { display: 'inline-flex', gap: 3, alignItems: 'center', verticalAlign: 'middle' },
-  pip: {
-    width: 5, height: 5, borderRadius: '50%', background: 'var(--border)',
-    display: 'inline-block',
-  },
-  pipOn: { background: 'var(--accent)' },
 
   scrim: { position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 20 },
   panel: {

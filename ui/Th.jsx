@@ -1,6 +1,6 @@
 import { S } from '../constants.js'
 
-export function Th({ label, subLabel, active, dir, onSort, align }) {
+export function Th({ label, subLabel, active, dir, onSort, align, className }) {
   // scope=col names the column for assistive tech; aria-sort reflects the live
   // sort on the one active column ('ascending'/'descending') and 'none' on the
   // other sortable columns, so a screen reader announces the current ordering.
@@ -21,7 +21,12 @@ export function Th({ label, subLabel, active, dir, onSort, align }) {
   // header (e.g. Type) stays a plain, non-interactive cell.
   if (onSort) {
     return (
-      <th scope="col" style={{ ...S.th, textAlign: align || 'right' }} aria-sort={ariaSort}>
+      <th
+        scope="col"
+        className={className}
+        style={{ ...S.th, textAlign: align || 'right' }}
+        aria-sort={ariaSort}
+      >
         <button
           type="button"
           className="mg-th"
@@ -34,7 +39,11 @@ export function Th({ label, subLabel, active, dir, onSort, align }) {
     );
   }
   return (
-    <th scope="col" style={{ ...S.th, textAlign: align || 'right' }}>
+    <th
+      scope="col"
+      className={className}
+      style={{ ...S.th, textAlign: align || 'right' }}
+    >
       {inner}
     </th>
   );

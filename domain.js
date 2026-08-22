@@ -68,27 +68,26 @@ export function memoryNoteIntent(value) {
 }
 
 export function nodeRadius(node = {}) {
-  const importance = Number(node.importance);
   const accessCount = Number(node.access_count);
-  const safeImportance = Number.isFinite(importance) && importance > 0 ? importance : 1;
   const safeAccessCount = Number.isFinite(accessCount) && accessCount > 0 ? accessCount : 0;
-  const base = Math.max(safeImportance, 1 + Math.log2(1 + safeAccessCount));
+  const base = 1 + Math.log2(1 + safeAccessCount);
   const radius = 3 + base * 1.55;
   return node.type === 'moc' ? radius * 1.4 : radius;
 }
 
-export function shouldShowNodeLabel(globalScale, node = {}, hoverId = null) {
-  const isHover = hoverId === node.id;
-  const hasMocList = Array.isArray(node.mocs) && node.mocs.length > 0;
-  const isImportant = (Number(node.importance) || 0) >= 7;
-  const isMoc = node.type === 'moc';
-  const isLocalCenter = node.localDepth === 0;
-  if (isHover || isLocalCenter || isMoc || node.showLabelAlways) return true;
-  const scale = Number(globalScale);
-  if (!Number.isFinite(scale)) return false;
-  return scale >= 0.95
-    || (isImportant && scale >= 0.18)
-    || (hasMocList && scale >= 0.24);
+// usage.json is cumulative and may be fresher than the immutable graph. A
+// cached ledger can also be older, so the displayed value is the greater valid
+// count rather than whichever source happened to arrive last.
+export function effectiveReadCount(node = {}, usage = {}) {
+  const counts = usage && typeof usage === 'object' && !Array.isArray(usage)
+    ? usage
+    : {};
+  const live = counts[node.id];
+  const published = node.access_count;
+  const publishedCount = Number.isInteger(published) && published >= 0 ? published : 0;
+  return Number.isInteger(live) && live >= 0
+    ? Math.max(live, publishedCount)
+    : publishedCount;
 }
 
 export function buildTitleMap(nodes = []) {
@@ -237,12 +236,11 @@ export function clamp(v, min, max) {
 }
 
 export function labelScore(node = {}) {
-  const importance = Number(node.importance) || 0;
   const access = Number(node.access_count) || 0;
   const mocBonus = node.type === 'moc' ? 1000 : 0;
   const linkedBonus = Array.isArray(node.mocs) && node.mocs.length > 0 ? 18 : 0;
   const localBonus = node.localDepth === 0 ? 800 : node.localDepth === 1 ? 120 : 0;
-  return mocBonus + localBonus + importance * 12 + access * 4 + linkedBonus;
+  return mocBonus + localBonus + access * 4 + linkedBonus;
 }
 
 export function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts = {}) {

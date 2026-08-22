@@ -844,7 +844,7 @@ def test_graph_catalog_links_note_to_source_archive(tmp_path):
   )
   (tmp_path / "notes" / "fact.md").write_text(
     "---\ntype: note\ntitle: A fact\nsource: [chat:active-chat]\n"
-    "mocs: [topic]\n---\nA fact.\n",
+    "mocs: [topic]\nimportance: 5\n---\nA fact.\n",
   )
   source_id = "b" * 32
   (tmp_path / "sources" / f"{source_id}.json").write_text(json.dumps({
@@ -858,6 +858,7 @@ def test_graph_catalog_links_note_to_source_archive(tmp_path):
 
   graph = memory_graph.build(tmp_path)
   fact = next(node for node in graph["nodes"] if node["id"] == "fact")
+  assert "importance" not in fact
   assert fact["source_refs"] == [{
     "source_id": source_id,
     "kind": "active",

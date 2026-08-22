@@ -139,6 +139,9 @@ export const CSS = `
   border-top: 1px solid var(--border);
 }
 .mg-legend:not(.is-open) .mg-legend-body { display: none; }
+.mg-memory-list th.mg-col-type { width: 82px; }
+.mg-memory-list th.mg-col-reads { width: 76px; }
+.mg-memory-list th.mg-col-size { width: 82px; }
 
 @media (hover: hover) {
   .mg-row:hover { background: var(--surface2); }
@@ -793,12 +796,12 @@ export const CSS = `
   .mg-md ul, .mg-md ol { margin: 8px 0 !important; }
   .mg-md code { font-size: 0.82em !important; }
   .mg-panel .mg-discuss { padding: 9px 12px !important; }
-  .mg-scroll table th:nth-child(n+3),
-  .mg-scroll table td:nth-child(n+3) {
+  .mg-memory-list .mg-col-type,
+  .mg-memory-list .mg-col-size {
     display: none;
   }
-  .mg-scroll table th,
-  .mg-scroll table td {
+  .mg-memory-list th,
+  .mg-memory-list td {
     padding-left: 10px !important;
     padding-right: 10px !important;
   }

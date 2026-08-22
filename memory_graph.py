@@ -174,7 +174,6 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
     title = str(fm.get("title") or node_id.replace("-", " ").title())
     description = str(fm.get("description") or "")
     mocs = fm.get("mocs") if isinstance(fm.get("mocs"), list) else []
-    importance = fm.get("importance") if isinstance(fm.get("importance"), int) else 1
     source_refs = _source_refs(
       fm.get("source"), sources_by_id, sources_by_chat_id,
     )
@@ -187,7 +186,6 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
       "mocs": mocs,
       "tags": fm.get("tags") if isinstance(fm.get("tags"), list) else [],
       "source_refs": source_refs,
-      "importance": max(1, importance),
       "access_count": int(usage.get(node_id, 0)),
       "updated": str(fm.get("updated") or fm.get("as-of") or ""),
       "bytes": len(text.encode("utf-8")),

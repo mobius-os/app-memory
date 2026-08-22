@@ -1,7 +1,6 @@
 ---
 title: How the memory graph works
 type: note
-importance: 5
 access_count: 0
 last_accessed: null
 tags: [meta]

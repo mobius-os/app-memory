@@ -202,9 +202,9 @@ export function makeSharedMemoryStore({
     }
 
     function schedule() {
-      // Commit-addressed blobs are immutable. `.ready` is the only mutable
-      // subscription the viewer needs to poll; a pointer change remounts the
-      // graph/note subscriptions with a different revision URL.
+      // Commit-addressed blobs are immutable and never poll. Mutable paths such
+      // as `.ready` and the usage ledger poll while visible; a pointer change
+      // remounts graph/note subscriptions with a different revision URL.
       if (!alive || pollMs <= 0 || opts.revision) return;
       timer = setTimeout(async () => {
         if (isVisible()) await revalidate();
