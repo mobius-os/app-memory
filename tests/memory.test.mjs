@@ -21,6 +21,16 @@ test('Memory tunes recall without asking the user to manage search limits', () =
   assert.match(source, /if \(!settingsLoaded\)[\s\S]*setSettingsStatus\('error'\)/)
 })
 
+test('graph maintenance diagnostics stay internal instead of posing as owner actions', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const constants = readFileSync(new URL('../constants.js', import.meta.url), 'utf8')
+  const runner = readFileSync(new URL('../memory_runner.py', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /Graph health|showHealth|healthBadge/)
+  assert.doesNotMatch(constants, /healthBadge|healthPanel|sevWarn|sevErr/)
+  assert.match(runner, /def _maintenance_diagnostics\(staging: Path\)/)
+  assert.match(runner, /def _maintenance_flags\(staging: Path\)/)
+})
+
 test('supporting chats show provenance without duplicating transcript excerpts', () => {
   const source = readFileSync(new URL('../ui/SupportingChats.jsx', import.meta.url), 'utf8')
   const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')

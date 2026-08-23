@@ -125,7 +125,6 @@ export default function App({ appId, token }) {
   const [hoverId, setHoverId] = useState(null);
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
-  const [showHealth, setShowHealth] = useState(false);
   const [legendOpen, setLegendOpen] = useState(() => (
     typeof window === 'undefined' || window.matchMedia('(min-width: 720px)').matches
   ));
@@ -574,7 +573,6 @@ export default function App({ appId, token }) {
         // warm graph cannot become the visible intermediate destination.
         setDetailPresentation('direct');
         setSettingsOpen(false);
-        setShowHealth(false);
         setIntentError('');
         setPendingIntentId(id);
       }
@@ -1060,8 +1058,6 @@ export default function App({ appId, token }) {
     return items;
   }, [graph, mocColors]);
 
-  const problems = graph?.problems || [];
-  const errCount = problems.filter((p) => p.severity === 'error').length;
   const counts = useMemo(() => {
     const c = { note: 0, moc: 0 };
     if (graph) for (const n of graph.nodes) c[n.type === 'moc' ? 'moc' : 'note']++;
@@ -1132,19 +1128,6 @@ export default function App({ appId, token }) {
             <SettingsCog className="mg-settings-icon" aria-hidden="true" />
             <span className="mg-settings-label">Settings</span>
           </button>
-          {problems.length > 0 && (
-            <button
-              type="button"
-              style={{ ...S.healthBadge, ...(errCount ? S.healthErr : S.healthWarn) }}
-              onClick={() => setShowHealth((v) => !v)}
-              title="Graph health"
-              aria-label={`${problems.length} graph health ${problems.length === 1 ? 'issue' : 'issues'}`}
-              aria-expanded={showHealth}
-            >
-              <span style={{ ...S.healthDot, background: errCount ? 'var(--danger)' : 'var(--accent-hover, #f0c674)' }} />
-              {problems.length}
-            </button>
-          )}
           <div style={S.toggle} className="mg-view-toggle" role="group" aria-label="Memory view">
             <button
               type="button"
@@ -1379,25 +1362,6 @@ export default function App({ appId, token }) {
               </button>
             </footer>
           </section>
-        </div>
-      )}
-
-      {showHealth && problems.length > 0 && (
-        <div style={S.healthPanel} className="mg-scroll">
-          <div style={S.healthHead}>
-            {errCount > 0
-              ? `${errCount} error${errCount === 1 ? '' : 's'} block the graph from rebuilding`
-              : 'A few loose threads — nothing broken'}
-          </div>
-          {problems.map((p, i) => (
-            <div key={i} style={S.healthRow}>
-              <span style={{ ...S.sevTag, ...(p.severity === 'error' ? S.sevErr : S.sevWarn) }}>
-                {p.severity}
-              </span>
-              <span style={S.healthKind}>{String(p.kind || '').replace(/_/g, ' ')}</span>
-              <span style={S.healthDetail}>{p.detail}</span>
-            </div>
-          ))}
         </div>
       )}
 

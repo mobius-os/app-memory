@@ -125,33 +125,6 @@ export const S = {
     boxShadow: '0 1px 3px rgba(0,0,0,0.18)',
   },
 
-  healthBadge: {
-    display: 'flex', alignItems: 'center', gap: 6, border: '1px solid var(--border)',
-    background: 'var(--surface2)', color: 'var(--text)', borderRadius: 9,
-    minHeight: 44, fontSize: 12, fontWeight: 700, padding: '5px 10px', cursor: 'pointer',
-    fontFamily: 'var(--font)', fontVariantNumeric: 'tabular-nums',
-  },
-  healthWarn: {},
-  healthErr: { borderColor: 'var(--danger)', color: 'var(--danger)' },
-  healthDot: { width: 7, height: 7, borderRadius: '50%', flexShrink: 0 },
-  healthPanel: {
-    padding: '10px 14px', background: 'var(--surface2)',
-    borderBottom: '1px solid var(--border)', maxHeight: 176, overflowY: 'auto',
-    flexShrink: 0, position: 'relative', zIndex: 4,
-  },
-  healthHead: {
-    fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 8,
-  },
-  healthRow: { display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0', fontSize: 12 },
-  sevTag: {
-    fontSize: 10, fontWeight: 650, textTransform: 'none', borderRadius: 4,
-    padding: '1px 5px', flexShrink: 0, letterSpacing: 0,
-  },
-  sevWarn: { background: 'rgba(240,198,116,0.16)', color: 'var(--accent-hover, #f0c674)' },
-  sevErr: { background: 'rgba(248,113,113,0.18)', color: 'var(--danger)' },
-  healthKind: { fontWeight: 600, color: 'var(--text)', flexShrink: 0 },
-  healthDetail: { color: 'var(--muted)', wordBreak: 'break-word' },
-
   main: { flex: 1, position: 'relative', overflow: 'hidden', minHeight: 0 },
 
   center: {
