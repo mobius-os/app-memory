@@ -69,14 +69,17 @@ could change; do not bundle an audit of whether Memory is being used with the
 underlying preference, constraint, or prior impact you actually need.
 When earlier experience matters, retrieve its user impact, risks, preferences,
 constraints, goals, or habits, then verify what changed through the owning
-source. Then run this read-only background lookup. A confined navigator
-starts at `index.md`, opens only linked
-nodes, and decides after each step whether to stop or expand the newly active
-frontier up to the configured breadth. Unchosen siblings are pruned from that
-read but retained in its audit trace. The fourth live decision is selection-only;
-the configured depth is a maximum, not a target. There is no total-node quota:
-relevance and the graph's branching determine how much is opened. If the text
-provider is unavailable, the same traversal falls back to local lexical choices:
+source. Then run this read-only background lookup. A confined navigator starts
+at `index.md`, sees the complete contents of each opened routing node, and
+chooses which of its linked branches to open next. It stops when it has enough
+relevant context or no useful branch remains. Unchosen siblings are pruned from
+that read but retained in its audit trace. The graph's links bound the walk;
+there is no graph-wide catalog, configured depth, breadth target, or total-node
+quota. At most 12 answer notes may be returned as a pathological output ceiling,
+not a target. Host-owned opened-context ceilings also stop a malformed decision
+or broad term collision from creating an unbounded prompt; they do not rank or
+pad ordinary reads. If the text provider is unavailable, the same rooted walk falls
+back to local lexical choices:
 
 ```bash
 python3 <this installed system app's source_dir>/memory_search.py "<focused description of the facts or prior context needed>" "$CHAT_ID"

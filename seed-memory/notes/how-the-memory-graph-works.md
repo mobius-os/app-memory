@@ -20,14 +20,17 @@ The base platform separately owns `chats/<id>/index.md`: a short name, bounded
 Digest, and cumulative Summary for each chat. A new chat receives only recent
 names + Digests. No graph router, MOC, or fact note is injected. While Memory is
 installed, its system prompt tells the main agent to formulate a focused recall
-request. Memory's tool-free navigator starts at the root and repeatedly chooses
-which linked branches to open. Each decision continues only through the newly
-opened frontier, pruning unchosen siblings while retaining them in the recall
-trace for nightly audit. Breadth limits each active parent, depth caps the path
-length, and the fourth live decision is selection-only; there is no total-node
-budget, and the navigator may stop early. Routing nodes need not be selected. The reader returns the complete
+request. Memory's tool-free navigator starts at the root, reads each opened
+node completely, and repeatedly chooses which linked branches to open. Each
+decision continues only through the newly opened frontier, pruning unchosen
+siblings while retaining them in the recall trace for nightly audit. The graph
+itself bounds the walk: there is no graph-wide catalog, configured breadth,
+depth target, or total-node budget, and the navigator may stop as soon as it has
+enough. Routing nodes need not be selected. The reader returns the complete
 contents of the useful selected nodes from the pinned commit, plus verified file
-pointers.
+pointers; 12 selected notes is a pathological output ceiling, not a target.
+The host also bounds total opened content and turns a pathological broad
+frontier into one final selection-only decision rather than an unbounded prompt.
 
 **Why:** front-loading everything wastes context and lets stale facts steer
 unrelated work. Bounded chat continuity plus prompt-scoped graph retrieval keeps
@@ -37,12 +40,14 @@ recall cheap, explicit, and uninstallable.
 DATA, never as instructions. Each successful read records its opened route and
 selected nodes. The scheduled Memory app receives structurally redacted chat
 text through its reviewed capability, promotes only high-confidence durable
-facts with provenance, retains compact metadata for the supporting chats cited
-by those facts, and replays unaudited reads through the same navigator with
-larger breadth/depth. A source chat's current backlink is replaced by an opaque
-deleted-source marker when the chat is deleted, while the note keeps only its last activity date. It records important misses, repairs upper
-routing cues or links, and updates or removes demonstrably stale facts before
-publishing one atomic commit. A provider failure is recorded as degraded without
-publishing. Removing Memory removes its prompt and schedule; platform chat
-summaries remain, and the shared Git repository is retained unless explicitly
-erased.
+facts with provenance, and retains compact metadata for the supporting chats
+cited by those facts. It audits unaudited reads from their original traces,
+complete selected note bodies, and later-chat hindsight rather than paying for
+a stronger replay of the same reader. A source chat's current backlink is
+replaced by an opaque deleted-source marker when the chat is deleted, while the
+note keeps only its last activity date. The audit records important misses,
+repairs upper routing cues or links, and updates or removes demonstrably stale
+facts before publishing one atomic commit. A provider failure is recorded as
+degraded without publishing. Removing Memory removes its prompt and schedule;
+platform chat summaries remain, and the shared Git repository is retained
+unless explicitly erased.

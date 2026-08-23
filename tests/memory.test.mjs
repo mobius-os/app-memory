@@ -7,17 +7,28 @@ import { canReorderAgentSlots, reorderAgentSlots } from '../ui/backgroundAgentOr
 
 mkdirSync(new URL('./.build/', import.meta.url), { recursive: true })
 
-test('retrieval settings keep defaults quiet and reveal custom raw limits only in advanced controls', () => {
+test('Memory tunes recall without asking the user to manage search limits', () => {
   const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
-  assert.match(source, /Memory tunes its own recall/)
+  const manifest = JSON.parse(readFileSync(new URL('../mobius.json', import.meta.url), 'utf8'))
   assert.doesNotMatch(source, /Audited reads|Miss rate|Overreach|Host overrides/)
-  assert.doesNotMatch(source, /Balanced defaults|Custom limits active/)
-  assert.match(source, /<details className="mg-advanced-policy">/)
-  assert.match(source, /Advanced search limits\{hasCustomRecallLimits \? ' · Custom' : ''\}/)
-  assert.match(source, /Tune recall only when testing a specific hypothesis/)
-  assert.match(source, /Reset to defaults/)
-  assert.match(source, /settingsSection === 'retrieval'[\s\S]*settingsStatus !== 'ready'/)
+  assert.doesNotMatch(source, /Advanced search limits|Live reads|Nightly replay/)
+  assert.doesNotMatch(source, /\['retrieval', 'Recall'/)
+  assert.doesNotMatch(source, /live_depth:\s*policyNumber|night_breadth:\s*policyNumber|night_depth:\s*policyNumber/)
+  assert.deepEqual(
+    Object.keys(manifest.storage_seeds['settings.json']).sort(),
+    ['fallback_model', 'fallback_provider', 'model', 'primary_agent_mode', 'provider', 'secondary_agent_mode'],
+  )
   assert.match(source, /if \(!settingsLoaded\)[\s\S]*setSettingsStatus\('error'\)/)
+})
+
+test('graph maintenance diagnostics stay internal instead of posing as owner actions', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  const constants = readFileSync(new URL('../constants.js', import.meta.url), 'utf8')
+  const runner = readFileSync(new URL('../memory_runner.py', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /Graph health|showHealth|healthBadge/)
+  assert.doesNotMatch(constants, /healthBadge|healthPanel|sevWarn|sevErr/)
+  assert.match(runner, /def _maintenance_diagnostics\(staging: Path\)/)
+  assert.match(runner, /def _maintenance_flags\(staging: Path\)/)
 })
 
 test('supporting chats show provenance without duplicating transcript excerpts', () => {
@@ -267,8 +278,6 @@ test('settings expose app-level background agent overrides', () => {
   assert.match(source, /Boolean\(fallbackProviderValue \|\| fallbackModelValue\)/)
   assert.match(source, /effort: null/)
   assert.match(source, /fallback_effort: null/)
-  assert.match(source, /const agentPayload = agentStatus === 'ready' \? \{/)
-  assert.match(source, /\.\.\.currentSettings,\s*\.\.\.agentPayload,/)
   assert.doesNotMatch(source, /EffortStepper|EFFORT_LEVELS|agentEffort/)
   const picker = readFileSync(new URL('../ui/ModelPicker.jsx', import.meta.url), 'utf8')
   const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')

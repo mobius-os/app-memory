@@ -24,6 +24,7 @@ REPOSITORY = ROOT / "repository"
 LEGACY_GENERATIONS = ROOT / "generations"
 READY = ROOT / ".ready"
 STATE = ROOT / "app-state"
+RECALL_GUIDANCE = STATE / "recall-guidance.json"
 OPERATION_LOCK = ROOT / ".operation.lock"
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _LEGACY_GEN_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
@@ -34,6 +35,7 @@ _SAFE_REL = re.compile(
 _TRACKED_PATHS = ("index.md", "graph.json", "mocs", "notes", "sources")
 MAX_NOTE_BYTES = 256_000
 MAX_GRAPH_BYTES = 4_000_000
+MAX_RECALL_GUIDANCE_CHARS = 800
 
 
 def _atomic_text(path: Path, text: str) -> None:
@@ -56,6 +58,48 @@ def _atomic_text(path: Path, text: str) -> None:
     except OSError:
       pass
     raise
+
+
+def load_recall_guidance() -> dict | None:
+  """Return the latest bounded nightly selector lesson, when valid."""
+  try:
+    fd = os.open(RECALL_GUIDANCE, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+      raw = os.read(fd, 16_385)
+    finally:
+      os.close(fd)
+    if len(raw) > 16_384:
+      return None
+    value = json.loads(raw.decode("utf-8"))
+  except (OSError, ValueError, UnicodeError):
+    return None
+  if not isinstance(value, dict) or value.get("schema") != 1:
+    return None
+  instruction = value.get("instruction")
+  if (
+    not isinstance(instruction, str)
+    or len(instruction) > MAX_RECALL_GUIDANCE_CHARS
+    or "\x00" in instruction
+  ):
+    return None
+  return value
+
+
+def write_recall_guidance(value: dict) -> None:
+  """Atomically publish one validated nightly selector lesson."""
+  instruction = value.get("instruction") if isinstance(value, dict) else None
+  if (
+    not isinstance(value, dict)
+    or value.get("schema") != 1
+    or not isinstance(instruction, str)
+    or len(instruction) > MAX_RECALL_GUIDANCE_CHARS
+    or "\x00" in instruction
+  ):
+    raise ValueError("invalid recall guidance")
+  _atomic_text(
+    RECALL_GUIDANCE,
+    json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+  )
 
 
 def _git_env() -> dict[str, str]:

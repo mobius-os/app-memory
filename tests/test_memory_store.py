@@ -38,6 +38,26 @@ def _publish(store, seed: Path, value: int = 0):
 
 
 class MemoryStoreTests(unittest.TestCase):
+  def test_recall_guidance_round_trips_atomically_and_rejects_invalid_state(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      guidance = {
+        "schema": 1,
+        "run_id": "night-1",
+        "instruction": "Select only facts that can change the task decision.",
+      }
+
+      store.write_recall_guidance(guidance)
+
+      self.assertEqual(store.load_recall_guidance(), guidance)
+      store.RECALL_GUIDANCE.write_text('{"schema":2}', encoding="utf-8")
+      self.assertIsNone(store.load_recall_guidance())
+      with self.assertRaisesRegex(ValueError, "invalid recall guidance"):
+        store.write_recall_guidance({
+          "schema": 1,
+          "instruction": "x" * (store.MAX_RECALL_GUIDANCE_CHARS + 1),
+        })
+
   def test_graph_metadata_and_note_bodies_have_separate_read_caps(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))
