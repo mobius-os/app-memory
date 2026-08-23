@@ -334,8 +334,7 @@ class MemoryRunnerTests(unittest.TestCase):
       staging = Path(raw) / "staging"
       (staging / "mocs").mkdir(parents=True)
       (staging / "notes").mkdir()
-      # A fully linked graph so orphan/dangling errors cannot mask the lints;
-      # the split-candidate warnings must be the only problems reported.
+      # A fully linked graph so orphan/dangling errors cannot mask the lints.
       (staging / "index.md").write_text(
         "---\ntitle: Home\ntype: moc\n---\n# Home\n\n- [[map]]\n",
         encoding="utf-8",
@@ -345,7 +344,6 @@ class MemoryRunnerTests(unittest.TestCase):
         "- [[sprawling]]\n- [[filed-nowhere]]\n",
         encoding="utf-8",
       )
-      # 40 prose lines > MAX_NOTE_PROSE_LINES (30) -> oversized_note.
       body = "\n".join(f"Distinct claim number {i}." for i in range(40))
       (staging / "notes" / "sprawling.md").write_text(
         "---\ntitle: Sprawling\ntype: note\nmocs: [map]\n---\n" + body + "\n",
@@ -361,9 +359,6 @@ class MemoryRunnerTests(unittest.TestCase):
       graph = runner.build_graph(staging, usage={})
 
       by_kind = {p["kind"]: p for p in graph["problems"]}
-      self.assertIn("oversized_note", by_kind)
-      self.assertEqual(by_kind["oversized_note"]["node"], "sprawling")
-      self.assertGreater(by_kind["oversized_note"]["lines"], 30)
       self.assertIn("bare_map_entry", by_kind)
       self.assertEqual(by_kind["bare_map_entry"]["node"], "filed-nowhere")
       self.assertIn("missing_description", by_kind)
@@ -377,7 +372,7 @@ class MemoryRunnerTests(unittest.TestCase):
       ]
       self.assertEqual(blocking, [])
 
-  def test_overfull_map_is_flagged_as_a_split_candidate(self):
+  def test_long_notes_and_wide_maps_are_not_rejected_by_magic_counts(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))
       staging = Path(raw) / "staging"
@@ -400,11 +395,7 @@ class MemoryRunnerTests(unittest.TestCase):
 
       problems = runner.build_graph(staging, usage={})["problems"]
 
-      overfull = [p for p in problems if p["kind"] == "overfull_map"]
-      self.assertEqual(len(overfull), 1)
-      self.assertEqual(overfull[0]["node"], "map")
-      self.assertEqual(overfull[0]["severity"], "warning")
-      self.assertGreater(overfull[0]["entries"], 30)
+      self.assertEqual(problems, [])
 
   def test_one_bad_provenance_update_rejects_the_coherence_unit(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -487,24 +478,23 @@ class MemoryRunnerTests(unittest.TestCase):
       self.assertEqual(status["status"], "degraded")
       self.assertEqual(status["reason"], "topology_regression")
 
-  def test_proposal_data_is_bounded_valid_json(self):
+  def test_proposal_data_preserves_one_platform_redacted_work_item(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))
       staging = Path(raw) / "staging"
       staging.mkdir()
-      chats = [{
-        "id": f"chat-{index}", "title": "A" * 500,
+      chat = {
+        "id": "chat-one", "title": "A" * 500,
         "messages": [
           {"role": "user", "text": "x" * 2_000} for _ in range(200)
         ],
-      } for index in range(30)]
+      }
 
-      encoded = runner._proposal_data(staging, chats)
+      encoded = runner._proposal_data(staging, [chat])
       value = json.loads(encoded)
 
-      self.assertLessEqual(len(encoded), runner._MAX_PROMPT_DATA_CHARS)
-      self.assertTrue(value["redacted_recent_chats"])
-      self.assertLess(len(value["redacted_recent_chats"]), len(chats))
+      self.assertEqual(len(value["redacted_recent_chats"]), 1)
+      self.assertEqual(len(value["redacted_recent_chats"][0]["messages"]), 200)
 
   def test_proposal_data_exposes_short_handles_not_canonical_chat_ids(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -556,7 +546,6 @@ class MemoryRunnerTests(unittest.TestCase):
       _store, runner = _load(Path(raw))
       staging = Path(raw) / "staging"
       staging.mkdir()
-      runner._MAX_PROMPT_DATA_CHARS = 500
       chats = [
         {"id": "first", "title": "first", "messages": [{"role": "user", "text": "a"}]},
         {"id": "second", "title": "second", "messages": [{"role": "user", "text": "b" * 1000}]},
@@ -600,7 +589,7 @@ class MemoryRunnerTests(unittest.TestCase):
         {"provider": "claude", "model": "primary"},
         {"provider": "codex", "model": "fallback"},
       ]
-      runner._text_proposal = lambda choice, _prompt: runner.AnalystResult(
+      runner._text_proposal = lambda choice, _prompt, **_kwargs: runner.AnalystResult(
         (
           _reviewed({
             "summary": "mixed primary",
@@ -641,7 +630,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._agent_choices = lambda _app_id: [
         {"provider": "claude", "model": "only"},
       ]
-      runner._text_proposal = lambda *_args: runner.AnalystResult(
+      runner._text_proposal = lambda *_args, **_kwargs: runner.AnalystResult(
         _proposal("invented-source"),
       )
 
@@ -666,7 +655,11 @@ class MemoryRunnerTests(unittest.TestCase):
       (staging / "notes" / "old.md").write_text(old, encoding="utf-8")
       runner.build_graph(staging, usage={})
 
-      data = json.loads(runner._proposal_data(staging, []))
+      data = json.loads(runner._proposal_data(staging, [{
+        "id": "chat-one",
+        "title": "Align the old prior fact",
+        "messages": [{"role": "user", "text": "The durable old detail changed."}],
+      }]))
       old_row = next(
         row for row in data["existing_note_contents"]
         if row["path"] == "notes/old.md"
@@ -682,34 +675,45 @@ class MemoryRunnerTests(unittest.TestCase):
       )
       self.assertEqual((changed, deleted), (["notes/old.md"], []))
 
-  def test_routing_maps_are_complete_while_oversized_notes_are_omitted(self):
+  def test_prompt_uses_compact_graph_identities_and_complete_related_notes(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))
       staging = Path(raw) / "staging"
       _seed(staging)
       route = "# Topic\n" + ("complete routing text\n" * 260)
-      note = "# Large note\n" + ("optional detail\n" * 400)
+      note = (
+        "---\ntitle: Large optional detail\ntype: note\n"
+        "description: The complete large-note detail\n---\n"
+        + ("optional detail\n" * 400)
+      )
       (staging / "mocs" / "topic.md").write_text(route, encoding="utf-8")
       (staging / "notes" / "large.md").write_text(note, encoding="utf-8")
       runner.build_graph(staging, usage={})
 
-      data = json.loads(runner._proposal_data(staging, []))
+      data = json.loads(runner._proposal_data(staging, [{
+        "id": "chat-one",
+        "title": "Large note detail",
+        "messages": [{"role": "user", "text": "The large optional detail changed."}],
+      }]))
       route_row = next(
-        row for row in data["existing_graph"]
-        if row["path"] == "mocs/topic.md"
+        row for row in data["existing_graph"]["mocs"]
+        if row[0] == "mocs/topic.md"
       )
       note_row = next(
-        row for row in data["existing_graph"]
-        if row["path"] == "notes/large.md"
+        row for row in data["existing_graph"]["notes"]
+        if row[0] == "notes/large.md"
       )
 
-      self.assertEqual(route_row["content"], route)
-      self.assertTrue(route_row["content_complete"])
-      self.assertFalse(note_row["content_complete"])
+      self.assertEqual(route_row[0], "mocs/topic.md")
+      self.assertEqual(note_row, ["notes/large.md", "Large optional detail"])
       self.assertNotIn(
-        "notes/large.md",
-        {row["path"] for row in data["existing_note_contents"]},
+        "complete routing text", json.dumps(data["existing_graph"]),
       )
+      related = next(
+        row for row in data["existing_note_contents"]
+        if row["path"] == "notes/large.md"
+      )
+      self.assertEqual(related["content"], note)
 
   def test_validated_delete_can_merge_duplicate_without_touching_index(self):
     with tempfile.TemporaryDirectory() as raw:

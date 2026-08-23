@@ -364,107 +364,12 @@ export const CSS = `
   font-size: 12.5px;
   line-height: 1.5;
 }
-.mg-advanced-policy {
-  border-top: 1px solid var(--border);
-  padding-top: 2px;
-}
-.mg-advanced-policy > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 14px 2px;
-  color: var(--text);
-  cursor: pointer;
-  list-style: none;
-  font-size: 12.5px;
-  font-weight: 720;
-}
-.mg-advanced-policy > summary::-webkit-details-marker { display: none; }
-.mg-advanced-policy > summary::after { content: '›'; color: var(--accent); font-size: 18px; transition: transform .16s ease; }
-.mg-advanced-policy[open] > summary::after { transform: rotate(90deg); }
-.mg-advanced-policy > summary small { margin-left: auto; color: var(--muted); font-size: 10.5px; font-weight: 500; }
-.mg-advanced-policy-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  padding-top: 12px;
-}
-.mg-advanced-policy-foot p { max-width: 58ch; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.mg-advanced-policy-foot button {
-  flex: none;
-  min-height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--surface);
-  color: var(--text);
-  font: 650 11px/1 var(--font);
-  cursor: pointer;
-}
-.mg-advanced-policy-foot button:disabled { opacity: .45; cursor: default; }
-.mg-policy-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(220px, 1fr));
-  gap: 12px;
-}
-.mg-policy-card {
-  min-width: 0;
-  margin: 0;
-  padding: 8px 16px 12px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--bg) 72%, var(--surface));
-}
-.mg-policy-card.is-nightly {
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
-}
-.mg-policy-card legend {
-  padding: 0 7px;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 750;
-}
-.mg-policy-card legend span {
-  margin-left: 5px;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 500;
-}
-.mg-policy-card label {
-  display: grid;
-  grid-template-columns: 1fr 72px;
-  align-items: center;
-  gap: 12px;
-  min-height: 54px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 680;
-}
-.mg-policy-card label:last-child { border-bottom: 0; }
-.mg-policy-card label span { display: flex; flex-direction: column; gap: 2px; }
-.mg-policy-card label small { color: var(--muted); font-size: 10.5px; font-weight: 500; }
-.mg-policy-card input,
 .mg-schedule-card input {
   box-sizing: border-box;
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
   font-variant-numeric: tabular-nums;
-}
-.mg-policy-card input {
-  width: 100%;
-  height: 40px;
-  border-radius: 9px;
-  font: 700 13px/1 var(--font);
-  text-align: center;
-}
-.mg-policy-card input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 .mg-schedule-card {
   display: grid;
@@ -761,10 +666,6 @@ export const CSS = `
   .mg-settings-section { gap: 17px; }
   .mg-section-intro { grid-template-columns: 1fr; align-items: start; gap: 8px; }
   .mg-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mg-advanced-policy-foot { align-items: flex-start; flex-direction: column; }
-  .mg-advanced-policy > summary { align-items: flex-start; }
-  .mg-advanced-policy > summary small { display: none; }
-  .mg-policy-grid { grid-template-columns: 1fr; }
   .mg-schedule-card { grid-template-columns: auto 1fr; }
   .mg-schedule-card input,
   .mg-schedule-card select { grid-column: 1 / -1; width: 100%; }

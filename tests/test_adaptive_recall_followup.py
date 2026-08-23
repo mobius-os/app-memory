@@ -53,9 +53,6 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
       "specific lifecycle failure",
       [],
       [],
-      breadth=4,
-      depth_limit=4,
-      audit=False,
     )
     self.assertIn("explicitly support every material", prompt)
     self.assertIn("a parent is not offered again", prompt)
@@ -75,8 +72,6 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
       result = memory_search.traverse(
         "The first A detail",
         "0" * 40,
-        breadth=1,
-        depth_limit=2,
         text_call=lambda _prompt: json.dumps(next(actions)),
       )
 
@@ -113,8 +108,6 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
       result = memory_search.traverse(
         "The complete detailed answer",
         "0" * 40,
-        breadth=1,
-        depth_limit=2,
         text_call=lambda _prompt: json.dumps(next(actions)),
       )
 

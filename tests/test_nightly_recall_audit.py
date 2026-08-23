@@ -27,6 +27,20 @@ def _self_review():
   }
 
 
+def _reviewed(fields: dict) -> dict:
+  return {
+    "summary": "reviewed",
+    "self_review": _self_review(),
+    "read_audits": [],
+    "recall_guidance": None,
+    "followups": [],
+    "updates": [],
+    "links": [],
+    "deletes": [],
+    **fields,
+  }
+
+
 def _memory_contract():
   return {
     "schema": 5,
@@ -878,17 +892,32 @@ def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
     "[[maintaining-memory]]\n[[writer-owned]]\n",
     encoding="utf-8",
   )
-  long_body = "\n".join(f"line {index}" for index in range(31))
   (tmp_path / "mocs" / "maintaining-memory.md").write_text(
-    "---\ntype: note\ntitle: Owned\nmanaged_by: memory\n---\n" + long_body,
+    "---\ntype: note\ntitle: Owned\nmanaged_by: memory\n---\nOwned.\n",
     encoding="utf-8",
   )
   (tmp_path / "notes" / "writer-owned.md").write_text(
-    "---\ntype: note\ntitle: Writer owned\n---\n" + long_body,
+    "---\ntype: note\ntitle: Writer owned\n---\nWriter owned.\n",
     encoding="utf-8",
   )
   graph = memory_graph.build(tmp_path)
-  graph["problems"].append(dict(graph["problems"][0]))
+  graph["problems"].extend([
+    {
+      "kind": "missing_description",
+      "severity": "warning",
+      "node": "maintaining-memory",
+    },
+    {
+      "kind": "missing_description",
+      "severity": "warning",
+      "node": "writer-owned",
+    },
+    {
+      "kind": "missing_description",
+      "severity": "warning",
+      "node": "maintaining-memory",
+    },
+  ])
   (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
 
   diagnostics = memory_runner._maintenance_diagnostics(tmp_path)
@@ -899,108 +928,16 @@ def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
     if item["path"] == "mocs/maintaining-memory.md"
   ]
   assert owned == [{
-    "code": "graph.oversized_note",
-    "kind": "oversized_note",
+    "code": "graph.missing_description",
+    "kind": "missing_description",
     "severity": "warning",
     "node": "maintaining-memory",
     "path": "mocs/maintaining-memory.md",
     "owner": "memory",
     "actionable_by_writer": False,
-    "lines": 31,
   }]
   assert [item["path"] for item in flags] == ["notes/writer-owned.md"]
-  assert flags[0]["code"] == "graph.oversized_note"
-
-
-def test_read_audit_batch_is_oldest_first_and_bounded():
-  records = [{"read_id": str(index)} for index in range(30)]
-
-  batch, deferred = memory_runner._read_audit_batch(records)
-
-  assert batch == records[:memory_runner._MAX_READ_AUDITS_PER_RUN]
-  assert deferred == 6
-
-
-def test_audit_prompt_batch_defers_newer_replays_before_dropping_routes(
-  monkeypatch, tmp_path,
-):
-  audits = [{"read_id": str(index)} for index in range(4)]
-
-  def envelope(_staging, _chats, selected):
-    if len(selected) > 2:
-      raise memory_runner.ProposalValidationError(
-        "routing_context_over_budget", "required routes no longer fit",
-      )
-    return "{}", []
-
-  monkeypatch.setattr(memory_runner, "_proposal_envelope", envelope)
-
-  batch, deferred = memory_runner._audit_prompt_batch(tmp_path, audits)
-
-  assert batch == audits[:2]
-  assert deferred == 2
-
-
-def test_audit_prompt_view_deduplicates_frontier_catalog_metadata(
-  monkeypatch, tmp_path,
-):
-  audit = {
-    "read_id": "read-1",
-    "hindsight_source_id": "private-chat-id",
-    "hindsight_source_deleted": False,
-    "question": "What would help?",
-    "live": {
-      "selected": ["notes/useful.md"],
-      "frontier_at_stop": [{
-        "id": "useful", "path": "notes/useful.md", "title": "Useful",
-        "description": "x" * 2_000,
-      }],
-    },
-    "deep": {
-      "selected": ["notes/useful.md"],
-      "selected_nodes": [{
-        "path": "notes/useful.md", "title": "Useful",
-        "content": "Outcome evidence stays complete.",
-      }],
-      "frontier_at_stop": [{
-        "id": "other", "path": "notes/other.md", "title": "Other",
-        "description": "y" * 2_000,
-      }],
-      "decisions": [{
-        "round": 1, "selected": ["useful"], "reason": "Relevant.",
-        "attempts": [{"usage_receipt": {"input_chars": 90_000}}],
-      }],
-    },
-    "hindsight_chat": {"messages": ["It helped."]},
-  }
-  monkeypatch.setattr(memory_runner, "_MAX_PROMPT_DATA_CHARS", 1_200)
-  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _path: [])
-  monkeypatch.setattr(
-    memory_runner, "_graph_prompt_context",
-    lambda _path: ([{
-      "id": "index", "path": "index.md", "title": "Memory",
-      "description": "Root", "content": "Root", "content_complete": True,
-    }], []),
-  )
-
-  encoded, _ = memory_runner._proposal_envelope(tmp_path, [], [audit])
-  supplied = json.loads(encoded)["read_audits"][0]
-
-  assert supplied["live"]["frontier_at_stop"] == [{
-    "id": "useful", "path": "notes/useful.md", "title": "Useful",
-  }]
-  assert supplied["deep"]["frontier_at_stop"] == [{
-    "id": "other", "path": "notes/other.md", "title": "Other",
-  }]
-  assert supplied["deep"]["selected_nodes"][0]["content"] == (
-    "Outcome evidence stays complete."
-  )
-  assert supplied["deep"]["decisions"] == [{
-    "round": 1, "selected": ["useful"], "reason": "Relevant.",
-  }]
-  assert "hindsight_source_id" not in supplied
-  assert "hindsight_source_deleted" not in supplied
-  assert audit["live"]["frontier_at_stop"][0]["description"] == "x" * 2_000
+  assert flags[0]["code"] == "graph.missing_description"
 
 
 def test_hindsight_source_handle_can_cite_the_later_chat(monkeypatch, tmp_path):
@@ -1080,9 +1017,6 @@ def test_deleted_hindsight_source_uses_only_opaque_provenance(monkeypatch, tmp_p
   monkeypatch.setattr(memory_runner, "_known_deleted_source_ids", lambda _path: set())
   monkeypatch.setattr(memory_runner, "_known_deleted_source", lambda _path: False)
   monkeypatch.setattr(
-    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
-  )
-  monkeypatch.setattr(
     memory_runner, "run_text",
     lambda *_args, **_kwargs: TextResult(json.dumps(proposal)),
   )
@@ -1116,37 +1050,6 @@ def test_audit_prompt_view_preserves_grouped_frontier_route_references():
   assert audit["live"]["frontier_at_stop"][0]["nodes"][0]["title"] == "Useful"
 
 
-def test_audit_envelope_compacts_redundant_ordinary_catalog_fields(
-  monkeypatch, tmp_path,
-):
-  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _path: [])
-  monkeypatch.setattr(memory_runner, "_rank_note_contents", lambda graph, notes, chats: notes)
-  monkeypatch.setattr(
-    memory_runner, "_graph_prompt_context",
-    lambda _path: ([
-      {
-        "id": "index", "path": "index.md", "title": "Memory",
-        "description": "Root", "content": "Root", "content_complete": True,
-      },
-      {
-        "id": "useful", "path": "notes/useful.md", "title": "Useful",
-        "description": "Useful fact", "content_complete": True,
-      },
-    ], []),
-  )
-
-  encoded, _ = memory_runner._proposal_envelope(
-    tmp_path, [], [{"read_id": "one", "live": {}, "deep": {}}],
-  )
-  supplied = json.loads(encoded)["existing_graph"]
-
-  assert supplied[0]["title"] == "Memory"
-  assert "title" not in supplied[1]
-  assert "description" not in supplied[1]
-  assert "path" not in supplied[1]
-  assert "content_complete" not in supplied[1]
-
-
 def test_combined_proposal_preserves_each_batch_report():
   combined = memory_runner._combined_proposal([
     {
@@ -1154,12 +1057,20 @@ def test_combined_proposal_preserves_each_batch_report():
       "followups": ["Check this", "Shared"],
       "read_audits": [{"read_id": "one"}],
       "self_review": _self_review(),
+      "recall_guidance": {
+        "action": "replace", "instruction": "First lesson.",
+        "reason": "Older evidence.", "evidence_read_ids": ["one"],
+      },
     },
     {
       "summary": "Second batch.",
       "followups": ["Shared", "Check that"],
       "read_audits": [{"read_id": "two"}],
       "self_review": _self_review(),
+      "recall_guidance": {
+        "action": "replace", "instruction": "Fresh lesson.",
+        "reason": "Newer evidence.", "evidence_read_ids": ["two"],
+      },
     },
   ])
 
@@ -1168,6 +1079,10 @@ def test_combined_proposal_preserves_each_batch_report():
     "followups": ["Check this", "Shared", "Check that"],
     "read_audits": [{"read_id": "one"}, {"read_id": "two"}],
     "writer_self_reviews": [_self_review(), _self_review()],
+    "recall_guidance": {
+      "action": "replace", "instruction": "Fresh lesson.",
+      "reason": "Newer evidence.", "evidence_read_ids": ["two"],
+    },
   }
 
 
@@ -1343,111 +1258,6 @@ def test_batch_coordinator_combines_terminal_fallback_and_topology_rollback(
   assert result.deferred_attempts[-1]["rejection_code"] == "topology_regression"
 
 
-def test_oversized_recall_audit_does_not_freeze_chat_consolidation(
-  monkeypatch, tmp_path,
-):
-  graph = {"nodes": [], "edges": [], "problems": []}
-  chats = [{"id": "chat-1"}]
-  audits = [{"read_id": "oversized-audit"}]
-  proposal = {
-    "updates": [], "deletes": [], "summary": "Processed the chat.",
-    "followups": [], "read_audits": [],
-    "self_review": _self_review(),
-  }
-  outcome = memory_runner.ProposalOutcome(
-    "ok", proposal, "codex", "gpt-test", [],
-  )
-  monkeypatch.setattr(
-    memory_runner, "_audit_prompt_batch", lambda *_args: ([], 1),
-  )
-  monkeypatch.setattr(
-    memory_runner, "_proposal_envelope", lambda *_args: ("{}", []),
-  )
-  monkeypatch.setattr(
-    memory_runner, "_proposal_batch", lambda _staging, remaining, _audits: remaining,
-  )
-  monkeypatch.setattr(memory_runner, "_proposal", lambda *_args: outcome)
-  monkeypatch.setattr(
-    memory_runner, "_apply_validated_proposal",
-    lambda _staging, value, **_kwargs: (value, [], [], graph),
-  )
-
-  result = memory_runner._consolidate_batches(
-    57, tmp_path, graph, chats, audits, memory_runner.ProviderPool([]),
-  )
-
-  assert result.accepted_chats == chats
-  assert result.accepted_audits == []
-  assert result.remaining_chats == []
-  assert result.deferred_reason == "read_audit_over_budget"
-  assert result.deferred_detail == (
-    "oldest Memory recall audit exceeds the analyst prompt budget"
-  )
-  assert result.rejected_audit_count == 1
-
-
-def test_oversized_oldest_audit_does_not_starve_later_hindsight(
-  monkeypatch, tmp_path,
-):
-  graph = {"nodes": [], "edges": [], "problems": []}
-  oversized = {"read_id": "oversized-audit"}
-  fitting = {"read_id": "fitting-audit"}
-  proposal = {
-    "updates": [], "deletes": [], "summary": "Reviewed later hindsight.",
-    "followups": [], "read_audits": [{"read_id": "fitting-audit"}],
-    "self_review": _self_review(),
-  }
-  outcome = memory_runner.ProposalOutcome(
-    "ok", proposal, "codex", "gpt-test", [],
-  )
-
-  def audit_batch(_staging, remaining):
-    return ([], len(remaining)) if remaining[0] is oversized else ([remaining[0]], 0)
-
-  monkeypatch.setattr(memory_runner, "_audit_prompt_batch", audit_batch)
-  monkeypatch.setattr(
-    memory_runner, "_proposal_envelope", lambda *_args: ("{}", []),
-  )
-  monkeypatch.setattr(memory_runner, "_proposal", lambda *_args: outcome)
-  monkeypatch.setattr(
-    memory_runner, "_apply_validated_proposal",
-    lambda _staging, value, **_kwargs: (value, [], [], graph),
-  )
-
-  result = memory_runner._consolidate_batches(
-    57, tmp_path, graph, [], [oversized, fitting],
-    memory_runner.ProviderPool([]),
-  )
-
-  assert result.accepted_audits == [fitting]
-  assert result.rejected_audit_count == 1
-  assert result.deferred_reason == "read_audit_over_budget"
-
-
-def test_unfit_routing_context_remains_a_hard_failure(
-  monkeypatch, tmp_path,
-):
-  graph = {"nodes": [], "edges": [], "problems": []}
-  audits = [{"read_id": "audit"}]
-  monkeypatch.setattr(
-    memory_runner, "_audit_prompt_batch", lambda *_args: ([], 1),
-  )
-
-  def reject_routes(*_args):
-    raise memory_runner.ProposalValidationError(
-      "routing_context_over_budget", "required routes do not fit",
-    )
-
-  monkeypatch.setattr(memory_runner, "_proposal_envelope", reject_routes)
-
-  with pytest.raises(memory_runner.ProposalValidationError) as raised:
-    memory_runner._consolidate_batches(
-      57, tmp_path, graph, [], audits, memory_runner.ProviderPool([]),
-    )
-
-  assert raised.value.code == "routing_context_over_budget"
-
-
 @pytest.mark.parametrize(
   ("message", "code", "scope"),
   [
@@ -1566,27 +1376,6 @@ def test_model_work_receipt_keeps_fully_unreported_cost_unknown():
   assert receipt["reported_cost_usd"] is None
 
 
-def test_recall_audit_model_work_uses_deep_replay_receipts():
-  receipt = memory_runner._recall_audit_model_work([{
-    "read_id": "read-1",
-    "deep": {"decisions": [{"attempts": [{
-      "provider": "claude", "outcome": "ok",
-      "usage_receipt": {
-        "input_chars": 400, "output_chars": 80,
-        "usage": {"input_tokens": 120, "output_tokens": 15},
-        "cost_usd": 0.25,
-      },
-    }, {"provider": "lexical", "outcome": "fallback"}]}]},
-  }, {"read_id": "read-2", "deep": {"decisions": []}}])
-
-  assert receipt["attempt_count"] == 1
-  assert receipt["reported_cost_usd"] == 0.25
-  assert receipt["token_usage"] == {
-    "input_tokens": 120, "output_tokens": 15,
-  }
-  assert receipt["attempts"][0]["read_id"] == "read-1"
-
-
 def test_recall_model_work_uses_original_live_recall_receipts():
   receipt = memory_runner._recall_model_work([{
     "read_id": "read-1",
@@ -1703,7 +1492,7 @@ def test_structurally_invalid_batch_restores_files_and_derived_graph(
   assert builds == []
 
 
-def test_run_reaches_consolidation_with_a_bounded_recall_audit_batch(
+def test_run_reaches_consolidation_with_each_recall_as_one_work_item(
   monkeypatch, tmp_path,
 ):
   traces = [{"read_id": str(index)} for index in range(30)]
@@ -1733,23 +1522,15 @@ def test_run_reaches_consolidation_with_a_bounded_recall_audit_batch(
   )
   monkeypatch.setattr(memory_runner, "_pending_read_traces", lambda: traces)
 
-  def audit(_app_id, _commit, selected, _staging=None, _hindsight=None):
+  def audit(_commit, selected, _hindsight=None):
     audited.extend(selected)
     return selected
 
   monkeypatch.setattr(memory_runner, "_audit_reads", audit)
   monkeypatch.setattr(
     memory_runner,
-    "_audit_prompt_batch",
-    lambda _staging, remaining: (
-      remaining[:5],
-      max(0, len(remaining) - 5),
-    ),
-  )
-  monkeypatch.setattr(
-    memory_runner,
     "_proposal",
-    lambda _app_id, _staging, _chats, audits, _providers: memory_runner.ProposalOutcome(
+    lambda _app_id, _staging, _chats, audits, _providers, _deadline: memory_runner.ProposalOutcome(
       "ok",
       {
         "updates": [],
@@ -1787,18 +1568,16 @@ def test_run_reaches_consolidation_with_a_bounded_recall_audit_batch(
     "_record_recall_audits",
     lambda *_args, **_kwargs: None,
   )
-  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: 4)
-  monkeypatch.setattr(memory_runner, "_night_policy", lambda _app_id: (6, 6))
 
   assert asyncio.run(memory_runner.run()) == 0
-  assert audited == traces[:memory_runner._MAX_READ_AUDITS_PER_RUN]
-  assert statuses[-1]["read_audit_count"] == 24
-  assert statuses[-1]["deferred_read_audit_count"] == 6
-  assert statuses[-1]["audit_proposal_batch_count"] == 5
+  assert audited == traces
+  assert statuses[-1]["read_audit_count"] == 30
+  assert statuses[-1]["deferred_read_audit_count"] == 0
+  assert statuses[-1]["audit_proposal_batch_count"] == 30
   assert statuses[-1]["chat_proposal_batch_count"] == 0
 
 
-def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
+def test_run_consolidates_focused_chat_items_before_one_publish(
   monkeypatch, tmp_path,
 ):
   chats = [{"id": f"chat-{index}"} for index in range(5)]
@@ -1841,13 +1620,7 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
   )
   monkeypatch.setattr(memory_runner, "_pending_read_traces", lambda: [])
   monkeypatch.setattr(memory_runner, "_audit_reads", lambda *_args: [])
-  monkeypatch.setattr(
-    memory_runner,
-    "_proposal_batch",
-    lambda _staging, remaining, _audits: remaining[:2],
-  )
-
-  def propose(_app_id, _staging, batch, _audits, _providers):
+  def propose(_app_id, _staging, batch, _audits, _providers, _deadline):
     proposed_batches.append([chat["id"] for chat in batch])
     return memory_runner.ProposalOutcome(
       "ok",
@@ -1888,20 +1661,16 @@ def test_run_consolidates_multiple_bounded_chat_batches_before_one_publish(
     "_record_recall_audits",
     lambda *_args, **_kwargs: None,
   )
-  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: 4)
-  monkeypatch.setattr(memory_runner, "_night_policy", lambda _app_id: (6, 6))
 
   assert asyncio.run(memory_runner.run()) == 0
   assert proposed_batches == [
-    ["chat-0", "chat-1"],
-    ["chat-2", "chat-3"],
-    ["chat-4"],
+    ["chat-0"], ["chat-1"], ["chat-2"], ["chat-3"], ["chat-4"],
   ]
   assert published == ["publish"]
   assert acknowledged == [chat["id"] for chat in chats]
   assert statuses[-1]["status"] == "published"
   assert statuses[-1]["source_chat_count"] == 5
-  assert statuses[-1]["proposal_batch_count"] == 3
+  assert statuses[-1]["proposal_batch_count"] == 5
   assert statuses[-1]["deferred_chat_count"] == 0
 
 
@@ -2006,8 +1775,6 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
     "_record_recall_audits",
     lambda *_args, **_kwargs: None,
   )
-  monkeypatch.setattr(memory_runner, "_live_policy", lambda _app_id: 4)
-  monkeypatch.setattr(memory_runner, "_night_policy", lambda _app_id: (6, 6))
 
   assert asyncio.run(memory_runner.run()) == 0
   assert acknowledged == ["chat-0", "chat-1"]
@@ -2020,11 +1787,6 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   ] == rejection_code
 
 
-def test_nightly_policy_defaults_to_six_by_six(monkeypatch):
-  monkeypatch.setattr(memory_runner, "_settings", lambda _app_id: {})
-  assert memory_runner._night_policy(57) == (6, 6)
-
-
 def test_nightly_prompt_requires_learn_recall_repair_and_prune(tmp_path):
   (tmp_path / "graph.json").write_text(json.dumps({
     "nodes": [], "problems": [],
@@ -2032,9 +1794,12 @@ def test_nightly_prompt_requires_learn_recall_repair_and_prune(tmp_path):
   audit = {
     "read_id": "read-1",
     "question": "What matters?",
-    "live": {"selected": []},
-    "deep": {"selected": ["notes/answer.md"], "opened": []},
-    "potential_misses": ["notes/answer.md"],
+    "live": {
+      "selected": [],
+      "frontier_at_stop": [{
+        "from": "index", "nodes": [{"id": "answer"}],
+      }],
+    },
   }
   prompt = memory_runner._proposal_prompt(tmp_path, [], [audit])
   assert "Learn." in prompt
@@ -2044,10 +1809,70 @@ def test_nightly_prompt_requires_learn_recall_repair_and_prune(tmp_path):
   assert "make future recall more useful" in prompt
   assert "`next_experiment`" in prompt
   assert "use the later conversation as the primary" in prompt
-  assert "Deep replay remains diagnostic evidence" in prompt
+  assert "original route and pruned frontier" in prompt
   assert '`usefulness` as `helpful`, `mixed`, `unused`, `harmful`, or' in prompt
   assert '"hindsight_reason":"short outcome-based reason"' in prompt
+  assert "coach the live selector" in prompt.lower()
+  assert '"recall_guidance"' in prompt
   assert '"read_id": "read-1"' in prompt
+
+
+def test_recall_guidance_is_bounded_to_supplied_audit_evidence():
+  audits = [{"read_id": "one"}, {"read_id": "two"}]
+  proposal = {
+    "read_audits": [
+      {
+        "read_id": read_id,
+        "outcome": "ok",
+        "overreach": False,
+        "missed_nodes": [],
+        "overselected_nodes": [],
+        "reason": "Sufficient.",
+      }
+      for read_id in ("one", "two")
+    ],
+    "recall_guidance": {
+      "action": "replace",
+      "instruction": "Exclude generic process notes unless they alter the task.",
+      "reason": "Both reads included adjacent process guidance.",
+      "evidence_read_ids": ["one", "two"],
+    },
+  }
+
+  normalized = memory_runner._normalize_audit_verdicts(proposal, audits)
+
+  assert normalized["recall_guidance"]["action"] == "replace"
+  proposal["recall_guidance"]["evidence_read_ids"] = ["invented"]
+  with pytest.raises(memory_runner.ProposalValidationError) as raised:
+    memory_runner._normalize_audit_verdicts(proposal, audits)
+  assert raised.value.code == "invalid_recall_guidance"
+
+
+def test_accepted_recall_guidance_applies_replace_keep_and_clear(monkeypatch):
+  stored = []
+  monkeypatch.setattr(memory_runner, "load_recall_guidance", lambda: (
+    stored[-1] if stored else None
+  ))
+  monkeypatch.setattr(memory_runner, "write_recall_guidance", stored.append)
+  review = {
+    "action": "replace",
+    "instruction": "Exclude generic process notes unless they alter the task.",
+    "reason": "Observed overreach.",
+    "evidence_read_ids": ["one"],
+  }
+
+  replaced = memory_runner._apply_recall_guidance("run-1", review)
+  kept = memory_runner._apply_recall_guidance("run-2", {"action": "keep"})
+  cleared = memory_runner._apply_recall_guidance("run-3", {
+    "action": "clear", "reason": "Guidance became stale.",
+    "evidence_read_ids": ["two"],
+  })
+
+  assert replaced["status"] == "replaced"
+  assert kept["status"] == "kept"
+  assert kept["instruction"] == review["instruction"]
+  assert cleared["status"] == "cleared"
+  assert stored[-1]["instruction"] == ""
 
 
 def test_recall_hindsight_reuses_intake_and_fetches_each_missing_chat_once(monkeypatch):
@@ -2184,8 +2009,6 @@ def test_recall_stats_split_route_miss_overreach_and_graph_scale(monkeypatch, tm
     audits,
     proposal,
     graph,
-    live_policy=4,
-    night_policy=(6, 6),
   )
 
   stats = json.loads((state / "recall-stats.json").read_text())
@@ -2200,8 +2023,7 @@ def test_recall_stats_split_route_miss_overreach_and_graph_scale(monkeypatch, tm
   assert stats["no_memory_rate"] == 0.0
   assert stats["model_to_host_selection_override_rate"] == 0.0
   assert stats["graph_nodes"] == 3
-  assert stats["live_policy"] == {"selection": "one_pass", "depth": 4}
-  assert stats["night_policy"] == {"breadth": 6, "depth": 6}
+  assert stats["retrieval"] == "progressive_rooted_navigation"
   assert stats["usefulness_counts"] == {
     "helpful": 0, "mixed": 1, "unused": 0, "harmful": 0, "unknown": 0,
   }
@@ -2244,7 +2066,6 @@ def test_recall_stats_distinguish_unopened_frontier_from_route_miss(
 
   memory_runner._record_recall_audits(
     "run-1", audits, proposal, {"nodes": [], "edges": []},
-    live_policy=4, night_policy=(6, 6),
   )
 
   stats = json.loads((state / "recall-stats.json").read_text())
@@ -2252,139 +2073,6 @@ def test_recall_stats_distinguish_unopened_frontier_from_route_miss(
   assert stats["route_misses"] == 0
   assert stats["selection_misses"] == 0
   assert stats["recent"][0]["miss_class"] == "continuation"
-
-
-def test_prompt_budget_preserves_routes_and_trims_note_bodies_before_chat(
-  monkeypatch, tmp_path,
-):
-  monkeypatch.setattr(memory_runner, "_MAX_PROMPT_DATA_CHARS", 1400)
-  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
-  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [
-    {
-      "id": "index",
-      "path": "index.md",
-      "title": "Memory",
-      "description": "Root",
-      "content": "r" * 200,
-      "content_complete": True,
-    },
-    {
-      "id": "topic",
-      "path": "mocs/topic.md",
-      "title": "Topic",
-      "description": "Route",
-      "content": "r" * 200,
-      "content_complete": True,
-    },
-    *[
-      {
-        "id": f"note-{index}",
-        "path": f"notes/note-{index}.md",
-        "title": f"Note {index}",
-        "description": "Existing fact",
-        "content": "n" * 250,
-        "content_complete": True,
-      }
-      for index in range(3)
-    ],
-  ])
-  chats = [{
-    "id": "chat-one",
-    "title": "Useful chat",
-    "messages": [{"role": "user", "text": "A durable fact"}],
-  }]
-
-  encoded, included = memory_runner._proposal_envelope(tmp_path, chats, [])
-  payload = json.loads(encoded)
-
-  assert included == chats
-  assert payload["redacted_recent_chats"][0]["source_handle"] == "chat:c01"
-  assert len(payload["existing_graph"]) == 5
-  assert payload["existing_graph"][0]["content"] == "r" * 200
-  assert payload["existing_graph"][1]["content"] == "r" * 200
-  assert all(
-    "content" not in item for item in payload["existing_graph"][2:]
-  )
-  assert len(payload["existing_note_contents"]) < 3
-  assert len(encoded) <= 1400
-
-
-def test_note_body_ranking_uses_bounded_chat_and_compact_metadata():
-  graph = [
-    {
-      "path": "notes/coffee.md", "title": "Coffee preferences",
-      "description": "Espresso workflow and grinder constraints",
-    },
-    {
-      "path": "notes/deploy.md", "title": "Deploy notes",
-      "description": "Server rollout history",
-    },
-  ]
-  bodies = [
-    {"path": "notes/deploy.md", "content": "deployment body"},
-    {"path": "notes/coffee.md", "content": "coffee body"},
-  ]
-  chats = [{
-    "id": "chat-one",
-    "title": "Dialing in espresso",
-    "messages": [{"role": "user", "text": "Remember my grinder constraints"}],
-    # Raw fields outside the bounded chat must not skew relevance.
-    "tool_dump": "deploy server rollout " * 100,
-  }]
-
-  ranked = memory_runner._rank_note_contents(graph, bodies, chats)
-
-  assert [item["path"] for item in ranked] == [
-    "notes/coffee.md", "notes/deploy.md",
-  ]
-
-
-def test_note_body_ranking_has_deterministic_path_tiebreaker():
-  bodies = [
-    {"path": "notes/zeta.md", "content": "z"},
-    {"path": "notes/alpha.md", "content": "a"},
-  ]
-  assert [
-    item["path"]
-    for item in memory_runner._rank_note_contents([], bodies, [])
-  ] == ["notes/alpha.md", "notes/zeta.md"]
-
-
-def test_ranked_note_bodies_yield_to_a_chat_at_the_prompt_boundary(
-  monkeypatch, tmp_path,
-):
-  monkeypatch.setattr(memory_runner, "_MAX_PROMPT_DATA_CHARS", 1500)
-  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
-  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [
-    {
-      "id": "index", "path": "index.md", "title": "Memory",
-      "description": "Root", "content": "r" * 80,
-      "content_complete": True,
-    },
-    *[
-      {
-        "id": f"note-{index}", "path": f"notes/note-{index}.md",
-        "title": "Espresso grinder" if index == 0 else f"Other {index}",
-        "description": "Coffee constraint" if index == 0 else "Unrelated",
-        "content": "n" * 130, "content_complete": True,
-      }
-      for index in range(4)
-    ],
-  ])
-  chats = [{
-    "id": "chat-one",
-    "title": "Espresso",
-    "messages": [{
-      "role": "user", "text": "Remember my coffee grinder constraint",
-    }],
-  }]
-
-  encoded, included = memory_runner._proposal_envelope(tmp_path, chats, [])
-  payload = json.loads(encoded)
-
-  assert included == chats
-  assert 0 < len(payload["existing_note_contents"]) < 4
-  assert payload["existing_note_contents"][0]["path"] == "notes/note-0.md"
 
 
 def test_recall_stats_migration_compacts_without_new_audits(
@@ -2429,7 +2117,206 @@ def test_graph_catalog_never_silently_truncates_large_graphs(tmp_path):
 
   assert len(catalog) == 620
   assert scale["catalog_nodes"] == 620
-  assert scale["required_context_chars"] > 0
+  assert scale["catalog_chars"] > 0
+
+
+def test_focused_envelope_loads_only_directly_related_complete_note(tmp_path):
+  (tmp_path / "notes").mkdir()
+  (tmp_path / "mocs").mkdir()
+  (tmp_path / "notes" / "coffee.md").write_text("complete coffee body")
+  (tmp_path / "notes" / "deploy.md").write_text("complete deploy body")
+  (tmp_path / "graph.json").write_text(json.dumps({"nodes": [
+    {
+      "id": "coffee", "path": "notes/coffee.md", "title": "Coffee preferences",
+      "description": "Espresso grinder constraints", "type": "note", "mocs": [],
+    },
+    {
+      "id": "deploy", "path": "notes/deploy.md", "title": "Deploy notes",
+      "description": "Server rollout history", "type": "note", "mocs": [],
+    },
+  ]}))
+
+  data = json.loads(memory_runner._proposal_data(tmp_path, [{
+    "id": "chat-one", "title": "Espresso preferences",
+    "messages": [{"role": "user", "text": "Remember my grinder constraints."}],
+  }]))
+
+  assert {
+    row[0]
+    for kind in ("mocs", "notes")
+    for row in data["existing_graph"][kind]
+  } == {
+    "notes/coffee.md", "notes/deploy.md",
+  }
+  assert data["existing_note_contents"] == [{
+    "path": "notes/coffee.md", "content": "complete coffee body",
+  }]
+
+
+def test_focused_envelope_keeps_one_graph_distinctive_term(tmp_path):
+  (tmp_path / "notes").mkdir()
+  (tmp_path / "mocs").mkdir()
+  (tmp_path / "notes" / "coffee.md").write_text("complete coffee body")
+  (tmp_path / "notes" / "deploy.md").write_text("complete deploy body")
+  (tmp_path / "graph.json").write_text(json.dumps({"nodes": [
+    {
+      "id": "coffee", "path": "notes/coffee.md", "title": "Coffee",
+      "description": "Grinder constraint", "type": "note",
+    },
+    {
+      "id": "deploy", "path": "notes/deploy.md", "title": "Deploy",
+      "description": "Server rollout", "type": "note",
+    },
+  ]}))
+
+  data = json.loads(memory_runner._proposal_data(tmp_path, [{
+    "id": "chat-one", "title": "Grinder",
+    "messages": [{"role": "user", "text": "The grinder changed."}],
+  }]))
+
+  assert data["existing_note_contents"] == [{
+    "path": "notes/coffee.md", "content": "complete coffee body",
+  }]
+
+
+def test_audit_envelope_loads_pruned_candidate_from_original_trace(tmp_path):
+  (tmp_path / "notes").mkdir()
+  (tmp_path / "mocs").mkdir()
+  (tmp_path / "notes" / "candidate.md").write_text("complete candidate body")
+  (tmp_path / "graph.json").write_text(json.dumps({"nodes": [{
+    "id": "candidate", "path": "notes/candidate.md", "title": "Candidate",
+    "description": "Unmatched identity", "type": "note",
+  }]}))
+  audit = {
+    "read_id": "read-one",
+    "question": "Different vocabulary entirely",
+    "live": {
+      "selected": [],
+      "frontier_at_stop": [{
+        "from": "index",
+        "nodes": [{"id": "candidate", "path": "notes/candidate.md"}],
+      }],
+    },
+  }
+
+  data = json.loads(memory_runner._proposal_data(tmp_path, [], [audit]))
+
+  assert data["existing_note_contents"] == [{
+    "path": "notes/candidate.md", "content": "complete candidate body",
+  }]
+
+
+def test_proposal_batch_uses_one_oldest_platform_redacted_chat(tmp_path):
+  chats = [
+    {"id": "first", "messages": [{"role": "user", "text": "one"}]},
+    {"id": "second", "messages": [{"role": "user", "text": "two" * 50_000}]},
+  ]
+  assert memory_runner._proposal_batch(tmp_path, chats) == [chats[0]]
+
+
+def test_host_adds_described_link_without_rewriting_the_map(tmp_path):
+  (tmp_path / "mocs").mkdir()
+  (tmp_path / "notes").mkdir()
+  route = tmp_path / "mocs" / "topic.md"
+  route.write_text("# Topic\n\nExisting explanation.\n")
+  (tmp_path / "notes" / "fact.md").write_text("fact body\n")
+
+  changed, deleted = memory_runner._apply_proposal(
+    tmp_path,
+    _reviewed({
+      "updates": [],
+      "links": [{
+        "from": "mocs/topic.md", "to": "notes/fact.md",
+        "cue": "the durable fact that changes this decision",
+      }],
+      "deletes": [],
+    }),
+    allowed_chat_ids=set(),
+  )
+
+  assert changed == ["mocs/topic.md"]
+  assert deleted == []
+  text = route.read_text()
+  assert text.startswith("# Topic\n\nExisting explanation.\n")
+  assert "[[fact]] — the durable fact that changes this decision" in text
+
+
+def test_host_delete_removes_inbound_link_without_rewriting_other_routes(tmp_path):
+  (tmp_path / "mocs").mkdir()
+  (tmp_path / "notes").mkdir()
+  route = tmp_path / "mocs" / "topic.md"
+  route.write_text("# Topic\n\n- [[kept]] — keep this\n- [[duplicate]] — remove\n")
+  (tmp_path / "notes" / "kept.md").write_text("kept\n")
+  duplicate = tmp_path / "notes" / "duplicate.md"
+  duplicate.write_text("duplicate\n")
+
+  changed, deleted = memory_runner._apply_proposal(
+    tmp_path,
+    _reviewed({"deletes": ["notes/duplicate.md"]}),
+    allowed_chat_ids=set(),
+  )
+
+  assert changed == ["mocs/topic.md"]
+  assert deleted == ["notes/duplicate.md"]
+  assert route.read_text() == "# Topic\n\n- [[kept]] — keep this\n"
+  assert not duplicate.exists()
+
+
+def test_batch_coordinator_stops_at_deadline_after_completed_item(
+  monkeypatch, tmp_path,
+):
+  graph = {"nodes": [], "edges": [], "problems": []}
+  chats = [
+    {"id": "first", "messages": [{"role": "user", "text": "one"}]},
+    {"id": "second", "messages": [{"role": "user", "text": "two"}]},
+  ]
+  outcome = memory_runner.ProposalOutcome(
+    "ok", _reviewed({"summary": "Processed."}), "codex", "gpt-test", [],
+  )
+  monkeypatch.setattr(memory_runner, "_proposal", lambda *_args: outcome)
+  monkeypatch.setattr(
+    memory_runner, "_apply_validated_proposal",
+    lambda _staging, value, **_kwargs: (value, [], [], graph),
+  )
+  ticks = iter([0.0, 100.0])
+  monkeypatch.setattr(memory_runner.time, "monotonic", lambda: next(ticks))
+
+  result = memory_runner._consolidate_batches(
+    57, tmp_path, graph, chats, [], memory_runner.ProviderPool([]),
+    deadline=50.0,
+  )
+
+  assert [chat["id"] for chat in result.accepted_chats] == ["first"]
+  assert [chat["id"] for chat in result.remaining_chats] == ["second"]
+  assert result.deferred_reason == "work_window_elapsed"
+
+
+def test_model_cannot_rewrite_map_files_or_unseen_existing_notes(tmp_path):
+  proposal = _reviewed({
+    "updates": [{"path": "mocs/topic.md", "content": "replacement"}],
+    "links": [],
+    "deletes": [],
+  })
+  with pytest.raises(memory_runner.ProposalValidationError) as map_error:
+    memory_runner._normalize_proposal(proposal, allowed_chat_ids=set())
+  assert map_error.value.code == "invalid_memory_file"
+
+  note = (
+    "---\ntype: note\ntitle: Fact\nsource: [chat:known]\n---\nBody\n"
+  )
+  proposal = _reviewed({
+    "updates": [{"path": "notes/fact.md", "content": note}],
+    "links": [],
+    "deletes": [],
+  })
+  with pytest.raises(memory_runner.ProposalValidationError) as note_error:
+    memory_runner._normalize_proposal(
+      proposal,
+      allowed_chat_ids={"known"},
+      existing_note_paths={"notes/fact.md"},
+      editable_note_paths=set(),
+    )
+  assert note_error.value.code == "note_body_not_supplied"
 
 
 def test_memory_prompt_keeps_lookup_invocation_isolated():
@@ -2473,89 +2360,6 @@ def test_memory_prompt_keeps_retrieval_queries_durable_and_safe():
     "current account or configuration state, exact records or transactions, "
     "or implementation history"
   ) in prompt
-
-
-def test_prompt_budget_never_silently_drops_required_routes(
-  monkeypatch, tmp_path,
-):
-  monkeypatch.setattr(memory_runner, "_MAX_PROMPT_DATA_CHARS", 300)
-  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
-  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [{
-    "id": "index",
-    "path": "index.md",
-    "title": "Memory",
-    "description": "Root",
-    "content": "r" * 500,
-    "content_complete": True,
-  }])
-
-  with pytest.raises(memory_runner.ProposalValidationError) as raised:
-    memory_runner._proposal_envelope(tmp_path, [], [])
-
-  assert raised.value.code == "routing_context_over_budget"
-
-
-def test_prompt_rejects_a_routing_document_that_cannot_be_supplied_complete(
-  monkeypatch, tmp_path,
-):
-  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
-  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [{
-    "id": "topic",
-    "path": "mocs/topic.md",
-    "title": "Topic",
-    "description": "Route",
-    "content": "",
-    "content_complete": False,
-  }])
-
-  with pytest.raises(memory_runner.ProposalValidationError) as raised:
-    memory_runner._proposal_envelope(tmp_path, [], [])
-
-  assert raised.value.code == "routing_document_too_large"
-
-
-def test_prompt_budget_skips_oversized_chat_and_keeps_trying(monkeypatch, tmp_path):
-  monkeypatch.setattr(memory_runner, "_MAX_PROMPT_DATA_CHARS", 500)
-  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
-  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [])
-  chats = [
-    {
-      "id": "too-large",
-      "title": "Large",
-      "messages": [{"role": "user", "text": "x" * 1000}],
-    },
-    {
-      "id": "small",
-      "title": "Small",
-      "messages": [{"role": "user", "text": "fits"}],
-    },
-  ]
-
-  encoded, included = memory_runner._proposal_envelope(tmp_path, chats, [])
-  payload = json.loads(encoded)
-
-  assert included == [chats[1]]
-  assert [item["source_handle"] for item in payload["redacted_recent_chats"]] == [
-    "chat:c02",
-  ]
-
-
-def test_prompt_budget_returns_valid_envelope_when_every_chat_is_oversized(
-  monkeypatch, tmp_path,
-):
-  monkeypatch.setattr(memory_runner, "_MAX_PROMPT_DATA_CHARS", 350)
-  monkeypatch.setattr(memory_runner, "_maintenance_flags", lambda _staging: [])
-  monkeypatch.setattr(memory_runner, "_graph_catalog", lambda _staging: [])
-  chats = [{
-    "id": f"large-{index}",
-    "messages": [{"role": "user", "text": "x" * 1000}],
-  } for index in range(3)]
-
-  encoded, included = memory_runner._proposal_envelope(tmp_path, chats, [])
-
-  assert len(encoded) <= 350
-  assert included == []
-  assert json.loads(encoded)["redacted_recent_chats"] == []
 
 
 def test_audit_verdict_requires_nodes_for_miss_and_overreach():

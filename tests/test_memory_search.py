@@ -57,10 +57,22 @@ class MemorySearchContractTests(unittest.TestCase):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
       _commit(store)
-      with mock.patch.object(
-        search, "_live_text_call", return_value=lambda _prompt: json.dumps({
+      actions = iter([
+        {
+          "finish": False,
+          "expand": [{
+            "from": "index", "nodes": ["../../owner-secret", "quiet-ui"],
+          }],
+          "selected": [],
+        },
+        {
+          "finish": True, "expand": [],
           "selected": ["../../owner-secret", "quiet-ui"],
-        }),
+        },
+      ])
+      with mock.patch.object(
+        search, "_live_text_call",
+        return_value=lambda _prompt: json.dumps(next(actions)),
       ):
         result = search.retrieve("What interface style is preferred?")
 
@@ -192,12 +204,18 @@ class MemorySearchContractTests(unittest.TestCase):
           raise ValueError("unsafe memory source")
         return original_read(commit, rel, **kwargs)
 
+      actions = iter([
+        {
+          "finish": False,
+          "expand": [{"from": "index", "nodes": ["quiet-ui"]}],
+          "selected": [],
+        },
+      ])
       with (
         mock.patch.object(search, "read_revision_file", side_effect=reject_note),
         mock.patch.object(
-          search, "_live_text_call", return_value=lambda _prompt: json.dumps({
-            "selected": ["quiet-ui"],
-          }),
+          search, "_live_text_call",
+          return_value=lambda _prompt: json.dumps(next(actions)),
         ),
       ):
         result = search.retrieve("secret project")

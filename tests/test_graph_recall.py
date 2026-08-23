@@ -54,11 +54,9 @@ def test_traversal_opens_per_parent_and_returns_only_selected_full_node(monkeypa
     lambda _commit, path: bodies[path],
   )
   actions = iter([
-    # Breadth two is enforced for index even though the navigator requests 3.
     {"finish": False, "expand": [{
       "from": "index", "nodes": ["a", "c", "unused"],
     }], "selected": []},
-    # Breadth is per open parent, not a global node budget.
     {"finish": False, "expand": [
       {"from": "a", "nodes": ["b", "a-two"]},
       {"from": "c", "nodes": ["c-one", "c-two"]},
@@ -69,16 +67,13 @@ def test_traversal_opens_per_parent_and_returns_only_selected_full_node(monkeypa
   result = memory_search.traverse(
     "What is the complete detailed answer?",
     "0" * 40,
-    breadth=2,
-    depth_limit=2,
     text_call=lambda _prompt: json.dumps(next(actions)),
   )
 
   assert [node.id for node in result.opened] == [
-    "index", "a", "c", "b", "a-two", "c-one", "c-two",
+    "index", "a", "c", "unused", "b", "a-two", "c-one", "c-two",
   ]
   assert [node.id for node in result.selected] == ["b"]
-  assert len(result.opened) > result.breadth
   assert [decision["round"] for decision in result.decisions] == [1, 2, 3]
   recall = memory_search._answer(result)
   assert recall.files == ("notes/b.md",)
@@ -86,54 +81,56 @@ def test_traversal_opens_per_parent_and_returns_only_selected_full_node(monkeypa
   assert len(bodies["notes/b.md"]) > 900
 
 
-def test_direct_live_selector_uses_one_call_and_loads_only_selected_bodies(
+def test_progressive_live_reader_applies_and_traces_nightly_guidance(
   monkeypatch,
 ):
   bodies = _revision()
-  reads = []
-
-  def read(_commit, path):
-    reads.append(path)
-    return bodies[path]
-
-  monkeypatch.setattr(memory_search, "read_revision_file", read)
+  monkeypatch.setattr(
+    memory_search, "read_revision_file", lambda _commit, path: bodies[path],
+  )
+  monkeypatch.setattr(memory_search, "load_recall_guidance", lambda: {
+    "schema": 1,
+    "run_id": "night-1",
+    "instruction": (
+      "Reject title-word collisions unless the remembered fact can change "
+      "the task decision."
+    ),
+  })
   prompts = []
+  actions = iter([
+    {"finish": False, "expand": [{"from": "index", "nodes": ["a"]}]},
+    {"finish": False, "expand": [{"from": "a", "nodes": ["b"]}]},
+    {"finish": True, "expand": [], "selected": ["b"],
+     "reason": "Material answer."},
+  ])
 
-  def select(prompt):
-    prompts.append(prompt)
-    return json.dumps({"selected": ["b"], "reason": "Exact answer note."})
-
-  result = memory_search.direct_live_traverse(
+  result = memory_search.traverse(
     "What is the complete detailed answer?",
     "0" * 40,
-    depth_limit=4,
-    text_call=select,
+    text_call=lambda prompt: prompts.append(prompt) or json.dumps(next(actions)),
   )
 
-  assert len(prompts) == 1
-  assert result.rounds == 1
-  assert result.stop_reason == "direct_catalog_selection"
-  assert [node.id for node in result.selected] == ["b"]
-  assert reads == ["graph.json", "index.md", "notes/b.md"]
-  assert [node.id for node in result.opened] == ["index", "b"]
-  assert any(
-    node["id"] == "a"
-    for parent in result.frontier_at_stop
-    for node in parent["nodes"]
-  )
-  assert result.decisions[0]["catalog_nodes"] == 8
+  assert "smallest sufficient subset" in prompts[0]
+  assert "capacity for unusually broad requests" in prompts[0]
+  assert "Reject title-word collisions" in prompts[0]
+  assert result.decisions[0]["selection_guidance"] == {
+    "run_id": "night-1",
+    "instruction": (
+      "Reject title-word collisions unless the remembered fact can change "
+      "the task decision."
+    ),
+  }
 
 
-def test_direct_live_selector_fallback_prefers_deepest_lexical_match(monkeypatch):
+def test_progressive_fallback_prefers_deepest_lexical_match(monkeypatch):
   bodies = _revision()
   monkeypatch.setattr(
     memory_search, "read_revision_file", lambda _commit, path: bodies[path],
   )
 
-  result = memory_search.direct_live_traverse(
+  result = memory_search.traverse(
     "route a-two",
     "0" * 40,
-    depth_limit=4,
     text_call=lambda _prompt: "not json",
   )
 
@@ -141,7 +138,7 @@ def test_direct_live_selector_fallback_prefers_deepest_lexical_match(monkeypatch
   assert result.decisions[0]["source"] == "lexical_fallback"
 
 
-def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
+def test_progressive_reader_excludes_unreachable_nodes(monkeypatch):
   bodies = _revision()
   graph = json.loads(bodies["graph.json"])
   graph["nodes"].append({
@@ -155,8 +152,8 @@ def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
   )
   prompt = []
 
-  result = memory_search.direct_live_traverse(
-    "secret answer", "0" * 40, depth_limit=4,
+  result = memory_search.traverse(
+    "secret answer", "0" * 40,
     text_call=lambda value: prompt.append(value) or json.dumps({
       "selected": ["orphan"],
     }),
@@ -166,50 +163,31 @@ def test_direct_live_catalog_excludes_unreachable_nodes(monkeypatch):
   assert result.selected == ()
 
 
-def test_direct_live_selector_bounds_prompt_and_keeps_late_matches_discoverable(
-  monkeypatch,
-):
-  graph = {
-    "nodes": [{
-      "id": "index", "path": "index.md", "title": "Index",
-      "description": "root", "type": "map",
-    }],
-    "edges": [{"kind": "link", "source": "index", "target": f"note-{index}"}
-              for index in range(200)],
-  }
-  graph["nodes"].extend({
-    "id": f"note-{index}", "path": f"notes/{index}.md",
-    "title": f"Note {index}",
-    "description": ("late needle" if index == 199 else "x" * 800),
-    "type": "note",
-  } for index in range(200))
-
-  bodies = {
-    "graph.json": json.dumps(graph),
-    "index.md": "# Index\n",
-    "notes/199.md": "The durable late answer.\n",
-  }
+def test_progressive_reader_terminates_on_a_root_link_cycle(monkeypatch):
+  bodies = _revision()
+  graph = json.loads(bodies["graph.json"])
+  graph["nodes"] = [
+    node for node in graph["nodes"] if node["id"] in {"index", "a"}
+  ]
+  graph["edges"] = [
+    {"kind": "link", "source": "index", "target": "a"},
+    {"kind": "link", "source": "a", "target": "index"},
+  ]
+  bodies["graph.json"] = json.dumps(graph)
   monkeypatch.setattr(
     memory_search, "read_revision_file", lambda _commit, path: bodies[path],
   )
-  prompts = []
 
-  result = memory_search.direct_live_traverse(
-    "Where is the late needle?", "0" * 40, depth_limit=4,
-    text_call=lambda prompt: prompts.append(prompt) or json.dumps({
-      "selected": ["note-199"],
-    }),
+  result = memory_search.traverse(
+    "route a", "0" * 40, text_call=lambda _prompt: "not json",
   )
 
-  assert len(prompts[0].encode("utf-8")) <= memory_search.MAX_SELECTOR_PROMPT_BYTES
-  assert '"id": "note-199"' in prompts[0]
-  assert '"id": "note-198"' not in prompts[0]
-  assert result.decisions[0]["catalog_nodes"] == 201
-  assert result.decisions[0]["selector_nodes"] < 201
-  assert [node.id for node in result.selected] == ["note-199"]
+  assert [node.id for node in result.opened] == ["index", "a"]
+  assert [node.id for node in result.selected] == ["a"]
+  assert result.stop_reason == "navigator_finished"
 
 
-def test_navigator_can_select_nodes_opened_at_the_depth_limit(monkeypatch):
+def test_navigator_can_select_opened_routing_nodes(monkeypatch):
   bodies = _revision()
   monkeypatch.setattr(
     memory_search,
@@ -227,8 +205,6 @@ def test_navigator_can_select_nodes_opened_at_the_depth_limit(monkeypatch):
   result = memory_search.traverse(
     "route a",
     "0" * 40,
-    breadth=1,
-    depth_limit=1,
     text_call=lambda _prompt: json.dumps(next(actions)),
   )
   assert [node.id for node in result.opened] == ["index", "a"]
@@ -241,9 +217,6 @@ def test_navigator_prompt_forbids_adjacent_nodes_as_empty_padding():
     "specific lifecycle failure",
     [],
     [],
-    breadth=4,
-    depth_limit=4,
-    audit=False,
   )
   assert "specific claim or predicate" in prompt
   assert "explicitly support every material" in prompt
@@ -270,7 +243,7 @@ def test_navigator_prompt_carries_full_content_only_for_active_or_selected_nodes
     ),
   ]
   prompt = memory_search._navigator_prompt(
-    "What matters?", opened, [], breadth=4, depth_limit=4, audit=False,
+    "What matters?", opened, [],
     active_ids={"answer"}, selected_ids={"topic"},
   )
   state = json.loads(prompt.split("STATE:\n", 1)[1])
@@ -299,8 +272,6 @@ def test_guided_expansion_prunes_unselected_siblings_instead_of_revisiting_paren
   result = memory_search.traverse(
     "The first A detail",
     "0" * 40,
-    breadth=1,
-    depth_limit=2,
     text_call=lambda _prompt: json.dumps(next(actions)),
   )
 
@@ -315,40 +286,6 @@ def test_guided_expansion_prunes_unselected_siblings_instead_of_revisiting_paren
     for parent in result.frontier_at_stop
     for node in parent["nodes"]
   )
-
-
-def test_live_round_limit_turns_last_decision_into_selection_only(monkeypatch):
-  bodies = _revision()
-  monkeypatch.setattr(
-    memory_search,
-    "read_revision_file",
-    lambda _commit, path: bodies[path],
-  )
-  prompts = []
-  actions = iter([
-    {"finish": False, "expand": [{"from": "index", "nodes": ["a"]}]},
-    {"finish": False, "expand": [{"from": "a", "nodes": ["b"]}]},
-  ])
-
-  def decide(prompt):
-    prompts.append(prompt)
-    return json.dumps(next(actions))
-
-  result = memory_search.traverse(
-    "The complete detailed answer",
-    "0" * 40,
-    breadth=1,
-    depth_limit=4,
-    round_limit=2,
-    text_call=decide,
-  )
-
-  assert result.rounds == 2
-  assert result.stop_reason == "round_limit"
-  assert [node.id for node in result.opened] == ["index", "a"]
-  assert '"expandable": []' in prompts[-1]
-  assert "final navigation decision" in prompts[-1]
-  assert result.trace()["round_limit"] == 2
 
 
 def test_trace_records_unopened_frontier_when_navigator_stops(monkeypatch):
@@ -367,8 +304,6 @@ def test_trace_records_unopened_frontier_when_navigator_stops(monkeypatch):
   result = memory_search.traverse(
     "The complete detailed answer",
     "0" * 40,
-    breadth=1,
-    depth_limit=2,
     text_call=lambda _prompt: json.dumps(next(actions)),
   )
 
@@ -392,8 +327,6 @@ def test_valid_model_no_progress_preserves_intentional_empty_selection(monkeypat
   result = memory_search.traverse(
     "Is there a durable fact about a submarine?",
     "0" * 40,
-    breadth=4,
-    depth_limit=4,
     text_call=lambda _prompt: json.dumps({
       "finish": False,
       "expand": [],
@@ -418,8 +351,6 @@ def test_invalid_model_output_still_uses_lexical_fallback(monkeypatch):
   result = memory_search.traverse(
     "route a",
     "0" * 40,
-    breadth=1,
-    depth_limit=1,
     text_call=lambda _prompt: "not json",
   )
 
@@ -663,7 +594,6 @@ def test_retrieve_distinguishes_not_ready_from_a_graph_read_failure(monkeypatch)
     "ready_pointer",
     lambda: {"commit": "0" * 40},
   )
-  monkeypatch.setattr(memory_search, "_live_policy", lambda: 4)
 
   def fail_read(*_args, **_kwargs):
     raise OSError("private internal detail")

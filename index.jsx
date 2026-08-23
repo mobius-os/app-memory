@@ -107,11 +107,6 @@ function isKnownAgentProvider(provider) {
   return AGENT_PROVIDER_META.some((meta) => meta.key === provider);
 }
 
-function policyNumber(value, fallback) {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? Math.max(1, Math.min(12, parsed)) : fallback;
-}
-
 export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
   const [usageCounts, setUsageCounts] = useState({});
@@ -152,7 +147,6 @@ export default function App({ appId, token }) {
   const [scheduleMessage, setScheduleMessage] = useState('');
   const [agentStatus, setAgentStatus] = useState('idle'); // idle | loading | ready | error
   const [settingsStatus, setSettingsStatus] = useState('idle'); // shared settings document
-  const [settingsMessage, setSettingsMessage] = useState('');
   const [agentGroups, setAgentGroups] = useState(null);
   const [connectedProviders, setConnectedProviders] = useState(null);
   const [agentSettingsExtra, setAgentSettingsExtra] = useState({});
@@ -164,10 +158,6 @@ export default function App({ appId, token }) {
   const [secondaryAgentModel, setSecondaryAgentModel] = useState('');
   const [agentSaving, setAgentSaving] = useState(false);
   const [agentMessage, setAgentMessage] = useState('');
-  const [liveDepth, setLiveDepth] = useState(4);
-  const [nightBreadth, setNightBreadth] = useState(6);
-  const [nightDepth, setNightDepth] = useState(6);
-  const hasCustomRecallLimits = liveDepth !== 4 || nightBreadth !== 6 || nightDepth !== 6;
   const [localDepth, setLocalDepth] = useState(1);
   // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
   // Defaults to 'text' — the user arrives here from the global graph, so they
@@ -643,7 +633,6 @@ export default function App({ appId, token }) {
     setAgentStatus('loading');
     setSettingsStatus('loading');
     setAgentMessage('');
-    setSettingsMessage('');
     try {
       const headers = authHeaders;
       const [settingsRes, statusRes, modelsRes] = await Promise.all([
@@ -661,9 +650,6 @@ export default function App({ appId, token }) {
       settingsLoaded = true;
       setSettingsStatus('ready');
       setAgentSettingsExtra(safeSettings);
-      setLiveDepth(policyNumber(safeSettings.live_depth, 4));
-      setNightBreadth(policyNumber(safeSettings.night_breadth, 6));
-      setNightDepth(policyNumber(safeSettings.night_depth, 6));
       let connected = null;
       if (statusRes?.ok) {
         const data = await statusRes.json();
@@ -942,15 +928,16 @@ export default function App({ appId, token }) {
   const saveAgentSettings = useCallback(async () => {
     if (agentSaving) return;
     setAgentSaving(true);
-    const retrievalSave = settingsSection === 'retrieval';
-    if (retrievalSave) setSettingsMessage('');
-    else setAgentMessage('');
-    const { live_breadth: _retiredLiveBreadth, ...currentSettings } = agentSettingsExtra;
-    // Retrieval settings remain independently usable when provider discovery
-    // is unavailable. In that degraded state the agent controls still hold
-    // their mount defaults, so preserve the loaded agent fields verbatim
-    // instead of replacing them with those defaults.
-    const agentPayload = agentStatus === 'ready' ? {
+    setAgentMessage('');
+    const {
+      live_breadth: _retiredLiveBreadth,
+      live_depth: _retiredLiveDepth,
+      night_breadth: _retiredNightBreadth,
+      night_depth: _retiredNightDepth,
+      ...currentSettings
+    } = agentSettingsExtra;
+    const payload = {
+      ...currentSettings,
       primary_agent_mode: primaryAgentMode === 'app' ? 'app' : 'system',
       provider: primaryAgentMode === 'app' ? (agentProvider || 'claude') : null,
       model: primaryAgentMode === 'app' ? (agentModel || null) : null,
@@ -961,13 +948,6 @@ export default function App({ appId, token }) {
         ? (secondaryAgentModel || null)
         : null,
       fallback_effort: null,
-    } : {};
-    const payload = {
-      ...currentSettings,
-      ...agentPayload,
-      live_depth: policyNumber(liveDepth, 4),
-      night_breadth: policyNumber(nightBreadth, 6),
-      night_depth: policyNumber(nightDepth, 6),
     };
     try {
       const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, {
@@ -984,17 +964,11 @@ export default function App({ appId, token }) {
         throw new Error(detail || 'Could not save agent settings.');
       }
       setAgentSettingsExtra(payload);
-      if (retrievalSave) {
-        setSettingsMessage('Settings saved');
-        setTimeout(() => setSettingsMessage(''), 2200);
-      } else {
-        setAgentMessage('Settings saved');
-        setTimeout(() => setAgentMessage(''), 2200);
-      }
+      setAgentMessage('Settings saved');
+      setTimeout(() => setAgentMessage(''), 2200);
     } catch (err) {
       const message = err.message || 'Could not save settings.';
-      if (retrievalSave) setSettingsMessage(message);
-      else setAgentMessage(message);
+      setAgentMessage(message);
     } finally {
       setAgentSaving(false);
     }
@@ -1003,17 +977,12 @@ export default function App({ appId, token }) {
     authHeaders,
     agentSaving,
     agentSettingsExtra,
-    settingsSection,
-    agentStatus,
     primaryAgentMode,
     agentProvider,
     agentModel,
     secondaryAgentMode,
     secondaryAgentProvider,
     secondaryAgentModel,
-    liveDepth,
-    nightBreadth,
-    nightDepth,
   ]);
 
   // The detail drawer is modal on phone and desktop (it owns a scrim), so it
@@ -1219,7 +1188,7 @@ export default function App({ appId, token }) {
               <div>
                 <div className="mg-settings-kicker">Memory control</div>
                 <h2 id="mg-settings-title">Memory settings</h2>
-                <p>Shape how Memory searches, reviews itself, and maintains the graph.</p>
+                <p>Choose when Memory reviews and which background agents it uses.</p>
               </div>
               <button
                 ref={settingsCloseRef}
@@ -1237,7 +1206,6 @@ export default function App({ appId, token }) {
                 {[
                   ['schedule', 'Schedule', 'When nightly review runs'],
                   ['agents', 'Background agents', 'Models and priority'],
-                  ['retrieval', 'Recall', 'How Memory finds context'],
                 ].map(([key, label, hint]) => (
                   <button
                     key={key}
@@ -1253,93 +1221,6 @@ export default function App({ appId, token }) {
               </nav>
 
               <div className="mg-settings-content mg-scroll">
-                {settingsSection === 'retrieval' && (
-                  <div className="mg-settings-section">
-                    <div className="mg-section-intro">
-                      <div>
-                        <h3>Memory tunes its own recall</h3>
-                      </div>
-                      <p>
-                        It reviews what helped, what it missed, and what was unnecessary. Reflection reports the useful conclusions rather than exposing the machinery here.
-                      </p>
-                    </div>
-
-                    <details className="mg-advanced-policy">
-                      <summary>
-                        <span>Advanced search limits{hasCustomRecallLimits ? ' · Custom' : ''}</span>
-                        <small>Tune recall only when testing a specific hypothesis.</small>
-                      </summary>
-                      <div className="mg-policy-grid">
-                        <fieldset className="mg-policy-card">
-                          <legend>Live reads <span>One-pass semantic recall</span></legend>
-                          <label>
-                            <span>Selection <small>Root-reachable catalog</small></span>
-                            <strong>1 decision</strong>
-                          </label>
-                          <label>
-                            <span>Depth <small>Maximum graph layers</small></span>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min="1"
-                              max="12"
-                              value={liveDepth}
-                              onChange={(event) => {
-                                setLiveDepth(policyNumber(event.target.value, 4));
-                                setSettingsMessage('');
-                              }}
-                            />
-                          </label>
-                        </fieldset>
-                        <fieldset className="mg-policy-card is-nightly">
-                          <legend>Nightly replay <span>Deeper quality review</span></legend>
-                          <label>
-                            <span>Breadth <small>Links per open note</small></span>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min="1"
-                              max="12"
-                              value={nightBreadth}
-                              onChange={(event) => {
-                                setNightBreadth(policyNumber(event.target.value, 6));
-                                setSettingsMessage('');
-                              }}
-                            />
-                          </label>
-                          <label>
-                            <span>Depth <small>Maximum graph layers</small></span>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min="1"
-                              max="12"
-                              value={nightDepth}
-                              onChange={(event) => {
-                                setNightDepth(policyNumber(event.target.value, 6));
-                                setSettingsMessage('');
-                              }}
-                            />
-                          </label>
-                        </fieldset>
-                      </div>
-                      <div className="mg-advanced-policy-foot">
-                        <p>Higher limits may reveal more context, but can add latency and provider work. Change one hypothesis at a time and judge it from later outcomes.</p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setLiveDepth(4);
-                            setNightBreadth(6);
-                            setNightDepth(6);
-                            setSettingsMessage('');
-                          }}
-                          disabled={!hasCustomRecallLimits}
-                        >Reset to defaults</button>
-                      </div>
-                    </details>
-                  </div>
-                )}
-
                 {settingsSection === 'schedule' && (
                   <div className="mg-settings-section">
                     <div className="mg-section-intro">
@@ -1476,13 +1357,11 @@ export default function App({ appId, token }) {
               <span className={`mg-settings-message${(
                 settingsSection === 'schedule'
                   ? scheduleMessage === 'Saved'
-                  : settingsSection === 'retrieval'
-                    ? settingsMessage === 'Settings saved'
-                    : agentMessage === 'Settings saved'
+                  : agentMessage === 'Settings saved'
               ) ? ' is-ok' : ''}`} role="status" aria-live="polite">
                 {settingsSection === 'schedule'
                   ? scheduleMessage
-                  : settingsSection === 'retrieval' ? settingsMessage : agentMessage}
+                  : agentMessage}
               </span>
               <button
                 className="mg-settings-save"
@@ -1491,9 +1370,7 @@ export default function App({ appId, token }) {
                 disabled={
                   settingsSection === 'schedule'
                     ? scheduleSaving || scheduleStatus !== 'ready'
-                    : settingsSection === 'retrieval'
-                      ? agentSaving || settingsStatus !== 'ready'
-                      : agentSaving || agentStatus !== 'ready' || settingsStatus !== 'ready'
+                    : agentSaving || agentStatus !== 'ready' || settingsStatus !== 'ready'
                 }
               >
                 {(settingsSection === 'schedule' ? scheduleSaving : agentSaving)
