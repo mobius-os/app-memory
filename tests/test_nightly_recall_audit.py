@@ -2156,6 +2156,32 @@ def test_focused_envelope_loads_only_directly_related_complete_note(tmp_path):
   }]
 
 
+def test_focused_envelope_bounds_broad_shared_term_note_bodies(tmp_path):
+  (tmp_path / "notes").mkdir()
+  (tmp_path / "mocs").mkdir()
+  nodes = []
+  for index in range(100):
+    path = f"notes/project-{index}.md"
+    (tmp_path / path).write_text("x" * 20_000)
+    nodes.append({
+      "id": f"project-{index}", "path": path,
+      "title": f"Project preference {index}",
+      "description": "project preference", "type": "note", "mocs": [],
+    })
+  (tmp_path / "graph.json").write_text(json.dumps({"nodes": nodes}))
+
+  data = json.loads(memory_runner._proposal_data(tmp_path, [{
+    "id": "chat-one", "title": "Project preferences",
+    "messages": [{"role": "user", "text": "Remember project preferences"}],
+  }]))
+  contents = data["existing_note_contents"]
+
+  assert len(contents) <= memory_runner._MAX_RELATED_NOTE_BODIES
+  assert sum(len(item["content"]) for item in contents) <= (
+    memory_runner._MAX_RELATED_NOTE_CONTENT_CHARS
+  )
+
+
 def test_focused_envelope_keeps_one_graph_distinctive_term(tmp_path):
   (tmp_path / "notes").mkdir()
   (tmp_path / "mocs").mkdir()

@@ -74,6 +74,10 @@ _WIKILINK_TARGET = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 _MAX_UPDATES = 50
 _MAX_DELETES = 25
 _MAX_CONTENT = 64_000
+# Host safety ceilings for the expensive complete-body portion of one focused
+# analyst prompt. They are not relevance targets or partner-tuned policy.
+_MAX_RELATED_NOTE_BODIES = 12
+_MAX_RELATED_NOTE_CONTENT_CHARS = 160_000
 _DELETED_CHAT_SOURCE = "deleted-chat"
 _DELETED_CHAT_SOURCE_RE = re.compile(
   rf"(?m)^\s*source\s*:[^\n]*"
@@ -1192,7 +1196,10 @@ def _related_note_contents(
       score = sum(1 / term_frequency[term] for term in matches)
       ranked.append((score, path))
   contents = []
+  content_chars = 0
   for score, path in sorted(ranked, key=lambda item: (-item[0], item[1])):
+    if len(contents) >= _MAX_RELATED_NOTE_BODIES:
+      break
     source = staging / path
     if source.is_symlink() or not source.is_file():
       continue
@@ -1200,7 +1207,10 @@ def _related_note_contents(
       content = source.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
       continue
+    if content_chars + len(content) > _MAX_RELATED_NOTE_CONTENT_CHARS:
+      continue
     contents.append({"path": path, "content": content})
+    content_chars += len(content)
   return contents
 
 
@@ -1654,8 +1664,8 @@ opaque retained-source marker that is deliberately not a chat backlink. The
 `existing_graph.mocs` rows are [path,title,description] for every current map;
 `existing_graph.notes` rows are [path,title] for every current note so obvious
 duplicates remain visible without resending every description.
-`existing_note_contents` contains complete text only for the existing notes
-directly related to this work item. Never replace an existing
+`existing_note_contents` contains complete text only for a bounded set of the
+existing notes directly related to this work item. Never replace an existing
 note unless its path and full current text are present there; leave a follow-up
 instead. The source-handle rules are absolute; follow them exactly:
 - The ONLY legal source tokens are the short handles listed in DATA. Never type

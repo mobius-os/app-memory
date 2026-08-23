@@ -29,6 +29,8 @@ depth target, or total-node budget, and the navigator may stop as soon as it has
 enough. Routing nodes need not be selected. The reader returns the complete
 contents of the useful selected nodes from the pinned commit, plus verified file
 pointers; 12 selected notes is a pathological output ceiling, not a target.
+The host also bounds total opened content and turns a pathological broad
+frontier into one final selection-only decision rather than an unbounded prompt.
 
 **Why:** front-loading everything wastes context and lets stale facts steer
 unrelated work. Bounded chat continuity plus prompt-scoped graph retrieval keeps

@@ -136,6 +136,10 @@ rather than fed into a graph-wide catalog, while the trace retains them for
 later audit. The host accepts only pinned, root-linked paths. A malformed or
 unavailable provider falls back to the same rooted walk using lexical choices.
 Twelve selected answer notes is a pathological output ceiling, never a target.
+The host also bounds total opened content, so a malformed expansion or broad
+lexical collision ends in one selection-only decision instead of an unbounded
+prompt. These ceilings are safety limits, not traversal targets or user-facing
+tuning.
 
 Promote only durable, future-useful facts; preserve `source` provenance. Merge
 duplicates when the winner is unambiguous; deleting the redundant copy is safe

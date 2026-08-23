@@ -138,6 +138,47 @@ def test_progressive_fallback_prefers_deepest_lexical_match(monkeypatch):
   assert result.decisions[0]["source"] == "lexical_fallback"
 
 
+def test_broad_lexical_collision_stays_inside_host_context_ceiling(monkeypatch):
+  nodes = [{
+    "id": "index", "path": "index.md", "title": "Memory",
+    "description": "root", "type": "moc",
+  }]
+  edges = []
+  bodies = {
+    "index.md": "\n".join(
+      f"- [[n{index}]] — project preference" for index in range(100)
+    ),
+  }
+  for index in range(100):
+    node_id = f"n{index}"
+    path = f"notes/{node_id}.md"
+    nodes.append({
+      "id": node_id, "path": path, "title": f"Project preference {index}",
+      "description": "project preference", "type": "note",
+    })
+    edges.append({"kind": "link", "source": "index", "target": node_id})
+    bodies[path] = "project preference body " + ("x" * 10_000)
+  bodies["graph.json"] = json.dumps({"nodes": nodes, "edges": edges})
+  monkeypatch.setattr(
+    memory_search, "read_revision_file", lambda _commit, path: bodies[path],
+  )
+  prompts = []
+
+  result = memory_search.traverse(
+    "What are my project preferences?",
+    "0" * 40,
+    text_call=lambda prompt: prompts.append(prompt) or "not json",
+  )
+
+  assert result.stop_reason == "navigator_safety_limit"
+  assert len(result.opened) <= memory_search.MAX_OPENED_NODES
+  assert sum(len(node.content) for node in result.opened) <= (
+    memory_search.MAX_OPENED_CONTENT_CHARS
+  )
+  assert max(map(len, prompts)) < memory_search.MAX_OPENED_CONTENT_CHARS + 30_000
+  assert len(result.selected) <= memory_search.MAX_SELECTED_NODES
+
+
 def test_progressive_reader_excludes_unreachable_nodes(monkeypatch):
   bodies = _revision()
   graph = json.loads(bodies["graph.json"])

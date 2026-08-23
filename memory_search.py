@@ -30,6 +30,10 @@ from memory_text_provider import (
 
 
 MAX_SELECTED_NODES = 12
+# Host safety ceilings, not retrieval targets. A malformed model decision or
+# broad lexical collision must not make one focused lookup unbounded.
+MAX_OPENED_NODES = 64
+MAX_OPENED_CONTENT_CHARS = 160_000
 AGENT_TIMEOUT = int(os.environ.get("MEMORY_READER_TIMEOUT", "90"))
 USAGE_PREFLIGHT_TIMEOUT = 1.25
 
@@ -435,6 +439,7 @@ def traverse(
   guidance_record = load_recall_guidance() or {}
   guidance = str(guidance_record.get("instruction") or "").strip()
   opened = [graph.open("index", 0, None)]
+  opened_content_chars = len(opened[0].content)
   exhausted: set[str] = set()
   rounds = 0
   stop_reason = "frontier_exhausted"
@@ -442,13 +447,17 @@ def traverse(
   decisions: list[dict] = []
   active_ids = {"index"}
   parked: dict[tuple[str, str], dict] = {}
+  selection_only_reason = (
+    "navigator_safety_limit"
+    if opened_content_chars >= MAX_OPENED_CONTENT_CHARS else None
+  )
 
   while True:
     available = _frontier(
       graph, opened, exhausted, active_ids=active_ids,
     )
     rounds += 1
-    decision_frontier = available
+    decision_frontier = [] if selection_only_reason else available
     decision_started = time.monotonic()
     reply = text_call(_navigator_prompt(
       question, opened, decision_frontier,
@@ -493,7 +502,7 @@ def traverse(
         "elapsed_ms": elapsed_ms,
         "attempts": attempts,
       })
-      stop_reason = "navigator_finished"
+      stop_reason = selection_only_reason or "navigator_finished"
       break
     if not decision_frontier:
       _park_unexpanded(graph, available, [], parked)
@@ -508,7 +517,7 @@ def traverse(
         "elapsed_ms": elapsed_ms,
         "attempts": attempts,
       })
-      stop_reason = "frontier_exhausted"
+      stop_reason = selection_only_reason or "frontier_exhausted"
       # A valid model decision owns its selection, including an intentional
       # empty result. Lexical selection is only a provider/JSON fallback; it
       # must never turn the navigator's confirmed absence into topic padding.
@@ -522,6 +531,7 @@ def traverse(
       for item in decision_frontier
     }
     added = False
+    safety_limit_reached = False
     actual_expansions = []
     next_active: set[str] = set()
     expansions = action.get("expand")
@@ -548,13 +558,23 @@ def traverse(
           and child_id not in valid
         ):
           valid.append(child_id)
+      admitted = []
       for child_id in valid:
-        opened.append(graph.open(child_id, parent.depth + 1, parent_id))
-        opened_by_id[child_id] = opened[-1]
+        if len(opened) >= MAX_OPENED_NODES:
+          safety_limit_reached = True
+          continue
+        child = graph.open(child_id, parent.depth + 1, parent_id)
+        if opened_content_chars + len(child.content) > MAX_OPENED_CONTENT_CHARS:
+          safety_limit_reached = True
+          continue
+        opened.append(child)
+        opened_content_chars += len(child.content)
+        opened_by_id[child_id] = child
         next_active.add(child_id)
+        admitted.append(child_id)
         added = True
-      if valid:
-        actual_expansions.append({"from": parent_id, "nodes": valid})
+      if admitted:
+        actual_expansions.append({"from": parent_id, "nodes": admitted})
     decisions.append({
       "round": rounds,
       "source": source,
@@ -567,6 +587,12 @@ def traverse(
       "attempts": attempts,
     })
     _park_unexpanded(graph, available, actual_expansions, parked)
+    if safety_limit_reached:
+      # Give the navigator one selection-only decision over the bounded set it
+      # actually opened instead of silently substituting host ranking.
+      selection_only_reason = "navigator_safety_limit"
+      active_ids = next_active or active_ids
+      continue
     if not added:
       stop_reason = "navigator_made_no_progress"
       if source == "lexical_fallback" and not selected_ids:

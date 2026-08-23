@@ -76,7 +76,9 @@ relevant context or no useful branch remains. Unchosen siblings are pruned from
 that read but retained in its audit trace. The graph's links bound the walk;
 there is no graph-wide catalog, configured depth, breadth target, or total-node
 quota. At most 12 answer notes may be returned as a pathological output ceiling,
-not a target. If the text provider is unavailable, the same rooted walk falls
+not a target. Host-owned opened-context ceilings also stop a malformed decision
+or broad term collision from creating an unbounded prompt; they do not rank or
+pad ordinary reads. If the text provider is unavailable, the same rooted walk falls
 back to local lexical choices:
 
 ```bash
