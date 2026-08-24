@@ -67,6 +67,7 @@ const {
   sortMemoryNodes,
   buildAgentGroups,
   stepBackThroughNodeVisits,
+  wikiLinkNodeVisit,
 } = await bundleModule({
   entry: fileURLToPath(new URL('../index.jsx', import.meta.url)),
   outfile: fileURLToPath(new URL('./.build/index.mjs', import.meta.url)),
@@ -86,6 +87,15 @@ test('nodeRadius guards sparse and malformed node data', () => {
   assert.equal(nodeRadius(), 4.55)
   assert.equal(nodeRadius({ access_count: -2 }), 4.55)
   assert.equal(nodeRadius({ access_count: Infinity }), 4.55)
+})
+
+test('wiki-link visits select and highlight the resolved destination', () => {
+  const node = { id: 'linked-note', title: 'Linked note' }
+  assert.deepEqual(wikiLinkNodeVisit(new Map([[node.id, node]]), node.id), {
+    node,
+    hoverId: node.id,
+  })
+  assert.equal(wikiLinkNodeVisit(new Map(), 'missing'), null)
 })
 
 test('effectiveReadCount uses the newest valid cumulative counter', () => {

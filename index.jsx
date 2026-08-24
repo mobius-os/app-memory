@@ -35,6 +35,7 @@ import {
   stepBackThroughNodeVisits,
   stripFrontmatter,
   timeToDailyCron,
+  wikiLinkNodeVisit,
 } from './domain.js'
 import { MemoryGraphRenderer } from './graph/render.jsx'
 import { MemoryList, sortMemoryNodes } from './ui/MemoryList.jsx'
@@ -63,6 +64,7 @@ export {
   shouldShowScreenLabel,
   stepBackThroughNodeVisits,
   timeToDailyCron,
+  wikiLinkNodeVisit,
 } from './domain.js'
 export { sortMemoryNodes } from './ui/MemoryList.jsx'
 export {
@@ -561,8 +563,8 @@ export default function App({ appId, token }) {
     } catch {
       return;
     }
-    const node = nodesById.get(slug);
-    if (node) visitNode(node);
+    const visit = wikiLinkNodeVisit(nodesById, slug);
+    if (visit) visitNode(visit.node, { hoverId: visit.hoverId });
   }, [nodesById, visitNode]);
 
   const closePanel = useCallback(() => {

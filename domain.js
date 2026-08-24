@@ -175,6 +175,11 @@ export function stepBackThroughNodeVisits(visits = [], nodesById = new Map()) {
   return { visit: null, node: null, remaining: [] };
 }
 
+export function wikiLinkNodeVisit(nodesById, slug) {
+  const node = nodesById?.get?.(slug);
+  return node ? { node, hoverId: slug } : null;
+}
+
 // A short, human relative-time from an ISO-ish frontmatter date string.
 export function relDate(s) {
   if (!s || s === 'null') return null;
