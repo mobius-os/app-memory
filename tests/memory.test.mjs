@@ -66,6 +66,7 @@ const {
   memoryNoteIntent,
   sortMemoryNodes,
   buildAgentGroups,
+  stepBackThroughNodeVisits,
 } = await bundleModule({
   entry: fileURLToPath(new URL('../index.jsx', import.meta.url)),
   outfile: fileURLToPath(new URL('./.build/index.mjs', import.meta.url)),
@@ -232,6 +233,27 @@ test('node detail drawer exposes and enforces a modal focus contract', () => {
   assert.match(source, /panelCloseRef\.current\?\.focus/)
   assert.match(source, /e\.key !== 'Tab'/)
   assert.match(source, /panelOpenerRef\.current/)
+})
+
+test('node visit history steps back to the latest node that still exists', () => {
+  const nodes = new Map([
+    ['a', { id: 'a', title: 'A' }],
+    ['b', { id: 'b', title: 'B' }],
+  ])
+  const visits = [
+    { id: 'a', detailTab: 'text', localDepth: 1 },
+    { id: 'missing', detailTab: 'graph', localDepth: 3 },
+    { id: 'b', detailTab: 'graph', localDepth: 2 },
+  ]
+
+  const first = stepBackThroughNodeVisits(visits, nodes)
+  assert.equal(first.node.id, 'b')
+  assert.equal(first.visit.detailTab, 'graph')
+  assert.deepEqual(first.remaining, visits.slice(0, 2))
+
+  const second = stepBackThroughNodeVisits(first.remaining, nodes)
+  assert.equal(second.node.id, 'a')
+  assert.deepEqual(second.remaining, [])
 })
 
 test('runner liveness is tied to the live app row, not a generic extension', () => {

@@ -161,6 +161,20 @@ export function buildLocalGraphData(graph, centerId, depth = 1) {
   };
 }
 
+export function stepBackThroughNodeVisits(visits = [], nodesById = new Map()) {
+  if (!Array.isArray(visits) || typeof nodesById?.get !== 'function') {
+    return { visit: null, node: null, remaining: [] };
+  }
+  for (let index = visits.length - 1; index >= 0; index -= 1) {
+    const visit = visits[index];
+    const node = nodesById.get(visit?.id);
+    if (node) {
+      return { visit, node, remaining: visits.slice(0, index) };
+    }
+  }
+  return { visit: null, node: null, remaining: [] };
+}
+
 // A short, human relative-time from an ISO-ish frontmatter date string.
 export function relDate(s) {
   if (!s || s === 'null') return null;
