@@ -150,10 +150,13 @@ export const CSS = `
   .mg-tgl:hover { color: var(--text); }
   .mg-settings-btn:hover { color: var(--text); }
   .mg-tab:hover { color: var(--text); }
+  .mg-node-back:not(:disabled):hover { background: var(--border); }
   .mg-close:hover { background: var(--border); color: var(--text); }
   .mg-discuss:hover { filter: brightness(0.94); }
   .mg-graph-control:not(:disabled):hover { background: var(--surface2); }
 }
+.mg-node-back svg { width: 18px; height: 18px; }
+.mg-node-back:disabled { color: var(--muted); opacity: .4; cursor: default !important; }
 /* Keyboard-focus ring for the now-focusable list rows + sort-header buttons,
    so the keyboard affordance these gained is actually visible. */
 .mg-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

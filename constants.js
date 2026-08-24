@@ -248,6 +248,12 @@ export const S = {
     display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
   },
   panelTitle: { fontSize: 18, fontWeight: 700, lineHeight: 1.18, letterSpacing: 0 },
+  nodeBackBtn: {
+    width: 44, height: 44, border: 'none', borderRadius: 8,
+    background: 'var(--surface2)', color: 'var(--text)', cursor: 'pointer',
+    flexShrink: 0, display: 'grid', placeItems: 'center', padding: 0,
+    transition: 'background 0.15s, color 0.15s, opacity 0.15s',
+  },
   panelMetaLine: {
     display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
     marginTop: 5, color: 'var(--muted)', fontSize: 11.5,

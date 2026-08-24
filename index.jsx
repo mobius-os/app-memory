@@ -12,7 +12,7 @@
 // Only App lives here: it owns top-level graph/note state, persistence wiring,
 // shell navigation state, and mounts the graph, list, and note-panel UI.
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { ChevronDown, SettingsCog } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowLeft, ChevronDown, SettingsCog } from '@openai/apps-sdk-ui/components/Icon'
 import { NOTE_BASE, PALETTE, S } from './constants.js'
 import { CSS } from './theme.js'
 import { makeSharedMemoryStore } from './storage.js'
@@ -32,8 +32,10 @@ import {
   renderWikiLinks,
   restrictNoteHtml,
   safeMemoryPath,
+  stepBackThroughNodeVisits,
   stripFrontmatter,
   timeToDailyCron,
+  wikiLinkNodeVisit,
 } from './domain.js'
 import { MemoryGraphRenderer } from './graph/render.jsx'
 import { MemoryList, sortMemoryNodes } from './ui/MemoryList.jsx'
@@ -60,7 +62,9 @@ export {
   renderWikiLinks,
   safeMemoryPath,
   shouldShowScreenLabel,
+  stepBackThroughNodeVisits,
   timeToDailyCron,
+  wikiLinkNodeVisit,
 } from './domain.js'
 export { sortMemoryNodes } from './ui/MemoryList.jsx'
 export {
@@ -76,6 +80,7 @@ const AGENT_PROVIDER_META = [
 ];
 
 const COMMIT_RE = /^[0-9a-f]{40}$/;
+const NODE_VISIT_HISTORY_LIMIT = 50;
 
 export function buildAgentGroups(payload) {
   if (!payload || typeof payload !== 'object') return [];
@@ -115,6 +120,7 @@ export default function App({ appId, token }) {
   const [errMsg, setErrMsg] = useState('');
   const [view, setView] = useState('graph'); // graph | list
   const [selected, setSelected] = useState(null); // node object
+  const [nodeVisitHistory, setNodeVisitHistory] = useState([]);
   const [pendingIntentId, setPendingIntentId] = useState(null);
   // A note reached from a Memory recall card is the destination itself, not a
   // modal drill-down from the graph. Keep that presentation separate from the
@@ -302,6 +308,7 @@ export default function App({ appId, token }) {
       if (!present || body == null) {
         setGraph({ nodes: [], edges: [], problems: [] });
         setSelected(null);
+        setNodeVisitHistory([]);
         setStatus('empty');
         signalEmpty();
         return;
@@ -418,6 +425,24 @@ export default function App({ appId, token }) {
     [graph, selected, localDepth],
   );
 
+  const previousNodeVisit = useMemo(
+    () => stepBackThroughNodeVisits(nodeVisitHistory, nodesById),
+    [nodeVisitHistory, nodesById],
+  );
+
+  const goBackToPreviousNode = useCallback(() => {
+    if (!previousNodeVisit.node) return;
+    setNodeVisitHistory(previousNodeVisit.remaining);
+    setSelected(previousNodeVisit.node);
+    setHoverId(null);
+    setDetailTab(previousNodeVisit.visit?.detailTab === 'graph' ? 'graph' : 'text');
+    const depth = Number(previousNodeVisit.visit?.localDepth);
+    setLocalDepth([1, 2, 3, 4].includes(depth) ? depth : 1);
+    window.mobius.signal('memory_node_opened', {
+      node_type: previousNodeVisit.node.type === 'moc' ? 'moc' : 'note',
+    });
+  }, [previousNodeVisit]);
+
   // --- Subscribe to the selected note body. ---
   // Notes are immutable within a commit. Subscribe so the offline cache can
   // paint instantly and a revision switch can replace the entire view.
@@ -498,6 +523,27 @@ export default function App({ appId, token }) {
     return null; // renderer not ready yet -> fall back to plain text below
   }, [noteState, marked, purify, graph]);
 
+  const visitNode = useCallback((node, opts = {}) => {
+    if (!node) return;
+    if (opts.resetHistory || !selected) {
+      setNodeVisitHistory([]);
+    } else if (selected.id !== node.id && opts.rememberPrevious !== false) {
+      const previousVisit = {
+        id: selected.id,
+        detailTab,
+        localDepth,
+      };
+      setNodeVisitHistory((current) => (
+        [...current, previousVisit].slice(-NODE_VISIT_HISTORY_LIMIT)
+      ));
+    }
+    setSelected(node);
+    setHoverId(opts.hoverId ?? null);
+    setDetailTab('text');
+    if (opts.resetLocalDepth) setLocalDepth(1);
+    window.mobius.signal('memory_node_opened', { node_type: node.type === 'moc' ? 'moc' : 'note' });
+  }, [selected, detailTab, localDepth]);
+
   const openSupportingChat = useCallback((chatId) => {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(chatId || ''))) return;
     window.parent.postMessage({ type: 'moebius:open-chat', chatId }, '*');
@@ -517,16 +563,13 @@ export default function App({ appId, token }) {
     } catch {
       return;
     }
-    const node = nodesById.get(slug);
-    if (node) {
-      setSelected(node);
-      setHoverId(slug);
-      window.mobius.signal('memory_node_opened', { node_type: node.type === 'moc' ? 'moc' : 'note' });
-    }
-  }, [nodesById]);
+    const visit = wikiLinkNodeVisit(nodesById, slug);
+    if (visit) visitNode(visit.node, { hoverId: visit.hoverId });
+  }, [nodesById, visitNode]);
 
   const closePanel = useCallback(() => {
     setSelected(null);
+    setNodeVisitHistory([]);
     setHoverId(null);
     setDetailPresentation('overlay');
     setPendingIntentId(null);
@@ -541,6 +584,7 @@ export default function App({ appId, token }) {
       const handle = window.mobius.nav.open('memory-note', () => {
         panelNavRef.current = null;
         setSelected(null);
+        setNodeVisitHistory([]);
         setHoverId(null);
       });
       panelNavRef.current = handle;
@@ -553,15 +597,10 @@ export default function App({ appId, token }) {
     // graph/list open defaults back to the ordinary overlay.
     if (opts.presentation) setDetailPresentation(opts.presentation);
     else if (!selected) setDetailPresentation('overlay');
-    setSelected(node);
-    setHoverId(opts.hoverId ?? null);
-    setDetailTab('text'); // every node opens on its note, not the graph
-    if (opts.resetLocalDepth) setLocalDepth(1);
-    // Core-engagement signal, fired here (after the panel commits to opening,
-    // past the superseded-open early return above) so every open from the
-    // graph, list, or legend is counted with the node's kind.
-    window.mobius.signal('memory_node_opened', { node_type: node.type === 'moc' ? 'moc' : 'note' });
-  }, [selected]);
+    // Core-engagement signal and history update happen here, after the panel
+    // commits to opening past the superseded-open early return above.
+    visitNode(node, opts);
+  }, [selected, visitNode]);
 
   useEffect(() => {
     const onIntent = (event) => {
@@ -592,10 +631,12 @@ export default function App({ appId, token }) {
       void openPanel(node, {
         ownBackEntry: false,
         resetLocalDepth: true,
+        resetHistory: true,
         presentation: 'direct',
       });
     } else {
       setSelected(null);
+      setNodeVisitHistory([]);
       setIntentError('This memory is not available in the current graph.');
     }
   }, [pendingIntentId, graph, nodesById, openPanel]);
@@ -1526,7 +1567,21 @@ export default function App({ appId, token }) {
             <div style={{ ...S.panelAccent, background: colorForNode(selected) }} />
             <div style={S.panelHead} className="mg-panel-head">
               <div style={S.panelHeadMain}>
-                <span style={{ ...S.rowDot, background: colorForNode(selected), width: 11, height: 11, marginTop: 5 }} />
+                <button
+                  type="button"
+                  style={S.nodeBackBtn}
+                  className="mg-node-back"
+                  onClick={goBackToPreviousNode}
+                  disabled={!previousNodeVisit.node}
+                  aria-label={previousNodeVisit.node
+                    ? `Back to ${previousNodeVisit.node.title || previousNodeVisit.node.id}`
+                    : 'No previously visited node'}
+                  title={previousNodeVisit.node
+                    ? `Back to ${previousNodeVisit.node.title || previousNodeVisit.node.id}`
+                    : 'No previously visited node'}
+                >
+                  <ArrowLeft aria-hidden="true" />
+                </button>
                 <div style={{ minWidth: 0 }}>
                   <div style={S.panelTitle} id="mg-panel-title">{selected.title || selected.id}</div>
                   <div style={S.panelMetaLine}>
