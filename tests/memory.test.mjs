@@ -418,6 +418,17 @@ test('screen labels show local center and nearby nodes before distant nodes', ()
   assert.equal(shouldShowScreenLabel({ id: 'far', localDepth: 2 }, 1.15, 0, { mode: 'local' }), true)
 })
 
+test('screen labels keep local hubs labelled as navigation anchors when zoomed out', () => {
+  // Below every local distance threshold (0.72 / 1.15 / 1.7) and outranked,
+  // so only the hub guarantee can keep these labels on screen.
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc', localDepth: 1 }, 0.5, 99, { mode: 'local' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc', localDepth: 2 }, 1.1, 99, { mode: 'local' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc', localDepth: 4 }, 0.2, 99, { mode: 'local', compact: true }), true)
+  // Non-hubs at the same distance and zoom stay suppressed.
+  assert.equal(shouldShowScreenLabel({ id: 'plain', localDepth: 1 }, 0.5, 99, { mode: 'local' }), false)
+  assert.equal(shouldShowScreenLabel({ id: 'plain', localDepth: 4 }, 0.2, 99, { mode: 'local', compact: true }), false)
+})
+
 test('normalizeRendererGraphData clones nodes and drops dangling links', () => {
   const out = normalizeRendererGraphData({
     nodes: [

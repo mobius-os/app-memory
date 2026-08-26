@@ -266,7 +266,12 @@ export function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts 
   const isLocalCenter = node.localDepth === 0;
   if (isHover || isSelected || isLocalCenter) return true;
 
+  // Hub policy is per-mode, so it sits below the shared guard rather than in
+  // it: a bounded local neighbourhood always labels its hubs as navigation
+  // anchors, while the global view holds every hub at once and only lets a hub
+  // outrank others (scale < 0.9) so phone-width graphs stay readable.
   if (opts.mode === 'local') {
+    if (isHub) return true;
     if (node.localDepth === 1 && scale >= 0.72) return true;
     if (node.localDepth === 2 && scale >= 1.15) return true;
     return scale >= 1.7 && labelRank < 18;
