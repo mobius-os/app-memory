@@ -71,8 +71,10 @@ export function nodeRadius(node = {}) {
   const accessCount = Number(node.access_count);
   const safeAccessCount = Number.isFinite(accessCount) && accessCount > 0 ? accessCount : 0;
   const base = 1 + Math.log2(1 + safeAccessCount);
-  const radius = 3 + base * 1.55;
-  return node.type === 'moc' ? radius * 1.4 : radius;
+  // Keep dense graphs legible on phones: usage still changes prominence, but
+  // no individual circle should consume the space needed to read its links.
+  const radius = 2.6 + base * 1.28;
+  return node.type === 'moc' ? radius * 1.32 : radius;
 }
 
 // usage.json is cumulative and may be fresher than the immutable graph. A
@@ -173,11 +175,6 @@ export function stepBackThroughNodeVisits(visits = [], nodesById = new Map()) {
     }
   }
   return { visit: null, node: null, remaining: [] };
-}
-
-export function wikiLinkNodeVisit(nodesById, slug) {
-  const node = nodesById?.get?.(slug);
-  return node ? { node, hoverId: slug } : null;
 }
 
 // A short, human relative-time from an ISO-ish frontmatter date string.

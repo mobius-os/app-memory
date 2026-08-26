@@ -67,35 +67,25 @@ const {
   sortMemoryNodes,
   buildAgentGroups,
   stepBackThroughNodeVisits,
-  wikiLinkNodeVisit,
 } = await bundleModule({
   entry: fileURLToPath(new URL('../index.jsx', import.meta.url)),
   outfile: fileURLToPath(new URL('./.build/index.mjs', import.meta.url)),
 })
 
 test('nodeRadius uses observed reads and ignores legacy importance metadata', () => {
-  assert.equal(nodeRadius({ access_count: 0 }), 4.55)
-  assert.equal(nodeRadius({ importance: 99, access_count: 0 }), 4.55)
-  assert.equal(nodeRadius({ access_count: 7 }), 9.2)
+  assert.equal(nodeRadius({ access_count: 0 }), 3.88)
+  assert.equal(nodeRadius({ importance: 99, access_count: 0 }), 3.88)
+  assert.ok(Math.abs(nodeRadius({ access_count: 7 }) - 7.72) < 1e-9)
 })
 
 test('nodeRadius applies the MOC multiplier', () => {
-  assert.ok(Math.abs(nodeRadius({ type: 'moc', access_count: 0 }) - 6.37) < 1e-9)
+  assert.ok(Math.abs(nodeRadius({ type: 'moc', access_count: 0 }) - 5.1216) < 1e-9)
 })
 
 test('nodeRadius guards sparse and malformed node data', () => {
-  assert.equal(nodeRadius(), 4.55)
-  assert.equal(nodeRadius({ access_count: -2 }), 4.55)
-  assert.equal(nodeRadius({ access_count: Infinity }), 4.55)
-})
-
-test('wiki-link visits select and highlight the resolved destination', () => {
-  const node = { id: 'linked-note', title: 'Linked note' }
-  assert.deepEqual(wikiLinkNodeVisit(new Map([[node.id, node]]), node.id), {
-    node,
-    hoverId: node.id,
-  })
-  assert.equal(wikiLinkNodeVisit(new Map(), 'missing'), null)
+  assert.equal(nodeRadius(), 3.88)
+  assert.equal(nodeRadius({ access_count: -2 }), 3.88)
+  assert.equal(nodeRadius({ access_count: Infinity }), 3.88)
 })
 
 test('effectiveReadCount uses the newest valid cumulative counter', () => {
