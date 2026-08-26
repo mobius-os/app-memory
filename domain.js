@@ -264,7 +264,7 @@ export function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts 
   const isSelected = node.id === opts.selectedId;
   const isHub = node.type === 'moc';
   const isLocalCenter = node.localDepth === 0;
-  if (isHover || isSelected || isHub || isLocalCenter) return true;
+  if (isHover || isSelected || isLocalCenter) return true;
 
   if (opts.mode === 'local') {
     if (node.localDepth === 1 && scale >= 0.72) return true;
@@ -272,11 +272,12 @@ export function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts 
     return scale >= 1.7 && labelRank < 18;
   }
 
-  if (scale < 0.9) return false;
-  if (scale < 1.25) return labelRank < 6;
-  if (scale < 1.7) return labelRank < 14;
-  if (scale < 2.2) return labelRank < 26;
-  return labelRank < 60;
+  const compact = opts.compact === true;
+  if (scale < 0.9) return isHub && labelRank < (compact ? 1 : 4);
+  if (scale < 1.25) return labelRank < (compact ? 2 : 6);
+  if (scale < 1.7) return labelRank < (compact ? 6 : 14);
+  if (scale < 2.2) return labelRank < (compact ? 10 : 26);
+  return labelRank < (compact ? 18 : 60);
 }
 
 // Read a CSS custom property off :root (computed) with a fallback.

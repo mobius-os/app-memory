@@ -468,6 +468,7 @@ export function MemoryGraphRenderer({
           const rank = labelRanks.get(node.id) ?? 9999;
           const showLabel = shouldShowScreenLabel(node, scale, rank, {
             mode,
+            compact: width < 600,
             hoverId: hovered,
             selectedId,
           });

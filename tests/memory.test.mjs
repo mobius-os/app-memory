@@ -402,10 +402,13 @@ test('buildLocalGraphData returns a depth-limited neighborhood', () => {
 })
 
 test('screen labels keep global graph selective at low zoom', () => {
-  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc' }, 0.2, 99, { mode: 'global' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc' }, 0.2, 0, { mode: 'global', compact: true }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc' }, 0.2, 1, { mode: 'global', compact: true }), false)
   assert.equal(shouldShowScreenLabel({ id: 'plain' }, 0.89, 0, { mode: 'global' }), false)
   assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 5, { mode: 'global' }), true)
   assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 6, { mode: 'global' }), false)
+  assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 1, { mode: 'global', compact: true }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 2, { mode: 'global', compact: true }), false)
 })
 
 test('screen labels show local center and nearby nodes before distant nodes', () => {
