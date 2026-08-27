@@ -354,6 +354,13 @@ export const CSS = `
   padding: 24px 26px 30px;
 }
 .mg-settings-section { display: grid; gap: 22px; }
+.mg-agent-slot-label {
+  margin: 0 0 7px 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 720;
+  letter-spacing: .01em;
+}
 .mg-section-intro {
   display: grid;
   grid-template-columns: minmax(180px, .8fr) minmax(240px, 1.2fr);

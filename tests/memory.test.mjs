@@ -67,35 +67,25 @@ const {
   sortMemoryNodes,
   buildAgentGroups,
   stepBackThroughNodeVisits,
-  wikiLinkNodeVisit,
 } = await bundleModule({
   entry: fileURLToPath(new URL('../index.jsx', import.meta.url)),
   outfile: fileURLToPath(new URL('./.build/index.mjs', import.meta.url)),
 })
 
 test('nodeRadius uses observed reads and ignores legacy importance metadata', () => {
-  assert.equal(nodeRadius({ access_count: 0 }), 4.55)
-  assert.equal(nodeRadius({ importance: 99, access_count: 0 }), 4.55)
-  assert.equal(nodeRadius({ access_count: 7 }), 9.2)
+  assert.equal(nodeRadius({ access_count: 0 }), 3.88)
+  assert.equal(nodeRadius({ importance: 99, access_count: 0 }), 3.88)
+  assert.ok(Math.abs(nodeRadius({ access_count: 7 }) - 7.72) < 1e-9)
 })
 
 test('nodeRadius applies the MOC multiplier', () => {
-  assert.ok(Math.abs(nodeRadius({ type: 'moc', access_count: 0 }) - 6.37) < 1e-9)
+  assert.ok(Math.abs(nodeRadius({ type: 'moc', access_count: 0 }) - 5.1216) < 1e-9)
 })
 
 test('nodeRadius guards sparse and malformed node data', () => {
-  assert.equal(nodeRadius(), 4.55)
-  assert.equal(nodeRadius({ access_count: -2 }), 4.55)
-  assert.equal(nodeRadius({ access_count: Infinity }), 4.55)
-})
-
-test('wiki-link visits select and highlight the resolved destination', () => {
-  const node = { id: 'linked-note', title: 'Linked note' }
-  assert.deepEqual(wikiLinkNodeVisit(new Map([[node.id, node]]), node.id), {
-    node,
-    hoverId: node.id,
-  })
-  assert.equal(wikiLinkNodeVisit(new Map(), 'missing'), null)
+  assert.equal(nodeRadius(), 3.88)
+  assert.equal(nodeRadius({ access_count: -2 }), 3.88)
+  assert.equal(nodeRadius({ access_count: Infinity }), 3.88)
 })
 
 test('effectiveReadCount uses the newest valid cumulative counter', () => {
@@ -412,10 +402,13 @@ test('buildLocalGraphData returns a depth-limited neighborhood', () => {
 })
 
 test('screen labels keep global graph selective at low zoom', () => {
-  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc' }, 0.2, 99, { mode: 'global' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc' }, 0.2, 0, { mode: 'global', compact: true }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc' }, 0.2, 1, { mode: 'global', compact: true }), false)
   assert.equal(shouldShowScreenLabel({ id: 'plain' }, 0.89, 0, { mode: 'global' }), false)
   assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 5, { mode: 'global' }), true)
   assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 6, { mode: 'global' }), false)
+  assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 1, { mode: 'global', compact: true }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 2, { mode: 'global', compact: true }), false)
 })
 
 test('screen labels show local center and nearby nodes before distant nodes', () => {
@@ -423,6 +416,17 @@ test('screen labels show local center and nearby nodes before distant nodes', ()
   assert.equal(shouldShowScreenLabel({ id: 'near', localDepth: 1 }, 0.72, 99, { mode: 'local' }), true)
   assert.equal(shouldShowScreenLabel({ id: 'far', localDepth: 2 }, 1.14, 0, { mode: 'local' }), false)
   assert.equal(shouldShowScreenLabel({ id: 'far', localDepth: 2 }, 1.15, 0, { mode: 'local' }), true)
+})
+
+test('screen labels keep local hubs labelled as navigation anchors when zoomed out', () => {
+  // Below every local distance threshold (0.72 / 1.15 / 1.7) and outranked,
+  // so only the hub guarantee can keep these labels on screen.
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc', localDepth: 1 }, 0.5, 99, { mode: 'local' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc', localDepth: 2 }, 1.1, 99, { mode: 'local' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc', localDepth: 4 }, 0.2, 99, { mode: 'local', compact: true }), true)
+  // Non-hubs at the same distance and zoom stay suppressed.
+  assert.equal(shouldShowScreenLabel({ id: 'plain', localDepth: 1 }, 0.5, 99, { mode: 'local' }), false)
+  assert.equal(shouldShowScreenLabel({ id: 'plain', localDepth: 4 }, 0.2, 99, { mode: 'local', compact: true }), false)
 })
 
 test('normalizeRendererGraphData clones nodes and drops dangling links', () => {

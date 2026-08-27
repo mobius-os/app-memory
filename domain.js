@@ -71,8 +71,10 @@ export function nodeRadius(node = {}) {
   const accessCount = Number(node.access_count);
   const safeAccessCount = Number.isFinite(accessCount) && accessCount > 0 ? accessCount : 0;
   const base = 1 + Math.log2(1 + safeAccessCount);
-  const radius = 3 + base * 1.55;
-  return node.type === 'moc' ? radius * 1.4 : radius;
+  // Keep dense graphs legible on phones: usage still changes prominence, but
+  // no individual circle should consume the space needed to read its links.
+  const radius = 2.6 + base * 1.28;
+  return node.type === 'moc' ? radius * 1.32 : radius;
 }
 
 // usage.json is cumulative and may be fresher than the immutable graph. A
@@ -175,11 +177,6 @@ export function stepBackThroughNodeVisits(visits = [], nodesById = new Map()) {
   return { visit: null, node: null, remaining: [] };
 }
 
-export function wikiLinkNodeVisit(nodesById, slug) {
-  const node = nodesById?.get?.(slug);
-  return node ? { node, hoverId: slug } : null;
-}
-
 // A short, human relative-time from an ISO-ish frontmatter date string.
 export function relDate(s) {
   if (!s || s === 'null') return null;
@@ -267,19 +264,25 @@ export function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts 
   const isSelected = node.id === opts.selectedId;
   const isHub = node.type === 'moc';
   const isLocalCenter = node.localDepth === 0;
-  if (isHover || isSelected || isHub || isLocalCenter) return true;
+  if (isHover || isSelected || isLocalCenter) return true;
 
+  // Hub policy is per-mode, so it sits below the shared guard rather than in
+  // it: a bounded local neighbourhood always labels its hubs as navigation
+  // anchors, while the global view holds every hub at once and only lets a hub
+  // outrank others (scale < 0.9) so phone-width graphs stay readable.
   if (opts.mode === 'local') {
+    if (isHub) return true;
     if (node.localDepth === 1 && scale >= 0.72) return true;
     if (node.localDepth === 2 && scale >= 1.15) return true;
     return scale >= 1.7 && labelRank < 18;
   }
 
-  if (scale < 0.9) return false;
-  if (scale < 1.25) return labelRank < 6;
-  if (scale < 1.7) return labelRank < 14;
-  if (scale < 2.2) return labelRank < 26;
-  return labelRank < 60;
+  const compact = opts.compact === true;
+  if (scale < 0.9) return isHub && labelRank < (compact ? 1 : 4);
+  if (scale < 1.25) return labelRank < (compact ? 2 : 6);
+  if (scale < 1.7) return labelRank < (compact ? 6 : 14);
+  if (scale < 2.2) return labelRank < (compact ? 10 : 26);
+  return labelRank < (compact ? 18 : 60);
 }
 
 // Read a CSS custom property off :root (computed) with a fallback.

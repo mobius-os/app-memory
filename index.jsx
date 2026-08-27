@@ -35,7 +35,6 @@ import {
   stepBackThroughNodeVisits,
   stripFrontmatter,
   timeToDailyCron,
-  wikiLinkNodeVisit,
 } from './domain.js'
 import { MemoryGraphRenderer } from './graph/render.jsx'
 import { MemoryList, sortMemoryNodes } from './ui/MemoryList.jsx'
@@ -64,7 +63,6 @@ export {
   shouldShowScreenLabel,
   stepBackThroughNodeVisits,
   timeToDailyCron,
-  wikiLinkNodeVisit,
 } from './domain.js'
 export { sortMemoryNodes } from './ui/MemoryList.jsx'
 export {
@@ -153,6 +151,7 @@ export default function App({ appId, token }) {
   const [agentStatus, setAgentStatus] = useState('idle'); // idle | loading | ready | error
   const [settingsStatus, setSettingsStatus] = useState('idle'); // shared settings document
   const [agentGroups, setAgentGroups] = useState(null);
+  const [settingsAgentDefaults, setSettingsAgentDefaults] = useState(null);
   const [connectedProviders, setConnectedProviders] = useState(null);
   const [agentSettingsExtra, setAgentSettingsExtra] = useState({});
   const [primaryAgentMode, setPrimaryAgentMode] = useState('system');
@@ -563,8 +562,8 @@ export default function App({ appId, token }) {
     } catch {
       return;
     }
-    const visit = wikiLinkNodeVisit(nodesById, slug);
-    if (visit) visitNode(visit.node, { hoverId: visit.hoverId });
+    const node = nodesById.get(slug);
+    if (node) visitNode(node);
   }, [nodesById, visitNode]);
 
   const closePanel = useCallback(() => {
@@ -674,10 +673,11 @@ export default function App({ appId, token }) {
     setAgentMessage('');
     try {
       const headers = authHeaders;
-      const [settingsRes, statusRes, modelsRes] = await Promise.all([
+      const [settingsRes, statusRes, modelsRes, globalSettingsRes] = await Promise.all([
         fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, { headers }),
         fetch('/api/auth/providers/status', { headers }).catch(() => null),
         fetch('/api/auth/providers/models', { headers }).catch(() => null),
+        fetch(`/api/apps/${encodeURIComponent(appId)}/job-context`, { headers }).catch(() => null),
       ]);
       if (!settingsRes.ok && settingsRes.status !== 404) {
         throw new Error('Could not load agent settings.');
@@ -704,6 +704,13 @@ export default function App({ appId, token }) {
       const groups = buildAgentGroups(await modelsRes.json());
       if (!groups.length) throw new Error('No available models were returned.');
       setAgentGroups(groups);
+      if (globalSettingsRes?.ok) {
+        const globalSettings = await globalSettingsRes.json();
+        setSettingsAgentDefaults({
+          primary: globalSettings?.primary || null,
+          fallback: globalSettings?.fallback || null,
+        });
+      }
 
       const providerValue = typeof safeSettings.provider === 'string'
         ? safeSettings.provider.trim()
@@ -1115,6 +1122,21 @@ export default function App({ appId, token }) {
     agentSlotLabel(agentSlots[0], visibleAgentGroups, 'Settings default primary agent'),
     agentSlotLabel(agentSlots[1], visibleAgentGroups, 'Settings default secondary agent'),
   ];
+  const inheritedAgentLabels = [
+    agentSlotLabel(
+      { mode: 'app', ...(settingsAgentDefaults?.primary || {}) },
+      visibleAgentGroups,
+      'Settings default',
+    ),
+    agentSlotLabel(
+      { mode: 'app', ...(settingsAgentDefaults?.fallback || {}) },
+      visibleAgentGroups,
+      'Settings default',
+    ),
+  ];
+  const effectiveAgentLabels = agentSlots.map((slot, index) => (
+    slot.mode === 'system' ? inheritedAgentLabels[index] : agentLabels[index]
+  ));
 
   // ---------------------------------------------------------------- render ---
   return (
@@ -1335,6 +1357,7 @@ export default function App({ appId, token }) {
                         reorderDisabledReason="Choose an app override for both rows before changing priority; inherited Settings agents keep their Möbius Settings order."
                       >
                         <div key="primary">
+                          <div className="mg-agent-slot-label">Primary background agent ({effectiveAgentLabels[0]})</div>
                           <ModelPicker
                             provider={primaryAgentMode === 'system' ? '' : agentProvider}
                             model={primaryAgentMode === 'system' ? '' : agentModel}
@@ -1353,6 +1376,7 @@ export default function App({ appId, token }) {
                           />
                         </div>
                         <div key="secondary">
+                          <div className="mg-agent-slot-label">Secondary background agent ({effectiveAgentLabels[1]})</div>
                           <ModelPicker
                             provider={secondaryAgentMode === 'system' ? '' : secondaryAgentProvider}
                             model={secondaryAgentMode === 'system' ? '' : secondaryAgentModel}
