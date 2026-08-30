@@ -36,6 +36,12 @@ _TRACKED_PATHS = ("index.md", "graph.json", "mocs", "notes", "sources")
 MAX_NOTE_BYTES = 256_000
 MAX_GRAPH_BYTES = 4_000_000
 MAX_RECALL_GUIDANCE_CHARS = 800
+MAX_RECALL_EXECUTION_RECEIPT_BYTES = 16_384
+# Agent run identities expire after 26 hours. Keep their hashed single-flight
+# receipts for two days so a restart/resume can still reuse completed work,
+# while making this transient coordination state self-pruning.
+RECALL_EXECUTION_RETENTION_SECONDS = 48 * 60 * 60
+_RECALL_EXECUTION_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _atomic_text(path: Path, text: str) -> None:
@@ -100,6 +106,87 @@ def write_recall_guidance(value: dict) -> None:
     RECALL_GUIDANCE,
     json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
   )
+
+
+class RecallExecution:
+  """One locked per-turn recall receipt.
+
+  The filename is already a SHA-256 fingerprint of the private run identity
+  plus the recall's complete functional input. The receipt contains only the
+  pinned commit and selected graph paths; it never stores the run token or a
+  second copy of note contents.
+  """
+
+  def __init__(self, handle):
+    self._handle = handle
+
+  def load(self) -> dict | None:
+    self._handle.seek(0)
+    raw = self._handle.read(MAX_RECALL_EXECUTION_RECEIPT_BYTES + 1)
+    if not raw or len(raw) > MAX_RECALL_EXECUTION_RECEIPT_BYTES:
+      return None
+    try:
+      value = json.loads(raw)
+    except (TypeError, ValueError):
+      return None
+    return value if isinstance(value, dict) and value.get("schema") == 1 else None
+
+  def store(self, value: dict) -> None:
+    if not isinstance(value, dict) or value.get("schema") != 1:
+      raise ValueError("invalid recall execution receipt")
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n"
+    if len(raw.encode("utf-8")) > MAX_RECALL_EXECUTION_RECEIPT_BYTES:
+      raise ValueError("recall execution receipt is too large")
+    self._handle.seek(0)
+    self._handle.truncate()
+    self._handle.write(raw)
+    self._handle.flush()
+    os.fsync(self._handle.fileno())
+
+
+def _prune_recall_executions(directory: Path, now: float) -> None:
+  """Remove only expired regular receipt files; never follow app-state links."""
+  cutoff = now - RECALL_EXECUTION_RETENTION_SECONDS
+  try:
+    entries = list(directory.iterdir())
+  except OSError:
+    return
+  for path in entries:
+    if not _RECALL_EXECUTION_KEY_RE.fullmatch(path.stem) or path.suffix != ".json":
+      continue
+    try:
+      info = path.stat(follow_symlinks=False)
+      if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+        path.unlink()
+    except OSError:
+      continue
+
+
+@contextmanager
+def recall_execution(key: str):
+  """Serialize one exact recall and expose its compact reusable receipt."""
+  if not isinstance(key, str) or not _RECALL_EXECUTION_KEY_RE.fullmatch(key):
+    raise ValueError("invalid recall execution key")
+  directory = STATE / "recall-execution"
+  directory.mkdir(parents=True, exist_ok=True)
+  _prune_recall_executions(directory, datetime.now(UTC).timestamp())
+  path = directory / f"{key}.json"
+  flags = os.O_RDWR | os.O_CREAT
+  if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+  fd = os.open(path, flags, 0o600)
+  try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+      raise ValueError("unsafe recall execution receipt")
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "r+", encoding="utf-8") as handle:
+      fd = -1
+      fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+      yield RecallExecution(handle)
+  finally:
+    if fd >= 0:
+      os.close(fd)
 
 
 def _git_env() -> dict[str, str]:
@@ -661,6 +748,36 @@ def _state_lock():
     yield
 
 
+def _safe_chat_id(chat_id: str) -> str:
+  return re.sub(r"[^A-Za-z0-9_-]", "", str(chat_id or ""))[:128]
+
+
+def load_read_trace(chat_id: str) -> dict | None:
+  """Read one bounded latest-per-chat trace without following links."""
+  trace_id = _safe_chat_id(chat_id)
+  if not trace_id:
+    return None
+  path = STATE / "read-trace" / f"{trace_id}.json"
+  flags = os.O_RDONLY
+  if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+  try:
+    fd = os.open(path, flags)
+    try:
+      info = os.fstat(fd)
+      if not stat.S_ISREG(info.st_mode):
+        return None
+      raw = os.read(fd, 262_145)
+    finally:
+      os.close(fd)
+    if len(raw) > 262_144:
+      return None
+    value = json.loads(raw.decode("utf-8"))
+  except (OSError, ValueError, UnicodeError):
+    return None
+  return value if isinstance(value, dict) and value.get("schema") == 3 else None
+
+
 def record_read(
   commit: str | None,
   question: str,
@@ -670,15 +787,32 @@ def record_read(
   traversal: dict | None = None,
   status: str = "completed",
   reason: str | None = None,
-) -> None:
+  invocation_fingerprint: str | None = None,
+) -> dict:
   """Record a completed recall or the latest per-chat failed attempt."""
   if status not in {"completed", "failed"}:
     raise ValueError("unsupported Memory read status")
+  if not (
+    isinstance(invocation_fingerprint, str)
+    and _RECALL_EXECUTION_KEY_RE.fullmatch(invocation_fingerprint)
+  ):
+    invocation_fingerprint = None
   clean_ids = (
     [Path(rel).stem for rel in files if rel.startswith(("notes/", "mocs/"))]
     if status == "completed" else []
   )
   with _state_lock():
+    # The per-turn execution lock is the primary single-flight boundary. This
+    # latest-trace check makes telemetry idempotent too if a process exits
+    # after recording the read but before publishing its reusable receipt.
+    if invocation_fingerprint:
+      previous = load_read_trace(chat_id)
+      if (
+        previous
+        and previous.get("invocation_fingerprint") == invocation_fingerprint
+        and previous.get("status") == status
+      ):
+        return previous
     if status == "completed":
       usage_path = STATE / "usage.json"
       try:
@@ -690,7 +824,7 @@ def record_read(
       for node_id in clean_ids:
         usage[node_id] = int(usage.get(node_id, 0) or 0) + 1
       _atomic_text(usage_path, json.dumps(usage, indent=2, sort_keys=True) + "\n")
-    safe_chat_id = re.sub(r"[^A-Za-z0-9_-]", "", chat_id)[:128]
+    safe_chat_id = _safe_chat_id(chat_id)
     read_id = uuid.uuid4().hex
     at = datetime.now(UTC).isoformat()
     trace = {
@@ -707,6 +841,8 @@ def record_read(
         traversal if status == "completed" and isinstance(traversal, dict) else {}
       ),
     }
+    if invocation_fingerprint:
+      trace["invocation_fingerprint"] = invocation_fingerprint
     if status == "failed":
       trace["reason"] = str(reason or "read_failed")[:80]
     # Keep one easy-to-inspect latest trace per chat, while the append-only
@@ -719,13 +855,14 @@ def record_read(
     # Failed attempts are operational evidence, not replayable reads. Keep the
     # latest per-chat receipt without feeding them into the nightly audit FIFO.
     if status == "failed":
-      return
+      return trace
     log_path = STATE / "read-log" / f"{at[:10]}.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
       handle.write(json.dumps(trace, ensure_ascii=False, sort_keys=True) + "\n")
       handle.flush()
       os.fsync(handle.fileno())
+    return trace
 
 
 def load_usage() -> dict[str, int]:

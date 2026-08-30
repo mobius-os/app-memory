@@ -1944,6 +1944,57 @@ def test_read_cursor_advances_only_through_recorded_success(monkeypatch, tmp_pat
   assert [item["read_id"] for item in memory_runner._pending_read_traces()] == ["new"]
 
 
+def test_pending_audit_coalesces_legacy_exact_retries_but_keeps_latest_result(
+  monkeypatch, tmp_path,
+):
+  state = tmp_path / "app-state"
+  log = state / "read-log" / "2026-07-28.jsonl"
+  log.parent.mkdir(parents=True)
+  common = {
+    "schema": 3,
+    "chat_id": "chat-1",
+    "commit": "0" * 40,
+    "question": "same functional request",
+  }
+  log.write_text("\n".join(json.dumps(item) for item in [
+    {**common, "read_id": "first", "at": "2026-07-28T01:00:00+00:00", "files": ["notes/first.md"]},
+    {**common, "read_id": "retry", "at": "2026-07-28T01:01:00+00:00", "files": ["notes/retry.md"]},
+    {**common, "read_id": "other-chat", "chat_id": "chat-2", "at": "2026-07-28T01:02:00+00:00"},
+  ]) + "\n")
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
+
+  pending = memory_runner._pending_read_traces()
+
+  assert [item["read_id"] for item in pending] == ["retry", "other-chat"]
+  assert pending[0]["files"] == ["notes/retry.md"]
+
+
+def test_pending_audit_uses_physical_turn_fingerprint_not_prompt_wording(
+  monkeypatch, tmp_path,
+):
+  state = tmp_path / "app-state"
+  log = state / "read-log" / "2026-07-28.jsonl"
+  log.parent.mkdir(parents=True)
+  common = {
+    "schema": 3,
+    "chat_id": "chat-1",
+    "commit": "0" * 40,
+    "question": "same wording in later turns",
+  }
+  log.write_text("\n".join(json.dumps(item) for item in [
+    {**common, "read_id": "turn-a", "at": "2026-07-28T01:00:00+00:00", "invocation_fingerprint": "a" * 64},
+    {**common, "read_id": "turn-a-retry", "at": "2026-07-28T01:01:00+00:00", "invocation_fingerprint": "a" * 64},
+    {**common, "read_id": "turn-b", "at": "2026-07-28T01:02:00+00:00", "invocation_fingerprint": "b" * 64},
+  ]) + "\n")
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
+
+  assert [
+    item["read_id"] for item in memory_runner._pending_read_traces()
+  ] == ["turn-a-retry", "turn-b"]
+
+
 def test_read_cursor_does_not_reopen_older_daily_logs(monkeypatch, tmp_path):
   state = tmp_path / "app-state"
   old = state / "read-log" / "2026-07-27.jsonl"

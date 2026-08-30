@@ -100,6 +100,15 @@ first material recommendation, design commitment, or final answer it could
 inform. Run it serially only when recall determines what to inspect or there is
 no independent work to begin.
 
+A progressive lookup can outlast an exec tool's initial yield. Preserve the
+complete exec result, including any running session or continuation id, and
+poll that exact session until it exits. In particular, a blank initial
+`output` with a live session id is not a completed Memory read. When
+orchestrating parallel work, never project the result down to `output` alone
+and never start the same lookup again while its original session is running.
+The reader also coalesces an accidental identical retry from the same physical
+turn, but that safety net is not a substitute for joining the original exec.
+
 The navigator distinguishes routing from retrieval: a broad parent can be
 opened to reach a detailed child without being selected. The lookup returns the
 complete contents of every selected node, never excerpts, followed by a verified

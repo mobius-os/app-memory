@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -11,14 +12,16 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
 from memory_store import (
   load_recall_guidance,
+  load_read_trace,
   read_revision_file,
   ready_pointer,
+  recall_execution,
   record_read,
 )
 from memory_text_provider import (
@@ -44,6 +47,7 @@ RESULT_FAILED = "failed"
 RESULT_REASON_NO_RELEVANT_RESULT = "no_relevant_result"
 RESULT_REASON_NOT_READY = "not_ready"
 RESULT_REASON_READ_FAILED = "read_failed"
+EXECUTION_RECEIPT_SCHEMA = 1
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 _WORD = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
@@ -117,6 +121,74 @@ class RecallResult:
   notes: tuple[dict[str, str], ...] = ()
   traversal: TraversalResult | None = None
   reason: str | None = None
+  reused: bool = False
+
+
+@dataclass(frozen=True)
+class RecallRequest:
+  """One pinned live recall plus its optional physical-turn identity."""
+
+  question: str
+  chat_id: str
+  commit: str | None
+  guidance: dict
+  invocation_fingerprint: str | None
+
+
+def _execution_identity() -> str | None:
+  """Return the current physical agent/delegation identity without logging it."""
+  value = (
+    os.environ.get("MOBIUS_RUN_TOKEN")
+    or os.environ.get("MOBIUS_DELEGATION_ID")
+    or ""
+  )
+  return value if 0 < len(value) <= 4096 else None
+
+
+def _guidance_identity(guidance: dict) -> dict[str, str]:
+  return {
+    "run_id": str(guidance.get("run_id") or "")[:128],
+    "instruction": str(guidance.get("instruction") or "")[:800],
+  }
+
+
+def _invocation_fingerprint(
+  question: str,
+  chat_id: str,
+  commit: str,
+  guidance: dict,
+) -> str | None:
+  """Hash the complete recall input; never persist the private run identity."""
+  identity = _execution_identity()
+  if identity is None:
+    return None
+  payload = {
+    "schema": 1,
+    "run_identity": identity,
+    "chat_id": chat_id,
+    "commit": commit,
+    "question": question,
+    "guidance": _guidance_identity(guidance),
+  }
+  return hashlib.sha256(json.dumps(
+    payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+  ).encode("utf-8")).hexdigest()
+
+
+def _prepare_request(question: str, chat_id: str) -> RecallRequest:
+  pointer = ready_pointer()
+  commit = pointer["commit"] if pointer else None
+  guidance = load_recall_guidance() or {}
+  return RecallRequest(
+    question=question,
+    chat_id=chat_id,
+    commit=commit,
+    guidance=guidance,
+    invocation_fingerprint=(
+      _invocation_fingerprint(question, chat_id, commit, guidance)
+      if commit else None
+    ),
+  )
 
 
 class RevisionGraph:
@@ -431,12 +503,16 @@ def traverse(
   commit: str,
   *,
   text_call: Callable[[str], NavigatorCall | str | None] | None,
+  guidance_record: dict | None = None,
 ) -> TraversalResult:
   """Navigate from the root, then return a selected subset of opened nodes."""
   traversal_started = time.monotonic()
   graph_data = json.loads(read_revision_file(commit, "graph.json"))
   graph = RevisionGraph(commit, graph_data)
-  guidance_record = load_recall_guidance() or {}
+  guidance_record = (
+    load_recall_guidance() or {}
+    if guidance_record is None else guidance_record
+  )
   guidance = str(guidance_record.get("instruction") or "").strip()
   opened = [graph.open("index", 0, None)]
   opened_content_chars = len(opened[0].content)
@@ -794,29 +870,203 @@ def _answer(traversal: TraversalResult) -> RecallResult:
   )
 
 
-def retrieve(question: str) -> RecallResult:
-  pointer = ready_pointer()
-  if pointer is None:
+def _retrieve_prepared(request: RecallRequest) -> RecallResult:
+  if request.commit is None:
     return RecallResult(
       RESULT_FAILED,
       "Memory lookup failed.",
       reason=RESULT_REASON_NOT_READY,
     )
-  commit = pointer["commit"]
   try:
     traversal = traverse(
-      question,
-      commit,
+      request.question,
+      request.commit,
       text_call=_live_text_call(),
+      guidance_record=request.guidance,
     )
   except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
     return RecallResult(
       RESULT_FAILED,
       "Memory lookup failed.",
-      commit=commit,
+      commit=request.commit,
       reason=RESULT_REASON_READ_FAILED,
     )
   return _answer(traversal)
+
+
+def retrieve(question: str) -> RecallResult:
+  """Retrieve without CLI telemetry or per-turn reuse (the testable core)."""
+  return _retrieve_prepared(_prepare_request(question, ""))
+
+
+def _execution_receipt(result: RecallResult, *, recorded: bool = True) -> dict:
+  return {
+    "schema": EXECUTION_RECEIPT_SCHEMA,
+    "status": result.status,
+    "commit": result.commit,
+    "files": list(result.files),
+    "recorded": recorded,
+  }
+
+
+def _cached_result(
+  request: RecallRequest,
+  receipt: object,
+) -> RecallResult | None:
+  """Rehydrate a validated result from one pinned commit, never cached bodies."""
+  if (
+    request.commit is None
+    or not isinstance(receipt, dict)
+    or receipt.get("schema") != EXECUTION_RECEIPT_SCHEMA
+    or receipt.get("status") not in {RESULT_HIT, RESULT_EMPTY}
+    or receipt.get("commit") != request.commit
+    or (
+      "recorded" in receipt
+      and not isinstance(receipt.get("recorded"), bool)
+    )
+  ):
+    return None
+  files = receipt.get("files")
+  if (
+    not isinstance(files, list)
+    or len(files) > MAX_SELECTED_NODES
+    or any(not isinstance(path, str) for path in files)
+    or len(files) != len(set(files))
+    or (receipt["status"] == RESULT_HIT) != bool(files)
+  ):
+    return None
+  try:
+    if files:
+      graph = RevisionGraph(
+        request.commit,
+        json.loads(read_revision_file(request.commit, "graph.json")),
+      )
+      by_path: dict[str, str] = {}
+      for node_id, metadata in graph.by_id.items():
+        path = str(metadata.get("path") or "")
+        if path in by_path:
+          return None
+        by_path[path] = node_id
+      if any(path not in by_path for path in files):
+        return None
+      selected = tuple(
+        graph.open(by_path[path], 0, None) for path in files
+      )
+    else:
+      selected = ()
+  except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    return None
+  traversal = TraversalResult(
+    status=receipt["status"],
+    commit=request.commit,
+    rounds=0,
+    stop_reason="execution_reused",
+    opened=selected,
+    selected=selected,
+  )
+  return replace(_answer(traversal), reused=True)
+
+
+def _record_result(result: RecallResult, request: RecallRequest) -> bool:
+  """Persist one new CLI observation; reused results deliberately skip this."""
+  try:
+    if result.status == RESULT_FAILED:
+      record_read(
+        result.commit,
+        request.question,
+        [],
+        request.chat_id,
+        status="failed",
+        reason=result.reason,
+        invocation_fingerprint=request.invocation_fingerprint,
+      )
+      return True
+    if result.commit and result.traversal:
+      record_read(
+        result.commit,
+        request.question,
+        list(result.files),
+        request.chat_id,
+        traversal=result.traversal.trace(),
+        invocation_fingerprint=request.invocation_fingerprint,
+      )
+      return True
+  except (OSError, ValueError):
+    sys.stderr.write("warning: Memory read history could not be recorded\n")
+  return False
+
+
+def _execute_request(request: RecallRequest) -> RecallResult:
+  """Run one physical-turn lookup at most once, including concurrent retries."""
+  fingerprint = request.invocation_fingerprint
+  if request.commit is None or fingerprint is None:
+    result = _retrieve_prepared(request)
+    _record_result(result, request)
+    return result
+  result: RecallResult | None = None
+  try:
+    with recall_execution(fingerprint) as execution:
+      receipt = execution.load()
+      cached = _cached_result(request, receipt)
+      if cached is not None:
+        result = cached
+        if receipt.get("recorded") is False and _record_result(cached, request):
+          try:
+            execution.store(_execution_receipt(cached))
+          except (OSError, ValueError):
+            sys.stderr.write(
+              "warning: Memory recall reuse receipt could not be updated\n"
+            )
+        return result
+
+      # Repair the narrow crash window where telemetry reached disk but the
+      # compact execution receipt did not. The latest trace contains no note
+      # bodies and is accepted only for this exact hashed physical-turn input.
+      trace = load_read_trace(request.chat_id)
+      if (
+        trace
+        and trace.get("invocation_fingerprint") == fingerprint
+        and trace.get("status") == "completed"
+      ):
+        cached = _cached_result(request, {
+          "schema": EXECUTION_RECEIPT_SCHEMA,
+          "status": RESULT_HIT if trace.get("files") else RESULT_EMPTY,
+          "commit": trace.get("commit"),
+          "files": trace.get("files"),
+        })
+        if cached is not None:
+          result = cached
+          try:
+            execution.store(_execution_receipt(cached))
+          except (OSError, ValueError):
+            sys.stderr.write(
+              "warning: Memory recall reuse receipt could not be repaired\n"
+            )
+          return result
+
+      result = _retrieve_prepared(request)
+      recorded = _record_result(result, request)
+      # Structural failures are never sticky: repairing the graph and retrying
+      # inside the same turn must be able to perform a fresh lookup.
+      if result.status in {RESULT_HIT, RESULT_EMPTY}:
+        try:
+          execution.store(_execution_receipt(result, recorded=recorded))
+        except (OSError, ValueError):
+          # The completed provider result remains authoritative. A receipt
+          # write failure must never cause a second provider call in this
+          # process; the idempotent trace can repair reuse on the next retry.
+          sys.stderr.write(
+            "warning: Memory recall reuse receipt could not be stored\n"
+          )
+      return result
+  except (OSError, ValueError):
+    # Coordination is an optimization and safety boundary, not a prerequisite
+    # for reading Memory. Preserve the original lookup contract if app-state
+    # storage itself is temporarily unavailable.
+    if result is None:
+      result = _retrieve_prepared(request)
+      _record_result(result, request)
+    return result
 
 
 def _result_payload(result: RecallResult) -> dict:
@@ -836,7 +1086,19 @@ def _result_payload(result: RecallResult) -> dict:
     # Product-safe enum only. Never expose an exception, path, or provider
     # response through the receipt that becomes owner-facing chat metadata.
     payload["reason"] = result.reason
+  if result.reused:
+    payload["reused"] = True
   return payload
+
+
+def _emit_result(result: RecallResult) -> int:
+  print(result.answer)
+  if result.files:
+    print("FILES: " + ", ".join(result.files))
+  print(RESULT_PREFIX + json.dumps(
+    _result_payload(result), ensure_ascii=True, separators=(",", ":"),
+  ))
+  return 1 if result.status == RESULT_FAILED else 0
 
 
 def run() -> int:
@@ -845,34 +1107,7 @@ def run() -> int:
     sys.stderr.write('usage: memory_search.py "<focused recall prompt>" "<chat_id>"\n')
     return 2
   question, chat_id = args
-  result = retrieve(question)
-  print(result.answer)
-  try:
-    if result.status == RESULT_FAILED:
-      record_read(
-        result.commit,
-        question,
-        [],
-        chat_id,
-        status="failed",
-        reason=result.reason,
-      )
-    elif result.commit and result.traversal:
-      if result.files:
-        print("FILES: " + ", ".join(result.files))
-      record_read(
-        result.commit,
-        question,
-        list(result.files),
-        chat_id,
-        traversal=result.traversal.trace(),
-      )
-  except (OSError, ValueError):
-    sys.stderr.write("warning: Memory read history could not be recorded\n")
-  print(RESULT_PREFIX + json.dumps(
-    _result_payload(result), ensure_ascii=True, separators=(",", ":"),
-  ))
-  return 1 if result.status == RESULT_FAILED else 0
+  return _emit_result(_execute_request(_prepare_request(question, chat_id)))
 
 
 if __name__ == "__main__":
