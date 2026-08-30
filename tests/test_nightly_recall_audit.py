@@ -1032,6 +1032,36 @@ def test_deleted_hindsight_source_uses_only_opaque_provenance(monkeypatch, tmp_p
   assert "deleted-later-chat" not in content
 
 
+def test_audit_reads_loads_selected_nodes_from_trace_revision(monkeypatch):
+  loaded = []
+
+  def read_revision(commit, path):
+    loaded.append((commit, path))
+    return "---\ntitle: Quiet UI\n---\nThe partner prefers calm interfaces.\n"
+
+  monkeypatch.setattr(memory_runner, "read_revision_file", read_revision)
+
+  audits = memory_runner._audit_reads("fallback-commit", [{
+    "read_id": "read-1",
+    "at": "2026-08-27T05:00:00+00:00",
+    "question": "What interface style does the partner prefer?",
+    "chat_id": "chat-1",
+    "commit": "trace-commit",
+    "files": ["notes/quiet-ui.md"],
+    "traversal": {"opened": [], "frontier_at_stop": []},
+  }])
+
+  assert loaded == [("trace-commit", "notes/quiet-ui.md")]
+  assert audits[0]["live"]["selected_nodes"] == [{
+    "path": "notes/quiet-ui.md",
+    "title": "quiet ui",
+    "content": (
+      "---\ntitle: Quiet UI\n---\n"
+      "The partner prefers calm interfaces.\n"
+    ),
+  }]
+
+
 def test_audit_prompt_view_preserves_grouped_frontier_route_references():
   audit = {
     "live": {"frontier_at_stop": [{

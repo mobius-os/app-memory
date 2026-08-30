@@ -36,6 +36,7 @@ from memory_store import (
   load_recall_guidance,
   load_usage,
   publish,
+  read_revision_file,
   ready_pointer,
   start_staging,
   write_recall_guidance,
