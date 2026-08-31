@@ -5,6 +5,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -53,6 +55,339 @@ def _commit(store, *, title="Quiet interface", body="The user prefers a quiet in
 
 
 class MemorySearchContractTests(unittest.TestCase):
+  def test_same_physical_turn_reuses_one_provider_result_and_one_read_record(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      calls = 0
+      original = search._retrieve_prepared
+
+      def counted(request):
+        nonlocal calls
+        calls += 1
+        return original(request)
+
+      outputs = []
+      old_argv = sys.argv
+      try:
+        with (
+          mock.patch.dict(os.environ, {
+            "MOBIUS_RUN_TOKEN": "physical-turn-a",
+            "MOBIUS_DELEGATION_ID": "",
+            "MEMORY_READER_PROVIDER": "none",
+          }),
+          mock.patch.object(search, "_retrieve_prepared", side_effect=counted),
+        ):
+          sys.argv = [
+            str(REPO / "memory_search.py"), "quiet interface", "chat-1",
+          ]
+          for _ in range(2):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+              self.assertEqual(search.run(), 0)
+            outputs.append(output.getvalue())
+      finally:
+        sys.argv = old_argv
+
+      self.assertEqual(calls, 1)
+      self.assertNotIn('"reused":true', outputs[0])
+      self.assertIn('"reused":true', outputs[1])
+      self.assertIn("prefers a quiet interface", outputs[1])
+      log = next((store.STATE / "read-log").glob("*.jsonl"))
+      self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
+      self.assertEqual(
+        json.loads((store.STATE / "usage.json").read_text()),
+        {"quiet-ui": 1},
+      )
+      receipt = next((store.STATE / "recall-execution").glob("*.json"))
+      self.assertNotIn("physical-turn-a", receipt.read_text(encoding="utf-8"))
+
+  def test_identical_wording_in_a_later_physical_turn_is_a_new_read(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      calls = 0
+      original = search._retrieve_prepared
+
+      def counted(request):
+        nonlocal calls
+        calls += 1
+        return original(request)
+
+      old_argv = sys.argv
+      try:
+        with (
+          mock.patch.dict(os.environ, {"MEMORY_READER_PROVIDER": "none"}),
+          mock.patch.object(search, "_retrieve_prepared", side_effect=counted),
+        ):
+          sys.argv = [
+            str(REPO / "memory_search.py"), "quiet interface", "chat-1",
+          ]
+          for token in ("physical-turn-a", "physical-turn-b"):
+            with mock.patch.dict(os.environ, {"MOBIUS_RUN_TOKEN": token}):
+              with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(search.run(), 0)
+      finally:
+        sys.argv = old_argv
+
+      self.assertEqual(calls, 2)
+      log = next((store.STATE / "read-log").glob("*.jsonl"))
+      self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
+
+  def test_calls_without_a_physical_turn_identity_are_not_coalesced(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      calls = 0
+      original = search._retrieve_prepared
+
+      def counted(request):
+        nonlocal calls
+        calls += 1
+        return original(request)
+
+      with (
+        mock.patch.dict(os.environ, {
+          "MOBIUS_RUN_TOKEN": "",
+          "MOBIUS_DELEGATION_ID": "",
+          "MEMORY_READER_PROVIDER": "none",
+        }),
+        mock.patch.object(search, "_retrieve_prepared", side_effect=counted),
+      ):
+        # Prepare after masking the identity so this exercises the legacy and
+        # direct-script contract rather than manufacturing a shared lifetime.
+        request = search._prepare_request("quiet interface", "chat-1")
+        search._execute_request(request)
+        search._execute_request(request)
+
+      self.assertIsNone(request.invocation_fingerprint)
+      self.assertEqual(calls, 2)
+      log = next((store.STATE / "read-log").glob("*.jsonl"))
+      self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
+
+  def test_concurrent_identical_retries_share_one_in_flight_lookup(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      original = search._retrieve_prepared
+      started = threading.Event()
+      release = threading.Event()
+      count_lock = threading.Lock()
+      calls = 0
+
+      def slow(request):
+        nonlocal calls
+        with count_lock:
+          calls += 1
+        started.set()
+        self.assertTrue(release.wait(timeout=3))
+        return original(request)
+
+      results = []
+      with (
+        mock.patch.dict(os.environ, {
+          "MOBIUS_RUN_TOKEN": "one-concurrent-turn",
+          "MEMORY_READER_PROVIDER": "none",
+        }),
+        mock.patch.object(search, "_retrieve_prepared", side_effect=slow),
+      ):
+        request = search._prepare_request("quiet interface", "chat-1")
+        threads = [
+          threading.Thread(
+            target=lambda: results.append(search._execute_request(request)),
+          )
+          for _ in range(2)
+        ]
+        threads[0].start()
+        self.assertTrue(started.wait(timeout=2))
+        threads[1].start()
+        time.sleep(0.1)
+        release.set()
+        for thread in threads:
+          thread.join(timeout=5)
+          self.assertFalse(thread.is_alive())
+
+      self.assertEqual(calls, 1)
+      self.assertEqual(len(results), 2)
+      self.assertEqual(sum(result.reused for result in results), 1)
+      log = next((store.STATE / "read-log").glob("*.jsonl"))
+      self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
+
+  def test_failed_reads_are_not_sticky_inside_the_same_turn(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      calls = 0
+
+      def failed(_request):
+        nonlocal calls
+        calls += 1
+        return search.RecallResult(
+          search.RESULT_FAILED,
+          "Memory lookup failed.",
+          reason=search.RESULT_REASON_READ_FAILED,
+        )
+
+      with (
+        mock.patch.dict(os.environ, {"MOBIUS_RUN_TOKEN": "repairable-turn"}),
+        mock.patch.object(search, "_retrieve_prepared", side_effect=failed),
+      ):
+        request = search._prepare_request("quiet interface", "chat-1")
+        first = search._execute_request(request)
+        second = search._execute_request(request)
+
+      self.assertEqual(calls, 2)
+      self.assertFalse(first.reused)
+      self.assertFalse(second.reused)
+      self.assertFalse(next((store.STATE / "recall-execution").glob("*.json")).read_text())
+
+  def test_completed_result_is_not_repeated_when_receipt_storage_fails(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      calls = 0
+      original = search._retrieve_prepared
+
+      def counted(request):
+        nonlocal calls
+        calls += 1
+        return original(request)
+
+      with (
+        mock.patch.dict(os.environ, {
+          "MOBIUS_RUN_TOKEN": "receipt-write-failure",
+          "MEMORY_READER_PROVIDER": "none",
+        }),
+        mock.patch.object(search, "_retrieve_prepared", side_effect=counted),
+        mock.patch.object(store.RecallExecution, "store", side_effect=OSError),
+      ):
+        request = search._prepare_request("quiet interface", "chat-1")
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+          result = search._execute_request(request)
+
+      self.assertEqual(result.status, search.RESULT_HIT)
+      self.assertEqual(calls, 1)
+      self.assertIn("could not be stored", errors.getvalue())
+
+  def test_telemetry_failure_is_repaired_without_repeating_provider_work(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      calls = 0
+      record_attempts = 0
+      original_retrieve = search._retrieve_prepared
+      original_record = store.record_read
+
+      def counted(request):
+        nonlocal calls
+        calls += 1
+        return original_retrieve(request)
+
+      def flaky_record(*args, **kwargs):
+        nonlocal record_attempts
+        record_attempts += 1
+        if record_attempts == 1:
+          raise OSError("temporary telemetry failure")
+        return original_record(*args, **kwargs)
+
+      with (
+        mock.patch.dict(os.environ, {
+          "MOBIUS_RUN_TOKEN": "telemetry-repair-turn",
+          "MEMORY_READER_PROVIDER": "none",
+        }),
+        mock.patch.object(search, "_retrieve_prepared", side_effect=counted),
+        mock.patch.object(search, "record_read", side_effect=flaky_record),
+        contextlib.redirect_stderr(io.StringIO()),
+      ):
+        request = search._prepare_request("quiet interface", "chat-1")
+        first = search._execute_request(request)
+        second = search._execute_request(request)
+
+      self.assertEqual(calls, 1)
+      self.assertEqual(record_attempts, 2)
+      self.assertFalse(first.reused)
+      self.assertTrue(second.reused)
+      log = next((store.STATE / "read-log").glob("*.jsonl"))
+      self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
+      with store.recall_execution(request.invocation_fingerprint) as execution:
+        self.assertTrue(execution.load()["recorded"])
+
+  def test_latest_trace_repairs_crash_window_without_another_provider_call(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      commit = _commit(store)["commit"]
+      with mock.patch.dict(os.environ, {
+        "MOBIUS_RUN_TOKEN": "crash-window-turn",
+        "MEMORY_READER_PROVIDER": "none",
+      }):
+        request = search._prepare_request("quiet interface", "chat-1")
+        store.record_read(
+          commit,
+          request.question,
+          ["notes/quiet-ui.md"],
+          request.chat_id,
+          invocation_fingerprint=request.invocation_fingerprint,
+        )
+        with mock.patch.object(
+          search, "_retrieve_prepared",
+          side_effect=AssertionError("provider must not run"),
+        ):
+          result = search._execute_request(request)
+
+      self.assertTrue(result.reused)
+      self.assertEqual(result.files, ("notes/quiet-ui.md",))
+      with store.recall_execution(request.invocation_fingerprint) as execution:
+        self.assertEqual(execution.load()["files"], ["notes/quiet-ui.md"])
+
+  def test_tampered_execution_receipt_cannot_escape_the_pinned_graph(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      calls = 0
+      original = search._retrieve_prepared
+
+      def counted(request):
+        nonlocal calls
+        calls += 1
+        return original(request)
+
+      with (
+        mock.patch.dict(os.environ, {
+          "MOBIUS_RUN_TOKEN": "tampered-receipt-turn",
+          "MEMORY_READER_PROVIDER": "none",
+        }),
+        mock.patch.object(search, "_retrieve_prepared", side_effect=counted),
+      ):
+        request = search._prepare_request("quiet interface", "chat-1")
+        with store.recall_execution(request.invocation_fingerprint) as execution:
+          execution.store({
+            "schema": 1,
+            "status": search.RESULT_HIT,
+            "commit": request.commit,
+            "files": ["../../owner-secret.md"],
+          })
+        result = search._execute_request(request)
+
+      self.assertEqual(calls, 1)
+      self.assertFalse(result.reused)
+      self.assertEqual(result.files, ("notes/quiet-ui.md",))
+      with store.recall_execution(request.invocation_fingerprint) as execution:
+        self.assertEqual(execution.load()["files"], ["notes/quiet-ui.md"])
+
+  def test_selector_change_invalidates_same_turn_reuse_key(self):
+    with tempfile.TemporaryDirectory() as raw:
+      _store, search = _load(Path(raw))
+      with mock.patch.dict(os.environ, {"MOBIUS_RUN_TOKEN": "one-turn"}):
+        first = search._invocation_fingerprint(
+          "same question", "chat-1", "0" * 40,
+          {"schema": 1, "run_id": "night", "instruction": "first lesson"},
+        )
+        second = search._invocation_fingerprint(
+          "same question", "chat-1", "0" * 40,
+          {"schema": 1, "run_id": "night", "instruction": "new lesson"},
+        )
+      self.assertNotEqual(first, second)
+
   def test_navigator_can_open_only_host_verified_linked_nodes(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))

@@ -16,6 +16,7 @@ repository/graph.json                deterministic viewer index
 repository/.git/                     compact history and rollback data
 app-state/read-trace/                 latest retrieval observation per chat
 app-state/read-log/YYYY-MM-DD.jsonl   append-only auditable read traces
+app-state/recall-execution/            short-lived hashed single-flight receipts
 app-state/recall-audit/YYYY-MM-DD.jsonl
 app-state/recall-stats.json           recall outcomes and retrieval evidence
 app-state/update-log/YYYY-MM-DD.jsonl
@@ -28,6 +29,15 @@ receipt when available. Scheduled run status and update logs aggregate the
 same receipts across consolidation batches beside chat/audit workload. Missing
 provider fields mean “not reported,” not zero; these numbers are evidence for
 qualitative review, never a recall-quality score.
+
+Live recall is idempotent for one physical agent/delegation turn, exact query,
+pinned graph commit, and selector lesson. The raw turn identity is never
+persisted: the reader hashes the complete input, serializes matching processes,
+and keeps only a short-lived receipt containing selected graph paths. A reused
+result reopens those paths from the same immutable commit; it does not repeat
+provider calls, usage counters, or nightly audit work. A later physical turn is
+a new read even when its wording is identical. True failed reads are not
+cached, so repairing the graph can succeed on retry.
 
 Published commits are immutable. Readers pin the commit named by `.ready` and
 read its blobs directly; maintenance edits one private worktree and advances

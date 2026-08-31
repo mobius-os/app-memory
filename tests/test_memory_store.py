@@ -58,6 +58,62 @@ class MemoryStoreTests(unittest.TestCase):
           "instruction": "x" * (store.MAX_RECALL_GUIDANCE_CHARS + 1),
         })
 
+  def test_recall_execution_receipt_is_locked_bounded_and_self_pruning(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      key = "a" * 64
+      receipt = {
+        "schema": 1,
+        "status": "hit",
+        "commit": "0" * 40,
+        "files": ["notes/quiet-ui.md"],
+      }
+
+      with store.recall_execution(key) as execution:
+        self.assertIsNone(execution.load())
+        execution.store(receipt)
+      path = store.STATE / "recall-execution" / f"{key}.json"
+      path.chmod(0o644)
+      with store.recall_execution(key) as execution:
+        self.assertEqual(execution.load(), receipt)
+
+      self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+      old = store.STATE / "recall-execution" / f"{'b' * 64}.json"
+      old.write_text('{"schema":1}\n', encoding="utf-8")
+      expired = (
+        old.stat().st_mtime - store.RECALL_EXECUTION_RETENTION_SECONDS - 1
+      )
+      os.utime(old, (expired, expired))
+      with store.recall_execution("c" * 64):
+        pass
+      self.assertFalse(old.exists())
+      self.assertTrue(path.exists())
+
+  def test_record_read_is_idempotent_for_one_physical_turn_fingerprint(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      fingerprint = "d" * 64
+      args = (
+        "0" * 40,
+        "Which preference matters?",
+        ["notes/quiet-ui.md"],
+        "chat-1",
+      )
+
+      first = store.record_read(*args, invocation_fingerprint=fingerprint)
+      second = store.record_read(*args, invocation_fingerprint=fingerprint)
+
+      self.assertEqual(second["read_id"], first["read_id"])
+      log = next((store.STATE / "read-log").glob("*.jsonl"))
+      self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
+      usage = json.loads((store.STATE / "usage.json").read_text())
+      self.assertEqual(usage, {"quiet-ui": 1})
+
+      store.record_read(*args, invocation_fingerprint="e" * 64)
+      self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
+      usage = json.loads((store.STATE / "usage.json").read_text())
+      self.assertEqual(usage, {"quiet-ui": 2})
+
   def test_graph_metadata_and_note_bodies_have_separate_read_caps(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))

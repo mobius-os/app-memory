@@ -189,6 +189,7 @@ test('manifest activates Memory only through a system prompt contribution', () =
 
 test('reader returns verified graph-relative file pointers', () => {
   const reader = readFileSync(new URL('../memory_search.py', import.meta.url), 'utf8')
+  const corePrompt = readFileSync(new URL('../memory-core.md', import.meta.url), 'utf8')
   const provider = readFileSync(new URL('../memory_text_provider.py', import.meta.url), 'utf8')
   assert.match(reader, /FILES:/)
   assert.match(reader, /ready_pointer\(\)/)
@@ -196,6 +197,10 @@ test('reader returns verified graph-relative file pointers', () => {
   assert.match(reader, /graph\.open\("index", 0, None\)/)
   assert.match(reader, /child_id in allowed\[parent_id\]/)
   assert.match(reader, /Confined graph traversal/)
+  assert.match(reader, /MOBIUS_RUN_TOKEN/)
+  assert.match(reader, /recall_execution\(fingerprint\)/)
+  assert.match(corePrompt, /blank initial[\s\S]*live session id[\s\S]*not a completed Memory read/)
+  assert.match(corePrompt, /never start the same lookup again while its original session is running/)
   assert.match(provider, /"--tools", ""/)
   assert.match(provider, /"--sandbox", "read-only"/)
   for (const feature of [

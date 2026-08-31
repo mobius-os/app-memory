@@ -555,12 +555,35 @@ def _migrate_recall_stats() -> bool:
   return True
 
 
+def _logical_read_key(record: dict) -> tuple[str, ...] | None:
+  """Identify one functional live read without inventing a time window."""
+  fingerprint = record.get("invocation_fingerprint")
+  chat_id = record.get("chat_id")
+  if (
+    isinstance(fingerprint, str)
+    and re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+    and isinstance(chat_id, str)
+  ):
+    # New readers include the physical turn in this opaque digest, so a later
+    # deliberate lookup remains distinct even when its wording is identical.
+    return ("execution", chat_id, fingerprint)
+  commit = record.get("commit")
+  question = record.get("question")
+  if all(isinstance(value, str) and value for value in (chat_id, commit, question)):
+    # Migration for already-recorded retries: same chat + pinned graph + exact
+    # request is one functional observation. Keep the latest result below;
+    # the append-only evidence remains untouched on disk.
+    return ("legacy", chat_id, commit, question)
+  return None
+
+
 def _pending_read_traces() -> list[dict]:
   """Return every completed live read after the last successful audit."""
   cursor = str(_recall_stats().get("last_audited_at") or "")
   cursor_day = cursor[:10] if re.match(r"^\d{4}-\d{2}-\d{2}T", cursor) else ""
   records: list[dict] = []
   seen: set[str] = set()
+  logical_positions: dict[tuple[str, ...], int] = {}
   for path in sorted((STATE / "read-log").glob("*.jsonl")):
     # Re-read the cursor day because it may contain both audited and pending
     # events. Older immutable daily files cannot contain eligible records.
@@ -590,7 +613,13 @@ def _pending_read_traces() -> list[dict]:
       ):
         continue
       seen.add(read_id)
-      records.append(record)
+      logical_key = _logical_read_key(record)
+      if logical_key is not None and logical_key in logical_positions:
+        records[logical_positions[logical_key]] = record
+      else:
+        if logical_key is not None:
+          logical_positions[logical_key] = len(records)
+        records.append(record)
   return sorted(records, key=lambda item: (str(item["at"]), str(item["read_id"])))
 
 
