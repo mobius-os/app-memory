@@ -1424,8 +1424,11 @@ def _consolidation_item(staging: Path, moc_path: str) -> dict | None:
     and str(node.get("path") or "").startswith("notes/")
     and moc_id in (node.get("mocs") or [])
   )
-  lead_first = set(_previously_omitted_members(moc_path))
-  members.sort(key=lambda path: (path not in lead_first, path))
+  # Preserve the waiting queue: alphabetizing it can starve later windows.
+  waiting_order = {
+    path: index for index, path in enumerate(_previously_omitted_members(moc_path))
+  }
+  members.sort(key=lambda path: (waiting_order.get(path, len(waiting_order)), path))
   note_contents: list[dict] = []
   omitted: list[str] = []
   total = 0

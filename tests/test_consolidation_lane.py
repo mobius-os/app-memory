@@ -120,6 +120,38 @@ def test_candidates_rotate_least_recently_consolidated_first(state, tmp_path):
   ]
 
 
+def test_oversized_neighborhood_visits_every_member_before_repeating(state, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": list("abcdef")})
+  for slug in "abcdef":
+    _note(staging / "notes" / f"{slug}.md", slug, "projects", "x" * 60_000)
+
+  passes = []
+  for _ in range(6):
+    item = memory_runner._consolidation_item(staging, "mocs/projects.md")
+    passes.append([Path(path).stem for path in item["member_paths"]])
+    memory_runner._record_consolidation_attempt(
+      "mocs/projects.md", omitted=item["omitted_member_paths"],
+    )
+
+  assert passes == [["a", "b"], ["c", "d"], ["e", "f"]] * 2
+
+
+def test_member_rotation_keeps_waiting_order_when_members_change(state, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["a", "b", "c", "new"]})
+  memory_runner._record_consolidation_attempt(
+    "mocs/projects.md",
+    omitted=["notes/deleted.md", "notes/c.md", "notes/b.md"],
+  )
+
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md")
+
+  assert item["member_paths"] == [
+    "notes/c.md", "notes/b.md", "notes/a.md", "notes/new.md",
+  ]
+
+
 def test_lanes_rotate_and_a_rejected_item_defers_without_blocking(
   state, monkeypatch, tmp_path,
 ):
