@@ -511,7 +511,7 @@ def test_deleted_chat_handle_is_expanded_during_provider_validation(
     {"provider": "codex", "model": "gpt-test", "effort": None},
   ])
   monkeypatch.setattr(memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "key")
-  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
   monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
   monkeypatch.setattr(memory_runner, "_known_deleted_source_ids", lambda _path: set())
   monkeypatch.setattr(memory_runner, "_known_deleted_source", lambda _path: False)
@@ -971,7 +971,7 @@ def test_hindsight_source_handle_can_cite_the_later_chat(monkeypatch, tmp_path):
     }],
     "self_review": _self_review(),
   }
-  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
   monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
   monkeypatch.setattr(
     memory_runner, "run_text",
@@ -1012,7 +1012,7 @@ def test_deleted_hindsight_source_uses_only_opaque_provenance(monkeypatch, tmp_p
     }],
     "self_review": _self_review(),
   }
-  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
   monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
   monkeypatch.setattr(memory_runner, "_known_deleted_source_ids", lambda _path: set())
   monkeypatch.setattr(memory_runner, "_known_deleted_source", lambda _path: False)
@@ -1182,7 +1182,7 @@ def test_terminal_provider_failure_is_skipped_for_later_proposal_batches(
     "read_audits": [],
     "self_review": _self_review(),
   }
-  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
   monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
   def text(provider, _prompt, **_kwargs):
     calls.append(provider)
@@ -1216,7 +1216,7 @@ def test_transient_provider_failure_is_retried_on_the_next_batch(
     "followups": [], "read_audits": [],
     "self_review": _self_review(),
   }
-  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
   monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
   def text(provider, _prompt, **_kwargs):
     calls.append(provider)
@@ -1248,7 +1248,7 @@ def test_batch_coordinator_combines_terminal_fallback_and_topology_rollback(
     "followups": [], "read_audits": [],
     "self_review": _self_review(),
   }
-  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args: "prompt")
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
   monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
   monkeypatch.setattr(
     memory_runner,
@@ -1295,6 +1295,7 @@ def test_batch_coordinator_combines_terminal_fallback_and_topology_rollback(
   ("message", "code", "scope"),
   [
     ("Monthly usage limit reached", "usage_limit", "provider"),
+    ("You've hit your session limit · resets 9pm (UTC)", "usage_limit", "provider"),
     ("Authentication failed: please login", "authentication", "provider"),
     ("Unknown model claude-future", "model_unavailable", "choice"),
   ],
@@ -1314,6 +1315,7 @@ def test_rate_limit_is_not_cached_as_a_terminal_failure():
 
   assert failure.code == "process_exit_1"
   assert failure.terminal is False
+  assert failure.detail == "Temporary rate limit; retry later"
 
 
 def test_provider_summary_keeps_failures_skips_and_successes_from_all_batches():
@@ -1563,7 +1565,7 @@ def test_run_reaches_consolidation_with_each_recall_as_one_work_item(
   monkeypatch.setattr(
     memory_runner,
     "_proposal",
-    lambda _app_id, _staging, _chats, audits, _providers, _deadline: memory_runner.ProposalOutcome(
+    lambda _app_id, _staging, _chats, audits, _providers, _deadline, **_kwargs: memory_runner.ProposalOutcome(
       "ok",
       {
         "updates": [],
@@ -1595,7 +1597,7 @@ def test_run_reaches_consolidation_with_each_recall_as_one_work_item(
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
   )
-  monkeypatch.setattr(memory_runner, "_append_update_log", lambda *_args: None)
+  monkeypatch.setattr(memory_runner, "_append_update_log", lambda *_args, **_kwargs: None)
   monkeypatch.setattr(
     memory_runner,
     "_record_recall_audits",
@@ -1688,7 +1690,7 @@ def test_run_consolidates_focused_chat_items_before_one_publish(
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
   )
-  monkeypatch.setattr(memory_runner, "_append_update_log", lambda *_args: None)
+  monkeypatch.setattr(memory_runner, "_append_update_log", lambda *_args, **_kwargs: None)
   monkeypatch.setattr(
     memory_runner,
     "_record_recall_audits",
@@ -1758,7 +1760,7 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   monkeypatch.setattr(
     memory_runner,
     "_proposal",
-    lambda *_args: memory_runner.ProposalOutcome(
+    lambda *_args, **_kwargs: memory_runner.ProposalOutcome(
       "ok",
       {
         "updates": [],
@@ -1802,7 +1804,7 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
   )
-  monkeypatch.setattr(memory_runner, "_append_update_log", lambda *_args: None)
+  monkeypatch.setattr(memory_runner, "_append_update_log", lambda *_args, **_kwargs: None)
   monkeypatch.setattr(
     memory_runner,
     "_record_recall_audits",
@@ -2383,7 +2385,7 @@ def test_batch_coordinator_stops_at_deadline_after_completed_item(
   outcome = memory_runner.ProposalOutcome(
     "ok", _reviewed({"summary": "Processed."}), "codex", "gpt-test", [],
   )
-  monkeypatch.setattr(memory_runner, "_proposal", lambda *_args: outcome)
+  monkeypatch.setattr(memory_runner, "_proposal", lambda *_args, **_kwargs: outcome)
   monkeypatch.setattr(
     memory_runner, "_apply_validated_proposal",
     lambda _staging, value, **_kwargs: (value, [], [], graph),

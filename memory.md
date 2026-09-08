@@ -85,8 +85,19 @@ safe, reversible change followed by observation over asking the partner to tune
 numbers. Surface something only when it changes a meaningful outcome, needs the
 partner's values or authorization, or cannot be tested safely without them.
 Routine organization, stale-fact cleanup, and search-policy experiments stay in
-the private run evidence. Follow-ups passed to Reflection are leads to verify,
-not automatically partner-facing report items.
+the private run evidence. Follow-ups and `next_experiment` notes are Memory's
+own leads: the next consolidation of the neighborhood they name receives them
+and either resolves or drops them. They are never partner-facing report items.
+
+**Admission.** Memory holds durable context about the partner and this
+instance: preferences, people, goals, habits, recurring projects, stable
+decisions, working style, and the partner-facing impact of past problems.
+Implementation truth — how code works, which fix shipped, a bug's mechanism,
+line numbers, runtime architecture inferred from chat — belongs to code, tests,
+skills, and documentation, not here. Admit technical content only when it is a
+stable, cross-cutting partner-impact invariant with no better owner, and even
+then state the invariant, not the implementation. Retire notes that no longer
+clear this bar when their neighborhood is consolidated.
 
 The Memory app's confined runner owns consolidation. It receives only
 structurally redacted chat logs through its declared capability, compact graph
@@ -94,7 +105,11 @@ identities, and the complete bodies of notes relevant to the focused work item.
 It may propose note upserts, note deletions, and described link operations. The
 trusted host applies links to an existing root or MOC without handing the model
 an unrelated map to rewrite. An existing note may be replaced only when its
-complete current text was supplied.
+complete current text was supplied. In a map-neighborhood item the writer holds
+the map in full as well, so it may rewrite that one map — repairing cues,
+orphaned fragments, and dangling lines — provided every member it is not
+deleting or re-filing in the same proposal stays linked; the host rejects a
+rewrite that would silently orphan a fact.
 It tries the configured background-agent order through confined, text-only
 Claude and Codex adapters. If none produces valid JSON, the run is recorded as
 degraded and the published commit does not move.
@@ -103,12 +118,17 @@ unavailable configured model) is remembered so later batches go straight to a
 healthy fallback. Timeouts and malformed output remain attempt-scoped and may
 be retried on a later batch.
 
-Busy nights alternate one focused recall audit or source chat at a time against
-one private staging graph until the real scheduled-run deadline approaches,
-then publish once. Each proposal is transactional: if it would demote a
-specifically routed node into Unfiled, only that proposal is rolled back and
-its source remains queued. Earlier accepted proposals can still publish
-atomically without acknowledging the rejected item.
+Every night rotates three lanes of focused work items against one private
+staging graph — one recall audit, one source chat, one map neighborhood to
+consolidate — until the real scheduled-run deadline approaches, then publishes
+once. Consolidation walks the maps in turn, least recently consolidated first,
+and hands the writer the complete bodies of every note in that map plus the
+open leads that name them, so merging, superseding, and retiring are always
+possible for that neighborhood. Each proposal is transactional: if it would
+demote a specifically routed node into Unfiled, only that proposal is rolled
+back and its source remains queued. A rejected item is deferred to a later
+night; the lane continues, and stops for the night only after several
+consecutive rejections. Earlier accepted proposals still publish atomically.
 
 Every successful night completes four duties across those proposals:
 
@@ -134,10 +154,14 @@ Every successful night completes four duties across those proposals:
    refine relevance, but it never changes when recall fires, weakens catalog
    confinement, or turns the 12-note ceiling into a target. Prefer no change
    when the evidence is mixed or fits only one title collision.
-4. **Prune.** The writer receives complete bodies for the audited or
-   semantically related notes in its focused context, then removes or updates
-   facts that are demonstrably stale, obsolete, redundant, or superseded. A
-   possible stale fact is a lead to verify, not proof.
+4. **Consolidate.** In a map-neighborhood item the writer holds every member
+   note in full and does the cleanup as its primary work: merge duplicates
+   into one clear claim, update superseded claims in place and record
+   `supersedes`, refresh `as-of`, retire notes that fail the admission rule,
+   and tighten the map's cues so it answers its retrieval question. In chat and
+   audit items it does the same for the related bodies it was given. A
+   possible stale fact is a lead to verify, not proof; a clean neighborhood is
+   a correct empty result.
 
 Live recall progressively walks from the pinned root. At each step the provider
 sees the complete bodies of the currently opened nodes and may select useful
@@ -189,6 +213,9 @@ committing the complete graph, advancing `.ready`, and appending a compact JSONL
 record. Per-chat Digest/Summary notes remain base-platform continuity and are
 not managed by this app. Memory stores compact metadata only for chats cited by durable notes.
 
-Reflection owns qualitative review of the nightly writer. If its interview
-finds weak inclusion, placement, correction, or pruning decisions, improve this
-maintenance prompt rather than adding a parallel write path.
+Memory owns the review of its own writer: the nightly self-reviews, recall
+audits, and consolidation leads are its evidence and its loop. Reflection reads
+only Memory's published health and how agents used recall; if either of them
+finds weak inclusion, placement, correction, or consolidation decisions, the fix
+is to this maintenance skill, never a parallel write path or a live handoff
+between the two jobs.
