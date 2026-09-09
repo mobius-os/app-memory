@@ -1789,6 +1789,31 @@ def _retire_unavailable_chat_source(
   return source_id, True
 
 
+def _described_link(line: str) -> re.Match | None:
+  """A dedicated routing bullet, never prose containing several claims."""
+  match = re.fullmatch(
+    r"(?P<prefix>\s*[-*+]\s+\[\[(?P<target>[^\]\n]+)\]\]\s*[—–-]\s*)(?P<cue>[^\n]*)",
+    line,
+  )
+  return match if match and "[[" not in match["cue"] else None
+
+
+def _note_routes(staging: Path, note_paths: set[str]) -> list[dict]:
+  """Supply incoming routing lines alongside the complete notes being edited."""
+  by_id = {Path(path).stem: path for path in note_paths}
+  routes = []
+  for source in [staging / "index.md", *sorted((staging / "mocs").glob("*.md"))]:
+    rel = source.relative_to(staging).as_posix()
+    if rel in _PROTECTED_DOCS or source.is_symlink() or not source.is_file():
+      continue
+    for line in source.read_text(encoding="utf-8").splitlines():
+      targets = {Path(raw.strip()).stem for raw in _WIKILINK_TARGET.findall(line)}
+      for target in sorted(targets & by_id.keys()):
+        routes.append({"from": rel, "to": by_id[target], "line": line,
+                       "editable_cue": _described_link(line) is not None})
+  return routes
+
+
 def _proposal_envelope(
   staging: Path,
   chats: list[dict],
@@ -1813,6 +1838,9 @@ def _proposal_envelope(
     ),
     "redacted_recent_chats": [],
   }
+  payload["existing_note_routes"] = _note_routes(
+    staging, {item["path"] for item in payload["existing_note_contents"]},
+  )
   if consolidation is not None:
     payload["consolidation"] = {
       key: value for key, value in consolidation.items()
@@ -1956,7 +1984,14 @@ duplicates remain visible without resending every description.
 `existing_note_contents` contains complete text only for a bounded set of the
 existing notes directly related to this work item. Never replace an existing
 note unless its path and full current text are present there; leave a follow-up
-instead. When DATA carries a `consolidation` object, this work item is one map
+instead. `existing_note_routes` supplies current incoming map/root lines for
+those notes. When correcting a claim, also correct contradicted routing cues
+in the SAME proposal using `links`. A links operation creates a missing link or
+updates the cue of an existing dedicated described-link bullet, preserving the
+rest of the map. Lines marked editable_cue=false contain contextual prose: do
+not replace them through links; leave a follow-up for full map consolidation.
+Do not request a different cue for a map you are fully rewriting in this proposal.
+When DATA carries a `consolidation` object, this work item is one map
 neighborhood: `consolidation.moc` is the map, every note listed in
 `member_paths` has its complete body in `existing_note_contents`, and
 `consolidation.leads` are Memory's own earlier follow-ups and experiments that
@@ -1969,8 +2004,10 @@ rules are absolute; follow them exactly:
   exact supplied handle; do not copy, infer, or preserve a deleted chat id
   anywhere in a note.
 - When ENRICHING an existing note, keep that note's current `source:` line
-  VERBATIM and only APPEND the short handle(s) for newly cited active chats or
-  the supplied `deleted:dNN` handle for a newly cited deleted chat.
+  with all existing entries and only APPEND fully prefixed short handle(s)
+  for newly cited active chats or the supplied `deleted:dNN` handle for a newly cited deleted chat.
+- Example: source: [chat:old] becomes source: [chat:old, chat:c01],
+  never source: [chat:old, c01]. Every entry needs its full prefix.
 - When creating a NEW note, use ONLY the provided short handles. If no supplied
   handle supports the fact, do NOT promote it at all — record it under followups
   instead. A note whose source cannot be cited from DATA is dropped, not
@@ -1980,7 +2017,7 @@ rules are absolute; follow them exactly:
   its `type: moc` frontmatter, keep a described `[[link]]` to every member you
   are not deleting or re-filing in this same proposal, and use the rewrite to
   repair stale cues, orphaned fragments, and dangling lines. For every other
-  map use `links`: trusted host code adds the described link from an existing
+  map use `links`: trusted host code adds or refreshes the described link from an existing
   root or MOC path without replacing unrelated map text.
 Delete only a
 redundant, merged, superseded, or demonstrably stale note/MOC; never the root
@@ -2753,6 +2790,23 @@ def _normalize_proposal(
           "malformed_frontmatter", "proposed fact has malformed frontmatter", path=rel,
         )
       frontmatter = content[4:frontmatter_end]
+      source_lines = [line.split(":", 1)[1].strip()
+                      for line in frontmatter.splitlines()
+                      if line.lstrip().startswith("source:")]
+      # Validate the complete evidence trail, not just recognizable substrings:
+      # [chat:old, c01] must not pass merely because chat:old is valid.
+      source_value = source_lines[0] if len(source_lines) == 1 else ""
+      tokens = ([item.strip().strip("\"'") for item in source_value[1:-1].split(",")]
+                if source_value[1:-1].strip() else [])
+      if (not source_value.startswith("[") or not source_value.endswith("]")
+          or not all(re.fullmatch(
+            r"(?:chat:[A-Za-z0-9_-]{1,128}|deleted-chat(?::[0-9a-f]{32})?)", token,
+          ) for token in tokens)):
+        raise ProposalValidationError(
+          "invalid_source_entry",
+          "every source list entry needs a supplied chat: or deleted: handle; bare handles are not citations",
+          path=rel,
+        )
       cited = _frontmatter_chat_sources(frontmatter)
       cites_deleted = bool(_DELETED_CHAT_SOURCE_RE.search(frontmatter))
       cited_deleted_ids = set(re.findall(
@@ -2866,8 +2920,25 @@ def _apply_normalized_proposal(
       if raw.strip()
     }
     if target_id in linked:
-      continue
-    next_text = text.rstrip() + f"\n\n- [[{target_id}]] — {link['cue']}\n"
+      next_lines = []
+      for line in text.splitlines(keepends=True):
+        if target_id not in {Path(raw.strip()).stem for raw in _WIKILINK_TARGET.findall(line)}:
+          next_lines.append(line)
+          continue
+        match = _described_link(line.rstrip("\r\n"))
+        if match is None:
+          raise ProposalValidationError(
+            "contextual_link_requires_map_rewrite",
+            "existing link is contextual prose; defer its change to full map consolidation",
+            path=source_rel,
+          )
+        ending = line[len(line.rstrip("\r\n")):]
+        next_lines.append(match["prefix"] + link["cue"] + ending)
+      next_text = "".join(next_lines)
+      if next_text == text:
+        continue
+    else:
+      next_text = text.rstrip() + f"\n\n- [[{target_id}]] — {link['cue']}\n"
     if len(next_text.encode("utf-8")) > _MAX_CONTENT:
       raise ValueError("graph link would make a routing document too large")
     source.write_text(next_text, encoding="utf-8")
