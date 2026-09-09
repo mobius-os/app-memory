@@ -45,3 +45,24 @@ That split keeps the responsibility clear: Memory reads, writes, and consolidate
 ## License
 
 MIT
+
+### Writer correction integrity
+
+Related note bodies include their incoming routing lines. The existing `links`
+operation now adds a missing route or explicitly updates a dedicated link
+bullet's cue; unrelated map prose, formatting and sibling routes remain intact.
+Contextual prose containing links requires map consolidation rather than a
+partial guessed rewrite. Corrections must propose contradicted cue changes
+alongside the note. Publication remains transactional; there is no automatic
+semantic rewriting or second writer.
+
+Source checks cover every entry in the provenance list. A malformed new handle
+cannot be accepted just because an older citation is valid; explicit examples
+show fully prefixed handles. Failure rejects the proposal without publishing
+partial work. Existing memories are not migrated by this source update.
+
+`tests/test_writer_integrity.py` reproduces the private evaluation's correction
+and provenance failures, including unrelated-content preservation, valid/deleted
+source expansion, protected maps, idempotence and whole-batch rollback. These
+are offline host tests, not evidence that every future model proposal will
+choose the right correction.

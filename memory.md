@@ -104,8 +104,12 @@ structurally redacted chat logs through its declared capability, compact graph
 identities, and the complete bodies of notes relevant to the focused work item.
 It may propose note upserts, note deletions, and described link operations. The
 trusted host applies links to an existing root or MOC without handing the model
-an unrelated map to rewrite. An existing note may be replaced only when its
-complete current text was supplied. In a map-neighborhood item the writer holds
+an unrelated map to rewrite. A link operation adds a missing link or refreshes
+the cue of an existing dedicated link bullet. Related note bodies arrive with
+their incoming routing lines: correct contradicted cues alongside the note,
+not on a later night. Contextual prose containing links needs full map
+consolidation; link operations never replace that surrounding prose. An existing
+note may be replaced only when its complete current text was supplied. In a map-neighborhood item the writer holds
 the map in full as well, so it may rewrite that one map — repairing cues,
 orphaned fragments, and dangling lines — provided every member it is not
 deleting or re-filing in the same proposal stays linked; the host rejects a
