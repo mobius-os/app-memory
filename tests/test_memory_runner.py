@@ -120,7 +120,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_active = lambda _app_id: True
       runner._collect_chat_intake = lambda: runner.ChatIntake([{"id": "chat-1", "messages": []}])
       runner._remember_pending_chat_ids(["chat-1"])
-      runner._proposal = lambda *_args: runner.ProposalOutcome(
+      runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome(
         "ok", _proposal(), "test", None, [],
       )
 
@@ -151,7 +151,7 @@ class MemoryRunnerTests(unittest.TestCase):
       proposal_started = threading.Event()
       finish_proposal = threading.Event()
 
-      def slow_proposal(*_args):
+      def slow_proposal(*_args, **_kwargs):
         proposal_started.set()
         if not finish_proposal.wait(5):
           raise TimeoutError("test did not release proposal")
@@ -202,7 +202,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       runner._collect_chat_intake = lambda: runner.ChatIntake([])
-      runner._proposal = lambda *_args: runner.ProposalOutcome(
+      runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome(
         status="degraded",
         proposal=None,
         provider=None,
@@ -438,7 +438,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       runner._collect_chat_intake = lambda: runner.ChatIntake([])
-      runner._proposal = lambda *_args: runner.ProposalOutcome(
+      runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome(
         status="degraded", proposal=None, provider=None, model=None,
         attempted_agents=[{
           "provider": "codex", "model": "gpt-test", "supported": True,
@@ -467,7 +467,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       runner._collect_chat_intake = lambda: runner.ChatIntake([])
-      runner._proposal = lambda *_args: runner.ProposalOutcome("ok", _reviewed({
+      runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome("ok", _reviewed({
         "summary": "replace the root", "followups": [], "deletes": [],
         "updates": [{"path": "index.md", "content": "# Empty root\n"}],
       }), "test", None, [])
@@ -527,7 +527,7 @@ class MemoryRunnerTests(unittest.TestCase):
         allowed_chat_ids={canonical},
         source_handles={"c01": canonical},
       )
-      runner._proposal = lambda *_args: runner.ProposalOutcome(
+      runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome(
         "ok", proposal, "test", None, [],
       )
       runner._remember_pending_chat_ids([canonical])
@@ -804,7 +804,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       runner._collect_chat_intake = lambda: runner.ChatIntake([])
-      runner._proposal = lambda *_args: runner.ProposalOutcome("ok", _reviewed({
+      runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome("ok", _reviewed({
         "summary": "no provider", "followups": [], "updates": [], "deletes": [],
       }), "test", None, [])
 

@@ -27,6 +27,7 @@ class ProviderFailure:
   code: str
   terminal: bool = False
   scope: str = "attempt"
+  detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,8 +92,9 @@ _TERMINAL_FAILURES = (
     "usage_limit",
     "provider",
     re.compile(
-      r"usage limit|spend limit|monthly limit|insufficient credits?|"
-      r"credit balance|quota exceeded",
+      r"usage limit|session limit|weekly limit|spend limit|monthly limit|"
+      r"hit your .{0,40}limit|insufficient credits?|credit balance|"
+      r"quota exceeded",
       re.I,
     ),
   ),
@@ -122,12 +124,22 @@ def classify_process_failure(
   stdout: str = "",
   stderr: str = "",
 ) -> ProviderFailure:
-  """Classify a failed confined CLI without treating transients as terminal."""
+  """Classify a failed confined CLI without treating transients as terminal.
+
+  The compact ``detail`` keeps the last line of evidence so a night of
+  ``process_exit_1`` in the run record still says what the CLI reported.
+  """
   evidence = f"{stderr}\n{stdout}"[-24_000:]
+  detail = _failure_detail(evidence)
   for code, scope, pattern in _TERMINAL_FAILURES:
     if pattern.search(evidence):
-      return ProviderFailure(code, terminal=True, scope=scope)
-  return ProviderFailure(f"process_exit_{returncode}")
+      return ProviderFailure(code, terminal=True, scope=scope, detail=detail)
+  return ProviderFailure(f"process_exit_{returncode}", detail=detail)
+
+
+def _failure_detail(evidence: str, limit: int = 240) -> str:
+  lines = [line.strip() for line in evidence.splitlines() if line.strip()]
+  return lines[-1][-limit:] if lines else ""
 
 
 def _codex_agent_text(stdout: str) -> str:
