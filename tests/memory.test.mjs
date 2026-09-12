@@ -21,6 +21,15 @@ test('Memory tunes recall without asking the user to manage search limits', () =
   assert.match(source, /if \(!settingsLoaded\)[\s\S]*setSettingsStatus\('error'\)/)
 })
 
+test('agent settings follow the canonical configured provider status', () => {
+  const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
+  assert.match(
+    source,
+    /\.filter\(\(\[, value\]\) => value && value\.configured\)/,
+  )
+  assert.doesNotMatch(source, /\bvalue\.authenticated\b/)
+})
+
 test('graph maintenance diagnostics stay internal instead of posing as owner actions', () => {
   const source = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   const constants = readFileSync(new URL('../constants.js', import.meta.url), 'utf8')
