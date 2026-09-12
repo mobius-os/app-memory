@@ -694,7 +694,7 @@ export default function App({ appId, token }) {
         const data = await statusRes.json();
         connected = new Set(
           Object.entries(data || {})
-            .filter(([, value]) => value && value.authenticated)
+            .filter(([, value]) => value && value.configured)
             .map(([key]) => key),
         );
         setConnectedProviders(connected);
