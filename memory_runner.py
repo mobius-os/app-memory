@@ -49,6 +49,7 @@ from memory_text_provider import (
   run_text,
   terminate_active_text_processes,
 )
+from model_selection import load_settings as load_model_settings
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -488,11 +489,7 @@ def _app_active(app_id: int) -> bool:
 
 def _settings(app_id: int) -> dict:
   path = DATA_DIR / "apps" / str(app_id) / "settings.json"
-  try:
-    value = json.loads(path.read_text(encoding="utf-8"))
-  except (OSError, ValueError):
-    return {}
-  return value if isinstance(value, dict) else {}
+  return load_model_settings(path)
 
 
 def _agent_choices(app_id: int) -> list[dict]:

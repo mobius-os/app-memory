@@ -16,6 +16,7 @@ import { ArrowLeft, ChevronDown, SettingsCog } from '@openai/apps-sdk-ui/compone
 import { NOTE_BASE, PALETTE, S } from './constants.js'
 import { CSS } from './theme.js'
 import { makeSharedMemoryStore } from './storage.js'
+import { migrateAgentModels } from './model-selection.mjs'
 import {
   MEMORY_SANITIZE_OPTIONS,
   buildLocalGraphData,
@@ -683,9 +684,17 @@ export default function App({ appId, token }) {
         throw new Error('Could not load agent settings.');
       }
       const settings = settingsRes.ok ? await settingsRes.json() : {};
-      const safeSettings = settings && typeof settings === 'object' && !Array.isArray(settings)
+      const loadedSettings = settings && typeof settings === 'object' && !Array.isArray(settings)
         ? settings
         : {};
+      const safeSettings = migrateAgentModels(loadedSettings);
+      if (safeSettings !== loadedSettings) {
+        fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, {
+          method: 'PUT',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify(safeSettings),
+        }).catch(() => {});
+      }
       settingsLoaded = true;
       setSettingsStatus('ready');
       setAgentSettingsExtra(safeSettings);
@@ -694,7 +703,7 @@ export default function App({ appId, token }) {
         const data = await statusRes.json();
         connected = new Set(
           Object.entries(data || {})
-            .filter(([, value]) => value && value.authenticated)
+            .filter(([, value]) => value && value.configured)
             .map(([key]) => key),
         );
         setConnectedProviders(connected);
