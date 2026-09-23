@@ -605,7 +605,7 @@ def _pending_read_traces() -> list[dict]:
         record = json.loads(line)
       except ValueError:
         continue
-      if not isinstance(record, dict) or record.get("schema") != 3:
+      if not isinstance(record, dict) or record.get("schema") not in {3, 4}:
         continue
       read_id = record.get("read_id")
       at = record.get("at")
@@ -696,9 +696,11 @@ def _audit_reads(
   audits: list[dict] = []
   hindsight_chats = hindsight_chats or {}
   for trace in traces:
-    live_files = [
-      path for path in trace.get("files", []) if isinstance(path, str)
-    ] if isinstance(trace.get("files"), list) else []
+    raw_candidates = trace.get("candidates", trace.get("files", []))
+    candidate_files = [
+      path for path in raw_candidates
+      if isinstance(path, str)
+    ] if isinstance(raw_candidates, list) else []
     traversal = trace.get("traversal")
     live_opened = (
       [item for item in traversal.get("opened", []) if isinstance(item, dict)]
@@ -728,7 +730,7 @@ def _audit_reads(
             break
     source_commit = str(trace.get("commit") or commit)
     selected_nodes = []
-    for path in live_files:
+    for path in candidate_files:
       try:
         content = read_revision_file(source_commit, path)
       except (OSError, UnicodeError, ValueError):
@@ -759,14 +761,14 @@ def _audit_reads(
       "question": str(trace["question"]),
       "live": {
         "opened": live_opened,
-        "selected": live_files,
+        "selected": candidate_files,
         "selected_nodes": selected_nodes,
         "stop_reason": (
           traversal.get("stop_reason") if isinstance(traversal, dict) else None
         ),
         "frontier_at_stop": live_frontier,
         "host_selection_override": _host_selection_override(
-          traversal, live_files,
+          traversal, candidate_files,
         ),
         "selection_guidance": live_guidance,
       },
@@ -2066,9 +2068,10 @@ Complete all four nightly duties in one coherent pass:
    `clear` guidance that the evidence shows is harmful or stale, or `keep` it
    when evidence is insufficient or mixed. This changes selection only: never
    weaken recall-by-default cues, source-of-truth verification, graph
-   confinement, or the 12-note safety ceiling. Do not optimize note counts or
-   treat a full ceiling as success. Base the action on named read ids and prefer
-   no change over a lesson that merely fits one title collision.
+   confinement, or incomplete-discovery warnings. Do not optimize note counts
+   or treat an emergency context boundary as success. Base the action on named
+   read ids and prefer no change over a lesson that merely fits one title
+   collision.
 4. While reviewing chats and supplied complete note contents, update or delete
    facts that are demonstrably stale, superseded, or obsolete. Identity overlap
    is a reason to inspect a supplied note, never proof that it is stale.

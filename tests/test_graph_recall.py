@@ -77,7 +77,8 @@ def test_traversal_opens_per_parent_and_returns_only_selected_full_node(monkeypa
   assert [decision["round"] for decision in result.decisions] == [1, 2, 3]
   recall = memory_search._answer(result)
   assert recall.files == ("notes/b.md",)
-  assert bodies["notes/b.md"].rstrip() in recall.answer
+  assert bodies["notes/b.md"].rstrip() not in recall.answer
+  assert recall.notes[0]["excerpt"] == "route to b"
   assert len(bodies["notes/b.md"]) > 900
 
 
@@ -111,7 +112,7 @@ def test_progressive_live_reader_applies_and_traces_nightly_guidance(
   )
 
   assert "smallest sufficient subset" in prompts[0]
-  assert "capacity for unusually broad requests" in prompts[0]
+  assert "no answer-note count target or cap" in prompts[0]
   assert "Reject title-word collisions" in prompts[0]
   assert result.decisions[0]["selection_guidance"] == {
     "run_id": "night-1",
@@ -176,7 +177,7 @@ def test_broad_lexical_collision_stays_inside_host_context_ceiling(monkeypatch):
     memory_search.MAX_OPENED_CONTENT_CHARS
   )
   assert max(map(len, prompts)) < memory_search.MAX_OPENED_CONTENT_CHARS + 30_000
-  assert len(result.selected) <= memory_search.MAX_SELECTED_NODES
+  assert memory_search._answer(result).discovery_complete is False
 
 
 def test_progressive_reader_excludes_unreachable_nodes(monkeypatch):
@@ -592,10 +593,11 @@ def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
   latest = json.loads(next((tmp_path / "app-state" / "read-trace").glob("*.json")).read_text())
   logged = json.loads(next((tmp_path / "app-state" / "read-log").glob("*.jsonl")).read_text())
   assert latest == logged
-  assert logged["schema"] == 3
+  assert logged["schema"] == 4
   assert logged["status"] == "completed"
   assert logged["question"] == "Which detailed fact matters?"
-  assert logged["files"] == ["notes/b.md"]
+  assert "files" not in logged
+  assert logged["candidates"] == ["notes/b.md"]
   assert logged["traversal"]["opened"][1]["path"] == "mocs/a.md"
   assert logged["traversal"]["selected"] == ["notes/b.md"]
 
@@ -618,7 +620,7 @@ def test_failed_read_is_observable_without_affecting_usage(monkeypatch, tmp_path
   assert trace["status"] == "failed"
   assert trace["reason"] == "not_ready"
   assert trace["commit"] is None
-  assert trace["files"] == []
+  assert "files" not in trace
   assert trace["traversal"] == {}
   assert not (tmp_path / "app-state" / "usage.json").exists()
   assert not (tmp_path / "app-state" / "read-log").exists()
@@ -652,13 +654,23 @@ def test_failed_receipt_exposes_only_a_safe_reason_enum():
     reason=memory_search.RESULT_REASON_NOT_READY,
   )) == {
     "status": memory_search.RESULT_FAILED,
+    "phase": "catalog",
+    "lookup_id": None,
     "reason": memory_search.RESULT_REASON_NOT_READY,
+    "discovery_complete": True,
+    "display": {"label": "Memory lookup failed"},
   }
   assert memory_search._result_payload(memory_search.RecallResult(
     memory_search.RESULT_FAILED,
     "Memory lookup failed.",
     reason="/private/path",
-  )) == {"status": memory_search.RESULT_FAILED}
+  )) == {
+    "status": memory_search.RESULT_FAILED,
+    "phase": "catalog",
+    "lookup_id": None,
+    "discovery_complete": True,
+    "display": {"label": "Memory lookup failed"},
+  }
 
 
 def test_empty_receipt_is_an_explicit_no_relevant_result():
@@ -667,5 +679,12 @@ def test_empty_receipt_is_an_explicit_no_relevant_result():
     "No relevant memories.",
   )) == {
     "status": memory_search.RESULT_EMPTY,
+    "phase": "catalog",
+    "lookup_id": None,
     "reason": memory_search.RESULT_REASON_NO_RELEVANT_RESULT,
+    "discovery_complete": True,
+    "display": {
+      "label": "Searched Memory — nothing relevant",
+      "detail": "Nothing relevant is recorded yet.",
+    },
   }

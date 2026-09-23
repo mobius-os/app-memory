@@ -183,7 +183,7 @@ test('manifest activates Memory only through a system prompt contribution', () =
   assert.equal(manifest.schedule.initialize_on_install, true)
   assert.equal(manifest.embeds_agent, false)
   for (const file of [
-    'memory-core.md', 'memory.md', 'memory_search.py', 'memory_runner.py',
+    'memory-core.md', 'memory.md', 'memory_search.py', 'memory_read.py', 'memory_runner.py',
     'memory_store.py', 'memory_graph.py', 'memory_text_provider.py',
     'personalization_profile.py',
   ]) {
@@ -196,18 +196,30 @@ test('manifest activates Memory only through a system prompt contribution', () =
   assert.equal('esm_deps' in manifest.runtime, false)
 })
 
-test('reader returns verified graph-relative file pointers', () => {
+test('reader returns a bounded catalogue then verified pinned body pages', () => {
   const reader = readFileSync(new URL('../memory_search.py', import.meta.url), 'utf8')
+  const expander = readFileSync(new URL('../memory_read.py', import.meta.url), 'utf8')
   const corePrompt = readFileSync(new URL('../memory-core.md', import.meta.url), 'utf8')
   const provider = readFileSync(new URL('../memory_text_provider.py', import.meta.url), 'utf8')
-  assert.match(reader, /FILES:/)
+  assert.doesNotMatch(reader, /FILES:/)
+  assert.match(reader, /MOBIUS_MEMORY_RESULT_V2:/)
   assert.match(reader, /ready_pointer\(\)/)
   assert.match(reader, /read_revision_file\(self\.commit, path\)/)
   assert.match(reader, /graph\.open\("index", 0, None\)/)
   assert.match(reader, /child_id in allowed\[parent_id\]/)
   assert.match(reader, /Confined graph traversal/)
   assert.match(reader, /MOBIUS_RUN_TOKEN/)
-  assert.match(reader, /recall_execution\(fingerprint\)/)
+  assert.match(reader, /recall_execution\(request\.lookup_id\)/)
+  assert.match(expander, /load_recall_manifest\(lookup_id\)/)
+  assert.match(expander, /read_revision_file\(commit, note\["path"\]/)
+  assert.match(expander, /byte_start/)
+  assert.match(expander, /next_cursor/)
+  assert.match(corePrompt, /Read every catalogue page before deciding/)
+  assert.doesNotMatch(corePrompt, /python3 <source_dir>\/memory_read\.py/)
+  assert.match(corePrompt,
+    /python3 <source_dir>\/memory_search\.py "<lookup_id>" "catalog"/)
+  assert.match(corePrompt,
+    /python3 <source_dir>\/memory_search\.py "<lookup_id>" '\["candidate-id"\]'/)
   assert.match(corePrompt, /blank initial[\s\S]*live session id[\s\S]*not a completed Memory read/)
   assert.match(corePrompt, /never start the same lookup again while its original session is running/)
   assert.match(provider, /"--tools", ""/)

@@ -55,6 +55,7 @@
     "memory-core.md",
     "memory.md",
     "memory_search.py",
+    "memory_read.py",
     "memory_text_provider.py",
     "memory_runner.py",
     "model_selection.py",

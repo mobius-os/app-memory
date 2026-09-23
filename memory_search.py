@@ -4,25 +4,30 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 from memory_store import (
+  RECALL_EXECUTION_RETENTION_SECONDS,
   load_recall_guidance,
   load_read_trace,
   read_revision_file,
   ready_pointer,
   recall_execution,
   record_read,
+  safe_chat_id,
 )
 from memory_text_provider import (
   RunProviderHealth,
@@ -32,7 +37,6 @@ from memory_text_provider import (
 )
 
 
-MAX_SELECTED_NODES = 12
 # Host safety ceilings, not retrieval targets. A malformed model decision or
 # broad lexical collision must not make one focused lookup unbounded.
 MAX_OPENED_NODES = 64
@@ -40,14 +44,20 @@ MAX_OPENED_CONTENT_CHARS = 160_000
 AGENT_TIMEOUT = int(os.environ.get("MEMORY_READER_TIMEOUT", "90"))
 USAGE_PREFLIGHT_TIMEOUT = 1.25
 
-RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V1:"
+RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V2:"
 RESULT_HIT = "hit"
 RESULT_EMPTY = "empty"
 RESULT_FAILED = "failed"
 RESULT_REASON_NO_RELEVANT_RESULT = "no_relevant_result"
 RESULT_REASON_NOT_READY = "not_ready"
 RESULT_REASON_READ_FAILED = "read_failed"
-EXECUTION_RECEIPT_SCHEMA = 1
+EXECUTION_RECEIPT_SCHEMA = 3
+# A catalogue is intentionally bounded for provider-facing delivery, but it is
+# not forced beneath the chat UI's 4 KiB inline-display heuristic. The platform
+# parses Memory's receipt before it stores a compact display excerpt, while
+# 12 KiB avoids another full agent/tool round trip for a handful of names.
+TOOL_OUTPUT_PAGE_CHARS = 12_000
+MAX_CATALOG_EXCERPT_CHARS = 300
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 _WORD = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
@@ -122,6 +132,10 @@ class RecallResult:
   traversal: TraversalResult | None = None
   reason: str | None = None
   reused: bool = False
+  lookup_id: str | None = None
+  read_id: str | None = None
+  cursor_secret: str | None = None
+  discovery_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -133,6 +147,7 @@ class RecallRequest:
   commit: str | None
   guidance: dict
   invocation_fingerprint: str | None
+  lookup_id: str
 
 
 def _execution_identity() -> str | None:
@@ -163,7 +178,7 @@ def _invocation_fingerprint(
   if identity is None:
     return None
   payload = {
-    "schema": 1,
+    "schema": 2,
     "run_identity": identity,
     "chat_id": chat_id,
     "commit": commit,
@@ -179,15 +194,17 @@ def _prepare_request(question: str, chat_id: str) -> RecallRequest:
   pointer = ready_pointer()
   commit = pointer["commit"] if pointer else None
   guidance = load_recall_guidance() or {}
+  fingerprint = (
+    _invocation_fingerprint(question, chat_id, commit, guidance)
+    if commit else None
+  )
   return RecallRequest(
     question=question,
     chat_id=chat_id,
     commit=commit,
     guidance=guidance,
-    invocation_fingerprint=(
-      _invocation_fingerprint(question, chat_id, commit, guidance)
-      if commit else None
-    ),
+    invocation_fingerprint=fingerprint,
+    lookup_id=fingerprint or secrets.token_hex(32),
   )
 
 
@@ -351,8 +368,8 @@ Opened nodes and selected nodes are different:
 You may expand several active parents in one decision. Choose every sibling
 branch needed for the request now: a parent is not offered again after its
 children have been considered. Never invent an id.
-The host returns at most {MAX_SELECTED_NODES} selected nodes. That ceiling is
-capacity for unusually broad requests, never a target.{nightly_guidance}
+There is no answer-note count target or cap. Select every opened node that is
+materially relevant, and no irrelevant padding.{nightly_guidance}
 
 {finish_instruction}
 
@@ -683,10 +700,7 @@ def traverse(
       "run_id": str(guidance_record.get("run_id") or "")[:128],
       "instruction": guidance,
     }
-  selected = tuple(
-    by_id[node_id] for node_id in selected_ids[:MAX_SELECTED_NODES]
-    if node_id in by_id
-  )
+  selected = tuple(by_id[node_id] for node_id in selected_ids if node_id in by_id)
   return TraversalResult(
     status=RESULT_HIT if selected else RESULT_EMPTY,
     commit=commit,
@@ -845,8 +859,8 @@ def _answer(traversal: TraversalResult) -> RecallResult:
       "No relevant memories.",
       commit=traversal.commit,
       traversal=traversal,
+      discovery_complete=traversal.stop_reason != "navigator_safety_limit",
     )
-  sections = []
   files = []
   notes = []
   for node in traversal.selected:
@@ -854,19 +868,17 @@ def _answer(traversal: TraversalResult) -> RecallResult:
     notes.append({
       "id": node.id,
       "path": node.path,
-      "title": node.title,
+      "title": node.title[:120],
+      "excerpt": node.description[:MAX_CATALOG_EXCERPT_CHARS],
     })
-    sections.append(
-      f"--- MEMORY NODE: {node.title} [{node.path}] ---\n"
-      f"{node.content.rstrip()}"
-    )
   return RecallResult(
     RESULT_HIT,
-    "Relevant memories (complete selected nodes):\n\n" + "\n\n".join(sections),
+    "Relevant Memory catalogue:",
     files=tuple(files),
     commit=traversal.commit,
     notes=tuple(notes),
     traversal=traversal,
+    discovery_complete=traversal.stop_reason != "navigator_safety_limit",
   )
 
 
@@ -899,13 +911,24 @@ def retrieve(question: str) -> RecallResult:
   return _retrieve_prepared(_prepare_request(question, ""))
 
 
-def _execution_receipt(result: RecallResult, *, recorded: bool = True) -> dict:
+def _execution_receipt(
+  result: RecallResult,
+  request: RecallRequest,
+) -> dict:
+  created = datetime.now(UTC)
   return {
     "schema": EXECUTION_RECEIPT_SCHEMA,
+    "lookup_id": request.lookup_id,
     "status": result.status,
     "commit": result.commit,
-    "files": list(result.files),
-    "recorded": recorded,
+    "chat_id": safe_chat_id(request.chat_id),
+    "read_id": result.read_id,
+    "cursor_secret": result.cursor_secret,
+    "candidates": list(result.notes),
+    "expires_at": (
+      created + timedelta(seconds=RECALL_EXECUTION_RETENTION_SECONDS)
+    ).isoformat(),
+    "discovery_complete": result.discovery_complete,
   }
 
 
@@ -920,58 +943,83 @@ def _cached_result(
     or receipt.get("schema") != EXECUTION_RECEIPT_SCHEMA
     or receipt.get("status") not in {RESULT_HIT, RESULT_EMPTY}
     or receipt.get("commit") != request.commit
-    or (
-      "recorded" in receipt
-      and not isinstance(receipt.get("recorded"), bool)
-    )
+    or not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("cursor_secret") or ""))
   ):
     return None
-  files = receipt.get("files")
+  candidates = receipt.get("candidates")
   if (
-    not isinstance(files, list)
-    or len(files) > MAX_SELECTED_NODES
-    or any(not isinstance(path, str) for path in files)
-    or len(files) != len(set(files))
-    or (receipt["status"] == RESULT_HIT) != bool(files)
+    receipt.get("lookup_id") != request.lookup_id
+    or receipt.get("chat_id") != safe_chat_id(request.chat_id)
+    or not isinstance(candidates, list)
+    or any(not isinstance(item, dict) for item in candidates)
+    or (receipt["status"] == RESULT_HIT) != bool(candidates)
   ):
     return None
   try:
-    if files:
-      graph = RevisionGraph(
-        request.commit,
-        json.loads(read_revision_file(request.commit, "graph.json")),
-      )
-      by_path: dict[str, str] = {}
-      for node_id, metadata in graph.by_id.items():
-        path = str(metadata.get("path") or "")
-        if path in by_path:
-          return None
-        by_path[path] = node_id
-      if any(path not in by_path for path in files):
+    graph = RevisionGraph(
+      request.commit,
+      json.loads(read_revision_file(request.commit, "graph.json")),
+    )
+    clean_candidates = []
+    seen: set[str] = set()
+    for candidate in candidates:
+      node_id = candidate.get("id")
+      path = candidate.get("path")
+      if not isinstance(path, str) or path in seen:
         return None
-      selected = tuple(
-        graph.open(by_path[path], 0, None) for path in files
-      )
-    else:
-      selected = ()
+      if (
+        not isinstance(node_id, str)
+        or node_id not in graph.by_id
+        or path != graph.by_id[node_id].get("path")
+      ):
+        # Crash-window repair traces historically retained paths, not graph
+        # ids. A filename stem is only a hint: resolve the unique owning node
+        # from the pinned graph rather than assuming id == stem.
+        matches = [
+          candidate_id for candidate_id, metadata in graph.by_id.items()
+          if metadata.get("path") == path
+        ]
+        if len(matches) != 1:
+          return None
+        node_id = matches[0]
+      seen.add(path)
+      metadata = graph.by_id[node_id]
+      clean_candidates.append({
+        "id": node_id,
+        "path": path,
+        "title": str(metadata.get("title") or node_id)[:120],
+        "excerpt": str(metadata.get("description") or "")[
+          :MAX_CATALOG_EXCERPT_CHARS
+        ],
+      })
   except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
     return None
-  traversal = TraversalResult(
-    status=receipt["status"],
+  return RecallResult(
+    receipt["status"],
+    (
+      "Relevant Memory catalogue:"
+      if receipt["status"] == RESULT_HIT else "No relevant memories."
+    ),
+    files=tuple(item["path"] for item in clean_candidates),
     commit=request.commit,
-    rounds=0,
-    stop_reason="execution_reused",
-    opened=selected,
-    selected=selected,
+    notes=tuple(clean_candidates),
+    reused=True,
+    lookup_id=request.lookup_id,
+    read_id=(
+      receipt.get("read_id")
+      if re.fullmatch(r"[0-9a-f]{32}", str(receipt.get("read_id") or ""))
+      else None
+    ),
+    cursor_secret=receipt["cursor_secret"],
+    discovery_complete=receipt.get("discovery_complete") is not False,
   )
-  return replace(_answer(traversal), reused=True)
 
 
-def _record_result(result: RecallResult, request: RecallRequest) -> bool:
+def _record_result(result: RecallResult, request: RecallRequest) -> dict | None:
   """Persist one new CLI observation; reused results deliberately skip this."""
   try:
     if result.status == RESULT_FAILED:
-      record_read(
+      return record_read(
         result.commit,
         request.question,
         [],
@@ -980,101 +1028,207 @@ def _record_result(result: RecallResult, request: RecallRequest) -> bool:
         reason=result.reason,
         invocation_fingerprint=request.invocation_fingerprint,
       )
-      return True
-    if result.commit and result.traversal:
-      record_read(
+    if result.commit:
+      return record_read(
         result.commit,
         request.question,
         list(result.files),
         request.chat_id,
-        traversal=result.traversal.trace(),
+        traversal=(result.traversal.trace() if result.traversal else None),
+        discovery_complete=result.discovery_complete,
         invocation_fingerprint=request.invocation_fingerprint,
       )
-      return True
   except (OSError, ValueError):
     sys.stderr.write("warning: Memory read history could not be recorded\n")
-  return False
+  return None
 
 
 def _execute_request(request: RecallRequest) -> RecallResult:
   """Run one physical-turn lookup at most once, including concurrent retries."""
   fingerprint = request.invocation_fingerprint
-  if request.commit is None or fingerprint is None:
+  if request.commit is None:
     result = _retrieve_prepared(request)
     _record_result(result, request)
-    return result
+    return replace(result, lookup_id=request.lookup_id)
   result: RecallResult | None = None
   try:
-    with recall_execution(fingerprint) as execution:
+    with recall_execution(request.lookup_id) as execution:
       receipt = execution.load()
       cached = _cached_result(request, receipt)
       if cached is not None:
-        result = cached
-        if receipt.get("recorded") is False and _record_result(cached, request):
-          try:
-            execution.store(_execution_receipt(cached))
-          except (OSError, ValueError):
-            sys.stderr.write(
-              "warning: Memory recall reuse receipt could not be updated\n"
+        if cached.read_id is None:
+          trace = _record_result(cached, request)
+          if not (
+            trace
+            and re.fullmatch(r"[0-9a-f]{32}", str(trace.get("read_id") or ""))
+          ):
+            return RecallResult(
+              RESULT_FAILED, "Memory lookup failed.", commit=request.commit,
+              reason=RESULT_REASON_READ_FAILED, lookup_id=request.lookup_id,
             )
-        return result
+          cached = replace(cached, read_id=trace["read_id"])
+          try:
+            execution.store(_execution_receipt(cached, request))
+          except (OSError, ValueError):
+            return RecallResult(
+              RESULT_FAILED, "Memory lookup failed.", commit=request.commit,
+              reason=RESULT_REASON_READ_FAILED, lookup_id=request.lookup_id,
+            )
+        return cached
 
       # Repair the narrow crash window where telemetry reached disk but the
       # compact execution receipt did not. The latest trace contains no note
       # bodies and is accepted only for this exact hashed physical-turn input.
-      trace = load_read_trace(request.chat_id)
+      trace = load_read_trace(request.chat_id) if fingerprint else None
       if (
         trace
         and trace.get("invocation_fingerprint") == fingerprint
         and trace.get("status") == "completed"
       ):
+        candidate_paths = trace.get("candidates") or trace.get("files") or []
         cached = _cached_result(request, {
           "schema": EXECUTION_RECEIPT_SCHEMA,
-          "status": RESULT_HIT if trace.get("files") else RESULT_EMPTY,
+          "status": RESULT_HIT if candidate_paths else RESULT_EMPTY,
           "commit": trace.get("commit"),
-          "files": trace.get("files"),
+          "lookup_id": request.lookup_id,
+          "chat_id": safe_chat_id(request.chat_id),
+          "read_id": trace.get("read_id"),
+          "cursor_secret": secrets.token_hex(32),
+          "candidates": [
+            {"id": Path(path).stem, "path": path}
+            for path in candidate_paths
+          ],
+          "discovery_complete": trace.get("discovery_complete") is not False,
         })
         if cached is not None:
           result = cached
           try:
-            execution.store(_execution_receipt(cached))
+            execution.store(_execution_receipt(cached, request))
           except (OSError, ValueError):
             sys.stderr.write(
               "warning: Memory recall reuse receipt could not be repaired\n"
             )
+            return RecallResult(
+              RESULT_FAILED,
+              "Memory lookup failed.",
+              commit=request.commit,
+              reason=RESULT_REASON_READ_FAILED,
+              lookup_id=request.lookup_id,
+            )
           return result
 
       result = _retrieve_prepared(request)
-      recorded = _record_result(result, request)
+      trace = _record_result(result, request)
+      result = replace(
+        result,
+        lookup_id=request.lookup_id,
+        read_id=(
+          trace.get("read_id")
+          if trace and re.fullmatch(r"[0-9a-f]{32}", str(trace.get("read_id") or ""))
+          else None
+        ),
+        cursor_secret=secrets.token_hex(32),
+      )
       # Structural failures are never sticky: repairing the graph and retrying
       # inside the same turn must be able to perform a fresh lookup.
       if result.status in {RESULT_HIT, RESULT_EMPTY}:
         try:
-          execution.store(_execution_receipt(result, recorded=recorded))
+          execution.store(_execution_receipt(result, request))
         except (OSError, ValueError):
-          # The completed provider result remains authoritative. A receipt
-          # write failure must never cause a second provider call in this
-          # process; the idempotent trace can repair reuse on the next retry.
           sys.stderr.write(
             "warning: Memory recall reuse receipt could not be stored\n"
           )
+          return RecallResult(
+            RESULT_FAILED,
+            "Memory lookup failed.",
+            commit=request.commit,
+            reason=RESULT_REASON_READ_FAILED,
+            lookup_id=request.lookup_id,
+          )
+        if result.read_id is None:
+          return RecallResult(
+            RESULT_FAILED, "Memory lookup failed.", commit=request.commit,
+            reason=RESULT_REASON_READ_FAILED, lookup_id=request.lookup_id,
+          )
       return result
   except (OSError, ValueError):
-    # Coordination is an optimization and safety boundary, not a prerequisite
-    # for reading Memory. Preserve the original lookup contract if app-state
-    # storage itself is temporarily unavailable.
-    if result is None:
-      result = _retrieve_prepared(request)
-      _record_result(result, request)
-    return result
+    # V2 expansion depends on the pinned manifest. A catalogue without a
+    # readable manifest would advertise full reads that cannot succeed, so fail
+    # honestly rather than falling back to a second uncoordinated discovery.
+    return RecallResult(
+      RESULT_FAILED,
+      "Memory lookup failed.",
+      commit=request.commit,
+      reason=RESULT_REASON_READ_FAILED,
+      lookup_id=request.lookup_id,
+    )
 
 
-def _result_payload(result: RecallResult) -> dict:
-  payload = {"status": result.status}
+def _cursor_auth(secret: str, *parts: object) -> str:
+  """Authenticate one continuation without exposing the manifest-only key."""
+  if not re.fullmatch(r"[0-9a-f]{64}", str(secret or "")):
+    raise ValueError("invalid Memory cursor secret")
+  message = "\0".join(str(part) for part in parts).encode("utf-8")
+  return hmac.new(bytes.fromhex(secret), message, hashlib.sha256).hexdigest()[:32]
+
+
+def _catalog_cursor(result: RecallResult, end: int) -> str:
+  signature = _cursor_auth(result.cursor_secret or "", "catalog", end)
+  return f"catalog:{end}:{signature}"
+
+
+def _catalog_page(
+  result: RecallResult, start: int = 0,
+) -> tuple[str, list[dict], dict]:
+  notes: list[dict] = []
+  for note in result.notes[start:]:
+    candidate_notes = [*notes, dict(note)]
+    end = start + len(candidate_notes)
+    candidate_page = {
+      "candidate_count": len(result.notes),
+      "complete": end >= len(result.notes),
+    }
+    if not candidate_page["complete"]:
+      candidate_page["next_cursor"] = _catalog_cursor(result, end)
+    payload = _result_payload(
+      result, notes=candidate_notes, page=candidate_page,
+    )
+    rendered = (
+      result.answer + "\n" + RESULT_PREFIX
+      + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+      + "\n"
+    )
+    if notes and len(rendered) > TOOL_OUTPUT_PAGE_CHARS:
+      break
+    notes = candidate_notes
+  end = start + len(notes)
+  page = {
+    "candidate_count": len(result.notes),
+    "complete": end >= len(result.notes),
+  }
+  if not page["complete"]:
+    page["next_cursor"] = _catalog_cursor(result, end)
+  # The structured receipt is the catalogue. Avoid duplicating every summary
+  # in prose: duplication consumes the very inline budget paging protects.
+  return result.answer, notes, page
+
+
+def _result_payload(
+  result: RecallResult,
+  *,
+  notes: list[dict] | None = None,
+  page: dict | None = None,
+) -> dict:
+  payload = {
+    "status": result.status,
+    "phase": "catalog",
+    "lookup_id": result.lookup_id,
+  }
   if result.status == RESULT_HIT:
-    # This is a compact product receipt, not the memory transport. Complete
-    # selected node contents are already in the human-readable output above.
-    payload["notes"] = list(result.notes[:MAX_SELECTED_NODES])
+    payload["notes"] = notes or []
+    payload["page"] = page or {
+      "candidate_count": len(result.notes), "complete": True,
+    }
   elif result.status == RESULT_EMPTY:
     # Empty is a successful, explicit retrieval outcome. Carry a stable enum so
     # tool adapters do not have to infer "nothing relevant" from blank stdout.
@@ -1088,21 +1242,94 @@ def _result_payload(result: RecallResult) -> dict:
     payload["reason"] = result.reason
   if result.reused:
     payload["reused"] = True
+  payload["discovery_complete"] = result.discovery_complete
+  payload["display"] = _display(
+    result.status,
+    phase="catalog",
+    page=payload.get("page"),
+    note_count=len(notes or []),
+    reused=result.reused,
+    discovery_complete=result.discovery_complete,
+  )
   return payload
 
 
+def _display(
+  status: str,
+  *,
+  phase: str,
+  page: dict | None = None,
+  note_count: int = 0,
+  reused: bool = False,
+  discovery_complete: bool = True,
+) -> dict[str, str]:
+  """Return bounded owner-facing copy; platform transport stays semantic-free."""
+  if status == RESULT_FAILED:
+    return {"label": "Memory lookup failed"}
+  if status == RESULT_EMPTY:
+    display = {
+      "label": "Searched Memory — nothing relevant",
+      "detail": "Nothing relevant is recorded yet.",
+    }
+  elif phase == "catalog":
+    count = (page or {}).get("candidate_count")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+      count = note_count
+    noun = "note" if count == 1 else "notes"
+    display = {
+      "label": (
+        f"Reused Memory search — {count} relevant {noun}"
+        if reused else f"Found {count} relevant {noun} in Memory"
+      ),
+      "detail": (
+        f"Showing {note_count} of {count} relevant {noun}"
+        + (
+          "; more catalogue entries are available."
+          if (page or {}).get("complete") is False else "."
+        )
+      ),
+    }
+  else:
+    requested = (page or {}).get("requested_count")
+    complete = (page or {}).get("complete") is True
+    if complete and isinstance(requested, int) and requested > 0:
+      noun = "note" if requested == 1 else "notes"
+      label = f"Finished reading {requested} {noun} from Memory"
+    else:
+      label = "Read a Memory page"
+    display = {
+      "label": label,
+      "detail": (
+        "The requested content is complete."
+        if complete else "This content continues on another page."
+      ),
+    }
+  if not discovery_complete:
+    display["warning"] = (
+      "Discovery stopped at a safety boundary; this catalogue may be incomplete."
+    )
+  return display
+
+
 def _emit_result(result: RecallResult) -> int:
-  print(result.answer)
-  if result.files:
-    print("FILES: " + ", ".join(result.files))
+  if result.status == RESULT_HIT:
+    output, notes, page = _catalog_page(result)
+  else:
+    output, notes, page = result.answer, [], None
+  print(output)
   print(RESULT_PREFIX + json.dumps(
-    _result_payload(result), ensure_ascii=True, separators=(",", ":"),
+    _result_payload(result, notes=notes, page=page),
+    ensure_ascii=True, separators=(",", ":"),
   ))
   return 1 if result.status == RESULT_FAILED else 0
 
 
-def run() -> int:
-  args = [arg.strip() for arg in sys.argv[1:] if arg.strip()]
+def run(args: list[str] | None = None) -> int:
+  args = list(sys.argv[1:] if args is None else args)
+  if len(args) == 4:
+    from memory_read import run as run_read
+    return run_read(args)
+  args = [arg.strip() for arg in args if arg.strip()]
   if len(args) != 2:
     sys.stderr.write('usage: memory_search.py "<focused recall prompt>" "<chat_id>"\n')
     return 2

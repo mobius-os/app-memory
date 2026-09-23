@@ -35,13 +35,16 @@ _SAFE_REL = re.compile(
 _TRACKED_PATHS = ("index.md", "graph.json", "mocs", "notes", "sources")
 MAX_NOTE_BYTES = 256_000
 MAX_GRAPH_BYTES = 4_000_000
+MAX_DESCRIPTION_CHARS = 2_000
 MAX_RECALL_GUIDANCE_CHARS = 800
-MAX_RECALL_EXECUTION_RECEIPT_BYTES = 16_384
+MAX_RECALL_EXECUTION_RECEIPT_BYTES = 524_288
 # Agent run identities expire after 26 hours. Keep their hashed single-flight
 # receipts for two days so a restart/resume can still reuse completed work,
 # while making this transient coordination state self-pruning.
 RECALL_EXECUTION_RETENTION_SECONDS = 48 * 60 * 60
 _RECALL_EXECUTION_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+_READ_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_USAGE_DELIVERY_PREFIX = "__delivery__:"
 
 
 def _atomic_text(path: Path, text: str) -> None:
@@ -66,19 +69,31 @@ def _atomic_text(path: Path, text: str) -> None:
     raise
 
 
-def load_recall_guidance() -> dict | None:
-  """Return the latest bounded nightly selector lesson, when valid."""
+def _load_bounded_json(path: Path, max_bytes: int, *, lock: bool = False) -> dict | None:
+  flags = os.O_RDONLY
+  if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
   try:
-    fd = os.open(RECALL_GUIDANCE, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, flags)
     try:
-      raw = os.read(fd, 16_385)
+      if not stat.S_ISREG(os.fstat(fd).st_mode):
+        return None
+      if lock:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+      raw = os.read(fd, max_bytes + 1)
     finally:
       os.close(fd)
-    if len(raw) > 16_384:
+    if not raw or len(raw) > max_bytes:
       return None
     value = json.loads(raw.decode("utf-8"))
   except (OSError, ValueError, UnicodeError):
     return None
+  return value if isinstance(value, dict) else None
+
+
+def load_recall_guidance() -> dict | None:
+  """Return the latest bounded nightly selector lesson, when valid."""
+  value = _load_bounded_json(RECALL_GUIDANCE, 16_384)
   if not isinstance(value, dict) or value.get("schema") != 1:
     return None
   instruction = value.get("instruction")
@@ -129,10 +144,10 @@ class RecallExecution:
       value = json.loads(raw)
     except (TypeError, ValueError):
       return None
-    return value if isinstance(value, dict) and value.get("schema") == 1 else None
+    return value if isinstance(value, dict) and value.get("schema") == 3 else None
 
   def store(self, value: dict) -> None:
-    if not isinstance(value, dict) or value.get("schema") != 1:
+    if not isinstance(value, dict) or value.get("schema") != 3:
       raise ValueError("invalid recall execution receipt")
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n"
     if len(raw.encode("utf-8")) > MAX_RECALL_EXECUTION_RECEIPT_BYTES:
@@ -187,6 +202,18 @@ def recall_execution(key: str):
   finally:
     if fd >= 0:
       os.close(fd)
+
+
+def load_recall_manifest(key: str) -> dict | None:
+  """Load an existing V2 lookup manifest without creating coordination state."""
+  if not isinstance(key, str) or not _RECALL_EXECUTION_KEY_RE.fullmatch(key):
+    return None
+  value = _load_bounded_json(
+    STATE / "recall-execution" / f"{key}.json",
+    MAX_RECALL_EXECUTION_RECEIPT_BYTES,
+    lock=True,
+  )
+  return value if isinstance(value, dict) and value.get("schema") == 3 else None
 
 
 def _git_env() -> dict[str, str]:
@@ -540,6 +567,18 @@ def _validate_tree(root: Path, *, require_graph: bool = False) -> None:
     # Readers enforce this same bound. Reject the candidate before Git or the
     # atomic pointer can move so the last published graph remains readable.
     raise ValueError("memory graph exceeds read cap")
+  if require_graph and graph.is_file():
+    try:
+      graph_value = json.loads(graph.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+      raise ValueError("memory graph is unreadable") from exc
+    nodes = graph_value.get("nodes") if isinstance(graph_value, dict) else None
+    if not isinstance(nodes, list):
+      raise ValueError("memory graph has invalid nodes")
+    for node in nodes:
+      description = node.get("description") if isinstance(node, dict) else None
+      if isinstance(description, str) and len(description) > MAX_DESCRIPTION_CHARS:
+        raise ValueError("memory description exceeds publication cap")
   for directory in (root / "mocs", root / "notes"):
     if directory.is_symlink() or not directory.is_dir():
       raise ValueError(f"unsafe memory directory: {directory}")
@@ -548,6 +587,10 @@ def _validate_tree(root: Path, *, require_graph: bool = False) -> None:
         f"{directory.name}/{child.name}"
       ):
         raise ValueError(f"unsafe memory file: {child}")
+      if child.stat().st_size > MAX_NOTE_BYTES:
+        # Publication and pinned reads share one safety bound. Rejecting here
+        # prevents the writer from publishing a note the reader cannot deliver.
+        raise ValueError(f"memory note exceeds read cap: {child.name}")
   # Source archives were introduced after the schema-one generation format.
   # Accept their absence while importing those immutable legacy snapshots; all
   # live worktrees create the directory before their stricter validation pass.
@@ -748,34 +791,22 @@ def _state_lock():
     yield
 
 
-def _safe_chat_id(chat_id: str) -> str:
+def safe_chat_id(chat_id: str) -> str:
   return re.sub(r"[^A-Za-z0-9_-]", "", str(chat_id or ""))[:128]
 
 
 def load_read_trace(chat_id: str) -> dict | None:
   """Read one bounded latest-per-chat trace without following links."""
-  trace_id = _safe_chat_id(chat_id)
+  trace_id = safe_chat_id(chat_id)
   if not trace_id:
     return None
-  path = STATE / "read-trace" / f"{trace_id}.json"
-  flags = os.O_RDONLY
-  if hasattr(os, "O_NOFOLLOW"):
-    flags |= os.O_NOFOLLOW
-  try:
-    fd = os.open(path, flags)
-    try:
-      info = os.fstat(fd)
-      if not stat.S_ISREG(info.st_mode):
-        return None
-      raw = os.read(fd, 262_145)
-    finally:
-      os.close(fd)
-    if len(raw) > 262_144:
-      return None
-    value = json.loads(raw.decode("utf-8"))
-  except (OSError, ValueError, UnicodeError):
-    return None
-  return value if isinstance(value, dict) and value.get("schema") == 3 else None
+  value = _load_bounded_json(
+    STATE / "read-trace" / f"{trace_id}.json", 262_144,
+  )
+  return (
+    value if isinstance(value, dict) and value.get("schema") in {3, 4}
+    else None
+  )
 
 
 def record_read(
@@ -787,9 +818,10 @@ def record_read(
   traversal: dict | None = None,
   status: str = "completed",
   reason: str | None = None,
+  discovery_complete: bool = True,
   invocation_fingerprint: str | None = None,
 ) -> dict:
-  """Record a completed recall or the latest per-chat failed attempt."""
+  """Record candidate discovery without claiming those bodies were delivered."""
   if status not in {"completed", "failed"}:
     raise ValueError("unsupported Memory read status")
   if not (
@@ -797,10 +829,6 @@ def record_read(
     and _RECALL_EXECUTION_KEY_RE.fullmatch(invocation_fingerprint)
   ):
     invocation_fingerprint = None
-  clean_ids = (
-    [Path(rel).stem for rel in files if rel.startswith(("notes/", "mocs/"))]
-    if status == "completed" else []
-  )
   with _state_lock():
     # The per-turn execution lock is the primary single-flight boundary. This
     # latest-trace check makes telemetry idempotent too if a process exits
@@ -813,33 +841,23 @@ def record_read(
         and previous.get("status") == status
       ):
         return previous
-    if status == "completed":
-      usage_path = STATE / "usage.json"
-      try:
-        usage = json.loads(usage_path.read_text(encoding="utf-8"))
-      except (OSError, ValueError):
-        usage = {}
-      if not isinstance(usage, dict):
-        usage = {}
-      for node_id in clean_ids:
-        usage[node_id] = int(usage.get(node_id, 0) or 0) + 1
-      _atomic_text(usage_path, json.dumps(usage, indent=2, sort_keys=True) + "\n")
-    safe_chat_id = _safe_chat_id(chat_id)
+    safe_id = safe_chat_id(chat_id)
     read_id = uuid.uuid4().hex
     at = datetime.now(UTC).isoformat()
     trace = {
-      "schema": 3,
+      "schema": 4,
       "read_id": read_id,
       "at": at,
       "commit": commit,
       "status": status,
-      "chat_id": safe_chat_id,
+      "chat_id": safe_id,
       "question": question[:8_000],
       "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
-      "files": files if status == "completed" else [],
+      "candidates": files if status == "completed" else [],
       "traversal": (
         traversal if status == "completed" and isinstance(traversal, dict) else {}
       ),
+      "discovery_complete": discovery_complete is not False,
     }
     if invocation_fingerprint:
       trace["invocation_fingerprint"] = invocation_fingerprint
@@ -847,7 +865,7 @@ def record_read(
       trace["reason"] = str(reason or "read_failed")[:80]
     # Keep one easy-to-inspect latest trace per chat, while the append-only
     # log retains every read for the nightly replay.
-    trace_id = safe_chat_id or read_id
+    trace_id = safe_id or read_id
     _atomic_text(
       STATE / "read-trace" / f"{trace_id}.json",
       json.dumps(trace, indent=2, sort_keys=True) + "\n",
@@ -865,6 +883,147 @@ def record_read(
     return trace
 
 
+def _merge_ranges(ranges: list[list[int]], start: int, end: int) -> list[list[int]]:
+  merged: list[list[int]] = []
+  for left, right in sorted([*ranges, [start, end]]):
+    if not merged or left > merged[-1][1]:
+      merged.append([left, right])
+    else:
+      merged[-1][1] = max(merged[-1][1], right)
+  return merged
+
+
+def load_read_delivery(read_id: str) -> dict | None:
+  if not isinstance(read_id, str) or not _READ_ID_RE.fullmatch(read_id):
+    return None
+  value = _load_bounded_json(
+    STATE / "read-delivery" / f"{read_id}.json",
+    MAX_RECALL_EXECUTION_RECEIPT_BYTES,
+  )
+  return value if isinstance(value, dict) and value.get("schema") == 1 else None
+
+
+def record_read_delivery(
+  *,
+  read_id: str,
+  lookup_id: str,
+  commit: str,
+  candidates: list[dict],
+  requested_paths: list[str],
+  segments: list[dict],
+) -> dict:
+  """Idempotently record pinned byte delivery and count complete notes once."""
+  if not _READ_ID_RE.fullmatch(str(read_id or "")):
+    raise ValueError("invalid Memory read id")
+  if not _RECALL_EXECUTION_KEY_RE.fullmatch(str(lookup_id or "")):
+    raise ValueError("invalid Memory lookup id")
+  if not _COMMIT_RE.fullmatch(str(commit or "")):
+    raise ValueError("invalid Memory commit")
+  if any(not isinstance(item, dict) for item in candidates):
+    raise ValueError("invalid Memory delivery candidates")
+  candidate_ids = {
+    item.get("path"): item.get("id") for item in candidates
+    if isinstance(item.get("path"), str) and isinstance(item.get("id"), str)
+  }
+  candidate_paths = list(candidate_ids)
+  allowed = set(candidate_paths)
+  if (
+    len(candidate_ids) != len(candidates)
+    or len(set(candidate_ids.values())) != len(candidates)
+    or any(not _SAFE_REL.fullmatch(path) for path in candidate_paths)
+    or any(not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", node_id)
+           for node_id in candidate_ids.values())
+    or any(path not in allowed for path in requested_paths)
+  ):
+    raise ValueError("invalid Memory delivery paths")
+  with _state_lock():
+    state = load_read_delivery(read_id) or {
+      "schema": 1,
+      "read_id": read_id,
+      "lookup_id": lookup_id,
+      "commit": commit,
+      "requested_files": [],
+      "ranges": {},
+      "fully_supplied_files": [],
+    }
+    if (
+      state.get("lookup_id") != lookup_id
+      or state.get("commit") != commit
+    ):
+      raise ValueError("Memory delivery identity mismatch")
+    requested = list(state.get("requested_files") or [])
+    for path in requested_paths:
+      if path not in requested:
+        requested.append(path)
+    ranges = state.get("ranges") if isinstance(state.get("ranges"), dict) else {}
+    totals: dict[str, int] = {}
+    for segment in segments:
+      path = segment.get("path") if isinstance(segment, dict) else None
+      start = segment.get("start") if isinstance(segment, dict) else None
+      end = segment.get("end") if isinstance(segment, dict) else None
+      total = segment.get("total") if isinstance(segment, dict) else None
+      if (
+        path not in requested_paths
+        or isinstance(start, bool) or not isinstance(start, int)
+        or isinstance(end, bool) or not isinstance(end, int)
+        or isinstance(total, bool) or not isinstance(total, int)
+        or not (0 <= start <= end <= total <= MAX_NOTE_BYTES)
+      ):
+        raise ValueError("invalid Memory delivery segment")
+      prior = ranges.get(path)
+      if not isinstance(prior, list):
+        prior = []
+      ranges[path] = _merge_ranges(prior, start, end)
+      totals[path] = total
+    before = set(state.get("fully_supplied_files") or [])
+    complete = set(before)
+    for path, total in totals.items():
+      if ranges.get(path) == [[0, total]]:
+        complete.add(path)
+    newly_complete = [path for path in candidate_paths if path in complete - before]
+    if newly_complete:
+      usage_path = STATE / "usage.json"
+      try:
+        usage = json.loads(usage_path.read_text(encoding="utf-8"))
+      except (OSError, ValueError):
+        usage = {}
+      if not isinstance(usage, dict):
+        usage = {}
+      now = int(datetime.now(UTC).timestamp())
+      cutoff = now - RECALL_EXECUTION_RETENTION_SECONDS
+      usage = {
+        key: value for key, value in usage.items()
+        if not (
+          isinstance(key, str)
+          and key.startswith(_USAGE_DELIVERY_PREFIX)
+          and (not isinstance(value, int) or value < cutoff)
+        )
+      }
+      for path in newly_complete:
+        node_id = candidate_ids[path]
+        delivery_key = _USAGE_DELIVERY_PREFIX + hashlib.sha256(
+          f"{read_id}\0{path}".encode("utf-8")
+        ).hexdigest()
+        if delivery_key in usage:
+          continue
+        usage[node_id] = int(usage.get(node_id, 0) or 0) + 1
+        usage[delivery_key] = now
+      _atomic_text(usage_path, json.dumps(usage, indent=2, sort_keys=True) + "\n")
+    state.update({
+      "requested_files": requested,
+      "ranges": ranges,
+      "fully_supplied_files": [
+        path for path in candidate_paths if path in complete
+      ],
+      "updated_at": datetime.now(UTC).isoformat(),
+    })
+    _atomic_text(
+      STATE / "read-delivery" / f"{read_id}.json",
+      json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    return state
+
+
 def load_usage() -> dict[str, int]:
   try:
     value = json.loads((STATE / "usage.json").read_text(encoding="utf-8"))
@@ -872,7 +1031,11 @@ def load_usage() -> dict[str, int]:
     return {}
   return {
     str(key): int(count) for key, count in value.items()
-    if isinstance(key, str) and isinstance(count, int)
+    if (
+      isinstance(key, str)
+      and not key.startswith(_USAGE_DELIVERY_PREFIX)
+      and isinstance(count, int)
+    )
   } if isinstance(value, dict) else {}
 
 
