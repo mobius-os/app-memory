@@ -653,23 +653,27 @@ def test_failed_receipt_exposes_only_a_safe_reason_enum():
     "Memory lookup failed.",
     reason=memory_search.RESULT_REASON_NOT_READY,
   )) == {
-    "status": memory_search.RESULT_FAILED,
+    "activity_id": memory_search.SEARCH_ACTIVITY_ID,
+    "status": "failed",
+    "outcome": memory_search.RESULT_FAILED,
+    "label": "Memory lookup failed",
     "phase": "catalog",
     "lookup_id": None,
     "reason": memory_search.RESULT_REASON_NOT_READY,
     "discovery_complete": True,
-    "display": {"label": "Memory lookup failed"},
   }
   assert memory_search._result_payload(memory_search.RecallResult(
     memory_search.RESULT_FAILED,
     "Memory lookup failed.",
     reason="/private/path",
   )) == {
-    "status": memory_search.RESULT_FAILED,
+    "activity_id": memory_search.SEARCH_ACTIVITY_ID,
+    "status": "failed",
+    "outcome": memory_search.RESULT_FAILED,
+    "label": "Memory lookup failed",
     "phase": "catalog",
     "lookup_id": None,
     "discovery_complete": True,
-    "display": {"label": "Memory lookup failed"},
   }
 
 
@@ -678,13 +682,13 @@ def test_empty_receipt_is_an_explicit_no_relevant_result():
     memory_search.RESULT_EMPTY,
     "No relevant memories.",
   )) == {
-    "status": memory_search.RESULT_EMPTY,
+    "activity_id": memory_search.SEARCH_ACTIVITY_ID,
+    "status": "empty",
+    "outcome": memory_search.RESULT_EMPTY,
+    "label": "Searched Memory — nothing relevant",
+    "detail": "Nothing relevant is recorded yet.",
     "phase": "catalog",
     "lookup_id": None,
     "reason": memory_search.RESULT_REASON_NO_RELEVANT_RESULT,
     "discovery_complete": True,
-    "display": {
-      "label": "Searched Memory — nothing relevant",
-      "detail": "Nothing relevant is recorded yet.",
-    },
   }
