@@ -40,18 +40,19 @@ test('graph maintenance diagnostics stay internal instead of posing as owner act
   assert.match(runner, /def _maintenance_flags\(staging: Path\)/)
 })
 
-test('supporting chats show provenance without duplicating transcript excerpts', () => {
+test('note summaries are visible once while supporting chats stay provenance-only', () => {
   const source = readFileSync(new URL('../ui/SupportingChats.jsx', import.meta.url), 'utf8')
   const app = readFileSync(new URL('../index.jsx', import.meta.url), 'utf8')
   const manifest = JSON.parse(readFileSync(new URL('../mobius.json', import.meta.url), 'utf8'))
 
   assert.match(source, /Supporting chats/)
+  assert.match(source, /Chats used as evidence for this memory\./)
   assert.match(source, /Last activity/)
-  assert.match(source, /Contributed/)
   assert.match(source, /Open chat/)
-  assert.doesNotMatch(source, /snapshot|message\.text|excerpt/i)
-  assert.match(app, /contribution=\{selected\?\.description\}/)
-  assert.doesNotMatch(app, /contribution=\{selected\?\.description \|\| selected\?\.title\}/)
+  assert.doesNotMatch(source, /Contributed|contribution|snapshot|message\.text|excerpt/i)
+  assert.match(app, /mg-note-summary/)
+  assert.match(app, /selected\?\.description/)
+  assert.doesNotMatch(app, /contribution=\{selected\?\.description\}/)
   assert.ok(manifest.source_files.includes('ui/SupportingChats.jsx'))
   assert.ok(!manifest.source_files.includes('ui/SourceContext.jsx'))
 })

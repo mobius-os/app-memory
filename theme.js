@@ -584,6 +584,19 @@ export const CSS = `
   .mobius-model-sheet { border-radius:16px; }
 }
 
+/* A note description is its concise reader-facing summary. */
+.mg-note-summary {
+  margin:0 0 22px; padding:0 0 18px; border-bottom:1px solid var(--border);
+}
+.mg-note-summary h2 {
+  margin:0 0 7px !important; color:var(--text); font-size:13px !important;
+  line-height:1.3; font-weight:700;
+}
+.mg-note-summary p {
+  max-width:72ch; margin:0 !important; color:var(--muted);
+  font-size:13.5px; line-height:1.6;
+}
+
 /* Supporting chats are provenance, not a second transcript reader. */
 .mg-supporting { margin-top:26px; padding-top:18px; border-top:1px solid var(--border); }
 .mg-supporting-heading {
@@ -593,6 +606,9 @@ export const CSS = `
 .mg-supporting-heading strong { color:var(--text); font-size:13px; line-height:1.3; }
 .mg-supporting-heading > span {
   color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums;
+}
+.mg-supporting-help {
+  margin:0 0 7px !important; color:var(--muted); font-size:11.5px; line-height:1.5;
 }
 .mg-supporting-list { margin:0 !important; padding:0 !important; list-style:none; }
 .mg-supporting-item {
@@ -605,10 +621,6 @@ export const CSS = `
   text-overflow:ellipsis; white-space:nowrap;
 }
 .mg-supporting-main > span { color:var(--muted); font-size:10.75px; line-height:1.4; }
-.mg-supporting-main > p {
-  margin:5px 0 0 !important; color:var(--muted); font-size:11.5px; line-height:1.5;
-}
-.mg-supporting-main > p b { margin-right:5px; color:var(--text); font-weight:650; }
 .mg-supporting-item > button {
   flex:0 0 auto; min-height:44px; padding:0 11px; border:1px solid var(--border);
   border-radius:9px; background:transparent; color:var(--accent); cursor:pointer;
