@@ -131,6 +131,28 @@ class MemorySearchContractTests(unittest.TestCase):
       log = next((store.STATE / "read-log").glob("*.jsonl"))
       self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
 
+  def test_telemetry_failure_does_not_advertise_expandable_success(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, search = _load(Path(raw))
+      _commit(store)
+      with (
+        mock.patch.dict(os.environ, {
+          "MOBIUS_RUN_TOKEN": "telemetry-failure-turn",
+          "MEMORY_READER_PROVIDER": "none",
+        }),
+        mock.patch.object(
+          search, "record_read", side_effect=OSError("telemetry unavailable"),
+        ),
+      ):
+        request = search._prepare_request("quiet interface", "chat-1")
+        result = search._execute_request(request)
+
+      self.assertEqual(result.status, search.RESULT_FAILED)
+      manifest = store.load_recall_manifest(request.lookup_id)
+      self.assertIsNotNone(manifest)
+      self.assertIsNone(manifest["read_id"])
+      self.assertRegex(manifest["cursor_secret"], r"^[0-9a-f]{64}$")
+
   def test_calls_without_a_physical_turn_identity_are_not_coalesced(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
@@ -240,7 +262,7 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertFalse(second.reused)
       self.assertFalse(next((store.STATE / "recall-execution").glob("*.json")).read_text())
 
-  def test_completed_result_is_not_repeated_when_receipt_storage_fails(self):
+  def test_receipt_storage_failure_does_not_advertise_an_unreadable_catalogue(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
       _commit(store)
@@ -264,29 +286,30 @@ class MemorySearchContractTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as errors:
           result = search._execute_request(request)
 
-      self.assertEqual(result.status, search.RESULT_HIT)
+      self.assertEqual(result.status, search.RESULT_FAILED)
       self.assertEqual(calls, 1)
       self.assertIn("could not be stored", errors.getvalue())
 
-  def test_telemetry_failure_is_repaired_without_repeating_provider_work(self):
+  def test_telemetry_failure_reuses_the_readable_manifest_without_provider_work(self):
     with tempfile.TemporaryDirectory() as raw:
       store, search = _load(Path(raw))
       _commit(store)
       calls = 0
       record_attempts = 0
       original_retrieve = search._retrieve_prepared
-      original_record = store.record_read
 
       def counted(request):
         nonlocal calls
         calls += 1
         return original_retrieve(request)
 
+      original_record = search.record_read
+
       def flaky_record(*args, **kwargs):
         nonlocal record_attempts
         record_attempts += 1
         if record_attempts == 1:
-          raise OSError("temporary telemetry failure")
+          raise OSError("telemetry unavailable")
         return original_record(*args, **kwargs)
 
       with (
@@ -304,12 +327,11 @@ class MemorySearchContractTests(unittest.TestCase):
 
       self.assertEqual(calls, 1)
       self.assertEqual(record_attempts, 2)
-      self.assertFalse(first.reused)
+      self.assertEqual(first.status, search.RESULT_FAILED)
       self.assertTrue(second.reused)
-      log = next((store.STATE / "read-log").glob("*.jsonl"))
-      self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
+      self.assertRegex(second.read_id or "", r"^[0-9a-f]{32}$")
       with store.recall_execution(request.invocation_fingerprint) as execution:
-        self.assertTrue(execution.load()["recorded"])
+        self.assertEqual(execution.load()["read_id"], second.read_id)
 
   def test_latest_trace_repairs_crash_window_without_another_provider_call(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -363,10 +385,17 @@ class MemorySearchContractTests(unittest.TestCase):
         request = search._prepare_request("quiet interface", "chat-1")
         with store.recall_execution(request.invocation_fingerprint) as execution:
           execution.store({
-            "schema": 1,
+            "schema": search.EXECUTION_RECEIPT_SCHEMA,
             "status": search.RESULT_HIT,
             "commit": request.commit,
-            "files": ["../../owner-secret.md"],
+            "lookup_id": request.lookup_id,
+            "chat_id": "chat-1",
+            "read_id": "1" * 32,
+            "cursor_secret": "2" * 64,
+            "candidates": [{
+              "id": "owner-secret", "path": "../../owner-secret.md",
+            }],
+            "discovery_complete": True,
           })
         result = search._execute_request(request)
 
@@ -503,7 +532,7 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertEqual(payload["notes"][0]["path"], "notes/quiet-ui.md")
       trace = json.loads((store.STATE / "read-trace" / "chat-123.json").read_text())
       self.assertEqual(trace["commit"], pointer["commit"])
-      self.assertEqual(trace["files"], [])
+      self.assertNotIn("files", trace)
       self.assertEqual(trace["candidates"], ["notes/quiet-ui.md"])
       self.assertEqual(trace["question"], "quiet UI preference")
       self.assertEqual(trace["traversal"]["selected"], ["notes/quiet-ui.md"])
@@ -616,6 +645,7 @@ class MemorySearchContractTests(unittest.TestCase):
           "lookup_id": mock.ANY,
           "reason": search.RESULT_REASON_NOT_READY,
           "discovery_complete": True,
+          "display": {"label": "Memory lookup failed"},
         },
       )
       trace = json.loads(

@@ -63,10 +63,10 @@ class MemoryStoreTests(unittest.TestCase):
       store = _load(Path(raw))
       key = "a" * 64
       receipt = {
-        "schema": 1,
+        "schema": 3,
         "status": "hit",
         "commit": "0" * 40,
-        "files": ["notes/quiet-ui.md"],
+        "candidates": [{"id": "quiet-ui", "path": "notes/quiet-ui.md"}],
       }
 
       with store.recall_execution(key) as execution:
@@ -128,10 +128,35 @@ class MemoryStoreTests(unittest.TestCase):
       )
 
       self.assertEqual(state["fully_supplied_files"], ["notes/file-name.md"])
-      self.assertEqual(
-        json.loads((store.STATE / "usage.json").read_text()),
-        {"canonical-node": 1},
-      )
+      self.assertEqual(store.load_usage(), {"canonical-node": 1})
+
+  def test_delivery_retry_after_state_write_failure_does_not_double_count(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      original_atomic_text = store._atomic_text
+
+      def fail_delivery_state(path, text):
+        if path.parent.name == "read-delivery":
+          raise OSError("simulated failure after usage commit")
+        return original_atomic_text(path, text)
+
+      delivery = {
+        "read_id": "1" * 32,
+        "lookup_id": "2" * 64,
+        "commit": "3" * 40,
+        "candidates": [{"id": "canonical-node", "path": "notes/file-name.md"}],
+        "requested_paths": ["notes/file-name.md"],
+        "segments": [{
+          "path": "notes/file-name.md", "start": 0, "end": 4, "total": 4,
+        }],
+      }
+      with mock.patch.object(store, "_atomic_text", side_effect=fail_delivery_state):
+        with self.assertRaisesRegex(OSError, "simulated failure"):
+          store.record_read_delivery(**delivery)
+
+      self.assertEqual(store.load_usage(), {"canonical-node": 1})
+      store.record_read_delivery(**delivery)
+      self.assertEqual(store.load_usage(), {"canonical-node": 1})
 
   def test_graph_metadata_and_note_bodies_have_separate_read_caps(self):
     with tempfile.TemporaryDirectory() as raw:

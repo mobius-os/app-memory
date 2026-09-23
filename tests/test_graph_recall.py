@@ -596,7 +596,7 @@ def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
   assert logged["schema"] == 4
   assert logged["status"] == "completed"
   assert logged["question"] == "Which detailed fact matters?"
-  assert logged["files"] == []
+  assert "files" not in logged
   assert logged["candidates"] == ["notes/b.md"]
   assert logged["traversal"]["opened"][1]["path"] == "mocs/a.md"
   assert logged["traversal"]["selected"] == ["notes/b.md"]
@@ -620,7 +620,7 @@ def test_failed_read_is_observable_without_affecting_usage(monkeypatch, tmp_path
   assert trace["status"] == "failed"
   assert trace["reason"] == "not_ready"
   assert trace["commit"] is None
-  assert trace["files"] == []
+  assert "files" not in trace
   assert trace["traversal"] == {}
   assert not (tmp_path / "app-state" / "usage.json").exists()
   assert not (tmp_path / "app-state" / "read-log").exists()
@@ -658,6 +658,7 @@ def test_failed_receipt_exposes_only_a_safe_reason_enum():
     "lookup_id": None,
     "reason": memory_search.RESULT_REASON_NOT_READY,
     "discovery_complete": True,
+    "display": {"label": "Memory lookup failed"},
   }
   assert memory_search._result_payload(memory_search.RecallResult(
     memory_search.RESULT_FAILED,
@@ -668,6 +669,7 @@ def test_failed_receipt_exposes_only_a_safe_reason_enum():
     "phase": "catalog",
     "lookup_id": None,
     "discovery_complete": True,
+    "display": {"label": "Memory lookup failed"},
   }
 
 
@@ -681,4 +683,8 @@ def test_empty_receipt_is_an_explicit_no_relevant_result():
     "lookup_id": None,
     "reason": memory_search.RESULT_REASON_NO_RELEVANT_RESULT,
     "discovery_complete": True,
+    "display": {
+      "label": "Searched Memory — nothing relevant",
+      "detail": "Nothing relevant is recorded yet.",
+    },
   }

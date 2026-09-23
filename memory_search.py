@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from memory_store import (
+  RECALL_EXECUTION_RETENTION_SECONDS,
   load_recall_guidance,
   load_read_trace,
   read_revision_file,
@@ -49,14 +51,13 @@ RESULT_FAILED = "failed"
 RESULT_REASON_NO_RELEVANT_RESULT = "no_relevant_result"
 RESULT_REASON_NOT_READY = "not_ready"
 RESULT_REASON_READ_FAILED = "read_failed"
-EXECUTION_RECEIPT_SCHEMA = 2
+EXECUTION_RECEIPT_SCHEMA = 3
 # A catalogue is intentionally bounded for provider-facing delivery, but it is
 # not forced beneath the chat UI's 4 KiB inline-display heuristic. The platform
 # parses Memory's receipt before it stores a compact display excerpt, while
 # 12 KiB avoids another full agent/tool round trip for a handful of names.
 TOOL_OUTPUT_PAGE_CHARS = 12_000
 MAX_CATALOG_EXCERPT_CHARS = 300
-LOOKUP_RETENTION_SECONDS = 48 * 60 * 60
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 _WORD = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
@@ -133,6 +134,7 @@ class RecallResult:
   reused: bool = False
   lookup_id: str | None = None
   read_id: str | None = None
+  cursor_secret: str | None = None
   discovery_complete: bool = True
 
 
@@ -912,8 +914,6 @@ def retrieve(question: str) -> RecallResult:
 def _execution_receipt(
   result: RecallResult,
   request: RecallRequest,
-  *,
-  recorded: bool = True,
 ) -> dict:
   created = datetime.now(UTC)
   return {
@@ -923,12 +923,12 @@ def _execution_receipt(
     "commit": result.commit,
     "chat_id": safe_chat_id(request.chat_id),
     "read_id": result.read_id,
+    "cursor_secret": result.cursor_secret,
     "candidates": list(result.notes),
     "expires_at": (
-      created + timedelta(seconds=LOOKUP_RETENTION_SECONDS)
+      created + timedelta(seconds=RECALL_EXECUTION_RETENTION_SECONDS)
     ).isoformat(),
     "discovery_complete": result.discovery_complete,
-    "recorded": recorded,
   }
 
 
@@ -943,10 +943,7 @@ def _cached_result(
     or receipt.get("schema") != EXECUTION_RECEIPT_SCHEMA
     or receipt.get("status") not in {RESULT_HIT, RESULT_EMPTY}
     or receipt.get("commit") != request.commit
-    or (
-      "recorded" in receipt
-      and not isinstance(receipt.get("recorded"), bool)
-    )
+    or not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("cursor_secret") or ""))
   ):
     return None
   candidates = receipt.get("candidates")
@@ -963,7 +960,7 @@ def _cached_result(
       request.commit,
       json.loads(read_revision_file(request.commit, "graph.json")),
     )
-    selected = []
+    clean_candidates = []
     seen: set[str] = set()
     for candidate in candidates:
       node_id = candidate.get("id")
@@ -987,31 +984,33 @@ def _cached_result(
         node_id = matches[0]
       seen.add(path)
       metadata = graph.by_id[node_id]
-      selected.append(OpenedNode(
-        id=node_id,
-        path=path,
-        title=str(metadata.get("title") or node_id),
-        description=str(metadata.get("description") or ""),
-        node_type=str(metadata.get("type") or "note"),
-        depth=0,
-        parent=None,
-        content="",
-      ))
+      clean_candidates.append({
+        "id": node_id,
+        "path": path,
+        "title": str(metadata.get("title") or node_id)[:120],
+        "excerpt": str(metadata.get("description") or "")[
+          :MAX_CATALOG_EXCERPT_CHARS
+        ],
+      })
   except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
     return None
-  traversal = TraversalResult(
-    status=receipt["status"],
+  return RecallResult(
+    receipt["status"],
+    (
+      "Relevant Memory catalogue:"
+      if receipt["status"] == RESULT_HIT else "No relevant memories."
+    ),
+    files=tuple(item["path"] for item in clean_candidates),
     commit=request.commit,
-    rounds=0,
-    stop_reason="execution_reused",
-    opened=tuple(selected),
-    selected=tuple(selected),
-  )
-  return replace(
-    _answer(traversal),
+    notes=tuple(clean_candidates),
     reused=True,
     lookup_id=request.lookup_id,
-    read_id=(receipt.get("read_id") if isinstance(receipt.get("read_id"), str) else None),
+    read_id=(
+      receipt.get("read_id")
+      if re.fullmatch(r"[0-9a-f]{32}", str(receipt.get("read_id") or ""))
+      else None
+    ),
+    cursor_secret=receipt["cursor_secret"],
     discovery_complete=receipt.get("discovery_complete") is not False,
   )
 
@@ -1029,13 +1028,14 @@ def _record_result(result: RecallResult, request: RecallRequest) -> dict | None:
         reason=result.reason,
         invocation_fingerprint=request.invocation_fingerprint,
       )
-    if result.commit and result.traversal:
+    if result.commit:
       return record_read(
         result.commit,
         request.question,
         list(result.files),
         request.chat_id,
-        traversal=result.traversal.trace(),
+        traversal=(result.traversal.trace() if result.traversal else None),
+        discovery_complete=result.discovery_complete,
         invocation_fingerprint=request.invocation_fingerprint,
       )
   except (OSError, ValueError):
@@ -1056,18 +1056,25 @@ def _execute_request(request: RecallRequest) -> RecallResult:
       receipt = execution.load()
       cached = _cached_result(request, receipt)
       if cached is not None:
-        result = cached
-        if receipt.get("recorded") is False:
+        if cached.read_id is None:
           trace = _record_result(cached, request)
-          if trace:
-            cached = replace(cached, read_id=trace.get("read_id"))
+          if not (
+            trace
+            and re.fullmatch(r"[0-9a-f]{32}", str(trace.get("read_id") or ""))
+          ):
+            return RecallResult(
+              RESULT_FAILED, "Memory lookup failed.", commit=request.commit,
+              reason=RESULT_REASON_READ_FAILED, lookup_id=request.lookup_id,
+            )
+          cached = replace(cached, read_id=trace["read_id"])
           try:
             execution.store(_execution_receipt(cached, request))
           except (OSError, ValueError):
-            sys.stderr.write(
-              "warning: Memory recall reuse receipt could not be updated\n"
+            return RecallResult(
+              RESULT_FAILED, "Memory lookup failed.", commit=request.commit,
+              reason=RESULT_REASON_READ_FAILED, lookup_id=request.lookup_id,
             )
-        return result
+        return cached
 
       # Repair the narrow crash window where telemetry reached disk but the
       # compact execution receipt did not. The latest trace contains no note
@@ -1086,11 +1093,12 @@ def _execute_request(request: RecallRequest) -> RecallResult:
           "lookup_id": request.lookup_id,
           "chat_id": safe_chat_id(request.chat_id),
           "read_id": trace.get("read_id"),
+          "cursor_secret": secrets.token_hex(32),
           "candidates": [
             {"id": Path(path).stem, "path": path}
             for path in candidate_paths
           ],
-          "discovery_complete": True,
+          "discovery_complete": trace.get("discovery_complete") is not False,
         })
         if cached is not None:
           result = cached
@@ -1100,6 +1108,13 @@ def _execute_request(request: RecallRequest) -> RecallResult:
             sys.stderr.write(
               "warning: Memory recall reuse receipt could not be repaired\n"
             )
+            return RecallResult(
+              RESULT_FAILED,
+              "Memory lookup failed.",
+              commit=request.commit,
+              reason=RESULT_REASON_READ_FAILED,
+              lookup_id=request.lookup_id,
+            )
           return result
 
       result = _retrieve_prepared(request)
@@ -1107,21 +1122,33 @@ def _execute_request(request: RecallRequest) -> RecallResult:
       result = replace(
         result,
         lookup_id=request.lookup_id,
-        read_id=(trace.get("read_id") if trace else None),
+        read_id=(
+          trace.get("read_id")
+          if trace and re.fullmatch(r"[0-9a-f]{32}", str(trace.get("read_id") or ""))
+          else None
+        ),
+        cursor_secret=secrets.token_hex(32),
       )
       # Structural failures are never sticky: repairing the graph and retrying
       # inside the same turn must be able to perform a fresh lookup.
       if result.status in {RESULT_HIT, RESULT_EMPTY}:
         try:
-          execution.store(_execution_receipt(
-            result, request, recorded=trace is not None,
-          ))
+          execution.store(_execution_receipt(result, request))
         except (OSError, ValueError):
-          # The completed provider result remains authoritative. A receipt
-          # write failure must never cause a second provider call in this
-          # process; the idempotent trace can repair reuse on the next retry.
           sys.stderr.write(
             "warning: Memory recall reuse receipt could not be stored\n"
+          )
+          return RecallResult(
+            RESULT_FAILED,
+            "Memory lookup failed.",
+            commit=request.commit,
+            reason=RESULT_REASON_READ_FAILED,
+            lookup_id=request.lookup_id,
+          )
+        if result.read_id is None:
+          return RecallResult(
+            RESULT_FAILED, "Memory lookup failed.", commit=request.commit,
+            reason=RESULT_REASON_READ_FAILED, lookup_id=request.lookup_id,
           )
       return result
   except (OSError, ValueError):
@@ -1137,6 +1164,19 @@ def _execute_request(request: RecallRequest) -> RecallResult:
     )
 
 
+def _cursor_auth(secret: str, *parts: object) -> str:
+  """Authenticate one continuation without exposing the manifest-only key."""
+  if not re.fullmatch(r"[0-9a-f]{64}", str(secret or "")):
+    raise ValueError("invalid Memory cursor secret")
+  message = "\0".join(str(part) for part in parts).encode("utf-8")
+  return hmac.new(bytes.fromhex(secret), message, hashlib.sha256).hexdigest()[:32]
+
+
+def _catalog_cursor(result: RecallResult, end: int) -> str:
+  signature = _cursor_auth(result.cursor_secret or "", "catalog", end)
+  return f"catalog:{end}:{signature}"
+
+
 def _catalog_page(
   result: RecallResult, start: int = 0,
 ) -> tuple[str, list[dict], dict]:
@@ -1149,7 +1189,7 @@ def _catalog_page(
       "complete": end >= len(result.notes),
     }
     if not candidate_page["complete"]:
-      candidate_page["next_cursor"] = f"catalog:{end}"
+      candidate_page["next_cursor"] = _catalog_cursor(result, end)
     payload = _result_payload(
       result, notes=candidate_notes, page=candidate_page,
     )
@@ -1167,7 +1207,7 @@ def _catalog_page(
     "complete": end >= len(result.notes),
   }
   if not page["complete"]:
-    page["next_cursor"] = f"catalog:{end}"
+    page["next_cursor"] = _catalog_cursor(result, end)
   # The structured receipt is the catalogue. Avoid duplicating every summary
   # in prose: duplication consumes the very inline budget paging protects.
   return result.answer, notes, page
@@ -1203,7 +1243,72 @@ def _result_payload(
   if result.reused:
     payload["reused"] = True
   payload["discovery_complete"] = result.discovery_complete
+  payload["display"] = _display(
+    result.status,
+    phase="catalog",
+    page=payload.get("page"),
+    note_count=len(notes or []),
+    reused=result.reused,
+    discovery_complete=result.discovery_complete,
+  )
   return payload
+
+
+def _display(
+  status: str,
+  *,
+  phase: str,
+  page: dict | None = None,
+  note_count: int = 0,
+  reused: bool = False,
+  discovery_complete: bool = True,
+) -> dict[str, str]:
+  """Return bounded owner-facing copy; platform transport stays semantic-free."""
+  if status == RESULT_FAILED:
+    return {"label": "Memory lookup failed"}
+  if status == RESULT_EMPTY:
+    display = {
+      "label": "Searched Memory — nothing relevant",
+      "detail": "Nothing relevant is recorded yet.",
+    }
+  elif phase == "catalog":
+    count = (page or {}).get("candidate_count")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+      count = note_count
+    noun = "note" if count == 1 else "notes"
+    display = {
+      "label": (
+        f"Reused Memory search — {count} relevant {noun}"
+        if reused else f"Found {count} relevant {noun} in Memory"
+      ),
+      "detail": (
+        f"Showing {note_count} of {count} relevant {noun}"
+        + (
+          "; more catalogue entries are available."
+          if (page or {}).get("complete") is False else "."
+        )
+      ),
+    }
+  else:
+    requested = (page or {}).get("requested_count")
+    complete = (page or {}).get("complete") is True
+    if complete and isinstance(requested, int) and requested > 0:
+      noun = "note" if requested == 1 else "notes"
+      label = f"Finished reading {requested} {noun} from Memory"
+    else:
+      label = "Read a Memory page"
+    display = {
+      "label": label,
+      "detail": (
+        "The requested content is complete."
+        if complete else "This content continues on another page."
+      ),
+    }
+  if not discovery_complete:
+    display["warning"] = (
+      "Discovery stopped at a safety boundary; this catalogue may be incomplete."
+    )
+  return display
 
 
 def _emit_result(result: RecallResult) -> int:
@@ -1219,8 +1324,12 @@ def _emit_result(result: RecallResult) -> int:
   return 1 if result.status == RESULT_FAILED else 0
 
 
-def run() -> int:
-  args = [arg.strip() for arg in sys.argv[1:] if arg.strip()]
+def run(args: list[str] | None = None) -> int:
+  args = list(sys.argv[1:] if args is None else args)
+  if len(args) == 4:
+    from memory_read import run as run_read
+    return run_read(args)
+  args = [arg.strip() for arg in args if arg.strip()]
   if len(args) != 2:
     sys.stderr.write('usage: memory_search.py "<focused recall prompt>" "<chat_id>"\n')
     return 2

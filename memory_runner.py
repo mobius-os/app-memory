@@ -34,7 +34,6 @@ from memory_store import (
   STATE,
   discard_staging,
   load_recall_guidance,
-  load_read_delivery,
   load_usage,
   publish,
   read_revision_file,
@@ -702,19 +701,6 @@ def _audit_reads(
       path for path in raw_candidates
       if isinstance(path, str)
     ] if isinstance(raw_candidates, list) else []
-    delivery = (
-      load_read_delivery(str(trace.get("read_id") or ""))
-      if trace.get("schema") == 4 else None
-    )
-    requested_files = [
-      path for path in (delivery or {}).get("requested_files", [])
-      if isinstance(path, str)
-    ]
-    live_files = [
-      path for path in (delivery or {}).get(
-        "fully_supplied_files", trace.get("files", []),
-      ) if isinstance(path, str)
-    ]
     traversal = trace.get("traversal")
     live_opened = (
       [item for item in traversal.get("opened", []) if isinstance(item, dict)]
@@ -776,9 +762,6 @@ def _audit_reads(
       "live": {
         "opened": live_opened,
         "selected": candidate_files,
-        "requested": requested_files,
-        "fully_delivered": live_files,
-        "delivery_complete": bool(candidate_files) and set(live_files) == set(candidate_files),
         "selected_nodes": selected_nodes,
         "stop_reason": (
           traversal.get("stop_reason") if isinstance(traversal, dict) else None
@@ -2085,9 +2068,10 @@ Complete all four nightly duties in one coherent pass:
    `clear` guidance that the evidence shows is harmful or stale, or `keep` it
    when evidence is insufficient or mixed. This changes selection only: never
    weaken recall-by-default cues, source-of-truth verification, graph
-   confinement, or the 12-note safety ceiling. Do not optimize note counts or
-   treat a full ceiling as success. Base the action on named read ids and prefer
-   no change over a lesson that merely fits one title collision.
+   confinement, or incomplete-discovery warnings. Do not optimize note counts
+   or treat an emergency context boundary as success. Base the action on named
+   read ids and prefer no change over a lesson that merely fits one title
+   collision.
 4. While reviewing chats and supplied complete note contents, update or delete
    facts that are demonstrably stale, superseded, or obsolete. Identity overlap
    is a reason to inspect a supplied note, never proof that it is stale.

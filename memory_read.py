@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
 """Deterministic paged delivery from one pinned Memory lookup manifest."""
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
-import sys
 from datetime import UTC, datetime
 
 from memory_search import (
@@ -15,6 +14,9 @@ from memory_search import (
   RESULT_PREFIX,
   RecallResult,
   _catalog_page,
+  _cursor_auth,
+  _display,
+  _result_payload,
 )
 from memory_store import (
   MAX_NOTE_BYTES,
@@ -24,16 +26,16 @@ from memory_store import (
   safe_chat_id,
 )
 
-# Includes frames but excludes the final compact receipt. This is a
-# provider-facing delivery bound, not a UI-display bound: the platform parses
-# Memory's receipt before compacting large output for chat history. A byte
-# budget alone is sufficient, so many short notes can share a page instead of
-# paying an arbitrary two-node round-trip tax.
+# Bounds the complete stdout page: frames, continuation guidance, and receipt.
+# It is a provider-facing delivery bound, not a count cap; as many complete
+# notes as fit share a page and every remaining byte is available by cursor.
 BODY_PAGE_BYTES = 12_000
 _LOOKUP_ID_RE = re.compile(r"^[0-9a-f]{64}$")
-_BODY_CURSOR_RE = re.compile(r"^body:([0-9a-f]{16}):(\d+):(\d+)$")
-_CATALOG_CURSOR_RE = re.compile(r"^catalog:(\d+)$")
-_NOTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_BODY_CURSOR_RE = re.compile(
+  r"^body:([0-9a-f]{16}):(\d+):(\d+):([0-9a-f]{32})$"
+)
+_CATALOG_CURSOR_RE = re.compile(r"^catalog:(\d+):([0-9a-f]{32})$")
+_NOTE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 def _emit(payload: dict, text: str, *, failed: bool = False) -> int:
@@ -50,6 +52,7 @@ def _failure(lookup_id: str, reason: str) -> int:
     "phase": "read",
     "lookup_id": lookup_id if _LOOKUP_ID_RE.fullmatch(lookup_id) else "0" * 64,
     "reason": reason,
+    "display": {"label": "Memory lookup failed"},
   }, "Memory read failed.", failed=True)
 
 
@@ -73,7 +76,8 @@ def _manifest(lookup_id: str, chat_id: str) -> dict | None:
     or value.get("chat_id") != safe_chat_id(chat_id)
     or value.get("status") not in {"hit", "empty"}
     or not isinstance(value.get("commit"), str)
-    or not isinstance(value.get("read_id"), str)
+    or not re.fullmatch(r"[0-9a-f]{32}", str(value.get("read_id") or ""))
+    or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("cursor_secret") or ""))
   ):
     return None
   expires = _parse_time(value.get("expires_at"))
@@ -107,7 +111,13 @@ def _catalog(manifest: dict, cursor: str) -> int:
     start = 0
   else:
     match = _CATALOG_CURSOR_RE.fullmatch(cursor)
-    if not match:
+    if (
+      not match
+      or not hmac.compare_digest(
+        match.group(2),
+        _cursor_auth(manifest["cursor_secret"], "catalog", match.group(1)),
+      )
+    ):
       return _failure(str(manifest["lookup_id"]), "invalid_cursor")
     start = int(match.group(1))
   candidates = manifest["candidates"]
@@ -121,17 +131,11 @@ def _catalog(manifest: dict, cursor: str) -> int:
     notes=tuple(candidates),
     lookup_id=manifest["lookup_id"],
     read_id=manifest["read_id"],
+    cursor_secret=manifest["cursor_secret"],
     discovery_complete=manifest.get("discovery_complete") is not False,
   )
   output, notes, page = _catalog_page(result, start)
-  payload = {
-    "status": RESULT_HIT,
-    "phase": "catalog",
-    "lookup_id": manifest["lookup_id"],
-    "notes": notes,
-    "page": page,
-    "discovery_complete": result.discovery_complete,
-  }
+  payload = _result_payload(result, notes=notes, page=page)
   return _emit(payload, output)
 
 
@@ -166,47 +170,113 @@ def _selection_hash(selection: list[dict]) -> str:
   return hashlib.sha256(raw).hexdigest()[:16]
 
 
-def _body_cursor(selection: list[dict], cursor: str) -> tuple[int, int] | None:
+def _body_cursor(
+  selection: list[dict], cursor: str, cursor_secret: str,
+) -> tuple[int, int] | None:
   if cursor == "start":
     return 0, 0
   match = _BODY_CURSOR_RE.fullmatch(cursor)
-  if not match or match.group(1) != _selection_hash(selection):
+  selection_hash = _selection_hash(selection)
+  if not match or match.group(1) != selection_hash:
     return None
   index, offset = int(match.group(2)), int(match.group(3))
   if index < 0 or index >= len(selection) or offset < 0:
+    return None
+  if not hmac.compare_digest(
+    match.group(4),
+    _cursor_auth(cursor_secret, "body", selection_hash, index, offset),
+  ):
     return None
   return index, offset
 
 
 def _utf8_slice(raw: bytes, start: int, limit: int) -> tuple[str, int]:
-  end = min(len(raw), start + max(1, limit))
-  while end > start:
-    try:
-      return raw[start:end].decode("utf-8"), end
-    except UnicodeDecodeError as exc:
-      if exc.start == 0:
-        raise ValueError("cursor is not on a UTF-8 boundary") from exc
-      end = start + exc.start
-  raise ValueError("unable to make UTF-8 progress")
+  if start < 0 or start > len(raw):
+    raise ValueError("invalid UTF-8 cursor")
+  if start < len(raw) and raw[start] & 0xC0 == 0x80:
+    raise ValueError("cursor is not on a UTF-8 boundary")
+  end = min(len(raw), start + max(0, limit))
+  while end < len(raw) and end > start and raw[end] & 0xC0 == 0x80:
+    end -= 1
+  return raw[start:end].decode("utf-8"), end
+
+
+def _body_state(
+  manifest: dict,
+  selection: list[dict],
+  frames: list[str],
+  page_notes: list[dict],
+  index: int,
+  offset: int,
+) -> tuple[str, dict, bytes]:
+  complete = index >= len(selection)
+  page = {
+    "requested_count": len(selection),
+    "complete": complete,
+  }
+  if not complete:
+    selection_hash = _selection_hash(selection)
+    signature = _cursor_auth(
+      manifest["cursor_secret"], "body", selection_hash, index, offset,
+    )
+    page["next_cursor"] = f"body:{selection_hash}:{index}:{offset}:{signature}"
+  output = "\n\n".join(frames)
+  if not complete:
+    output += (
+      ("\n\n" if output else "")
+      + "Memory content continues. Repeat the same selection with cursor "
+      + page["next_cursor"] + "."
+    )
+  payload = {
+    "status": RESULT_HIT,
+    "phase": "read",
+    "lookup_id": manifest["lookup_id"],
+    "notes": page_notes,
+    "page": page,
+    "display": _display(
+      RESULT_HIT,
+      phase="read",
+      page=page,
+      note_count=len(page_notes),
+    ),
+  }
+  receipt = RESULT_PREFIX + json.dumps(
+    payload, ensure_ascii=True, separators=(",", ":"),
+  )
+  return output, payload, (output + "\n" + receipt + "\n").encode("utf-8")
+
+
+def _frame(note: dict, raw: bytes, start: int, end: int) -> str:
+  metadata = {
+    "id": note["id"],
+    "path": note["path"],
+    "sha256": hashlib.sha256(raw).hexdigest(),
+    "byte_start": start,
+    "byte_end": end,
+    "byte_total": len(raw),
+  }
+  return (
+    "--- MEMORY NODE START "
+    + json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
+    + " ---\n"
+    + raw[start:end].decode("utf-8")
+    + "\n--- MEMORY NODE END ---"
+  )
 
 
 def _body(manifest: dict, raw_selection: str, cursor: str) -> int:
   selection = _selection(manifest, raw_selection)
   if not selection:
     return _failure(str(manifest["lookup_id"]), "invalid_selection")
-  position = _body_cursor(selection, cursor)
+  position = _body_cursor(selection, cursor, manifest["cursor_secret"])
   if position is None:
     return _failure(str(manifest["lookup_id"]), "invalid_cursor")
   index, offset = position
-  remaining = BODY_PAGE_BYTES
   frames: list[str] = []
   segments: list[dict] = []
   page_notes: list[dict] = []
   commit = manifest["commit"]
-  while (
-    index < len(selection)
-    and remaining > 512
-  ):
+  while index < len(selection):
     note = selection[index]
     try:
       content = read_revision_file(commit, note["path"], max_bytes=MAX_NOTE_BYTES)
@@ -215,53 +285,65 @@ def _body(manifest: dict, raw_selection: str, cursor: str) -> int:
     raw = content.encode("utf-8")
     if offset > len(raw):
       return _failure(str(manifest["lookup_id"]), "invalid_cursor")
-    digest = hashlib.sha256(raw).hexdigest()
-    header_data = {
-      "id": note["id"], "path": note["path"], "sha256": digest,
-      "byte_start": offset, "byte_total": len(raw),
+    note_meta = {
+      "id": note["id"],
+      "path": note["path"],
+      "title": note.get("title") or note["id"],
     }
-    provisional = json.dumps(header_data, ensure_ascii=True, separators=(",", ":"))
-    overhead = len((f"--- MEMORY NODE START {provisional} ---\n\n"
-                    "--- MEMORY NODE END ---\n").encode("utf-8")) + 32
-    room = max(1, remaining - overhead)
-    if len(raw) == 0:
-      chunk, end = "", 0
+
+    def candidate(end: int):
+      next_index = index + 1 if end == len(raw) else index
+      next_offset = 0 if end == len(raw) else end
+      next_notes = (
+        page_notes if page_notes and page_notes[-1]["path"] == note["path"]
+        else [*page_notes, note_meta]
+      )
+      next_frames = [*frames, _frame(note, raw, offset, end)]
+      state = _body_state(
+        manifest, selection, next_frames, next_notes, next_index, next_offset,
+      )
+      return state, next_frames, next_notes, next_index, next_offset
+
+    whole = candidate(len(raw))
+    if len(whole[0][2]) <= BODY_PAGE_BYTES:
+      chosen = whole
     else:
-      try:
-        chunk, end = _utf8_slice(raw, offset, room)
-      except ValueError:
-        return _failure(str(manifest["lookup_id"]), "invalid_cursor")
-    header_data["byte_end"] = end
-    header = json.dumps(header_data, ensure_ascii=True, separators=(",", ":"))
-    frame = (
-      f"--- MEMORY NODE START {header} ---\n"
-      + chunk
-      + "\n--- MEMORY NODE END ---"
-    )
-    frame_size = len((frame + "\n").encode("utf-8"))
-    frames.append(frame)
-    remaining -= frame_size
+      chosen = None
+      low, high = 1, len(raw) - offset
+      while low <= high:
+        middle = (low + high) // 2
+        try:
+          _chunk, end = _utf8_slice(raw, offset, middle)
+        except (UnicodeError, ValueError):
+          return _failure(str(manifest["lookup_id"]), "invalid_cursor")
+        if end == offset:
+          low = middle + 1
+          continue
+        attempt = candidate(end)
+        if len(attempt[0][2]) <= BODY_PAGE_BYTES:
+          chosen = attempt
+          low = middle + 1
+        else:
+          high = middle - 1
+    if chosen is None:
+      if not frames:
+        return _failure(str(manifest["lookup_id"]), "page_metadata_too_large")
+      break
+    (_state, frames, page_notes, next_index, next_offset) = chosen
     segments.append({
-      "path": note["path"], "start": offset, "end": end,
+      "path": note["path"], "start": offset, "end": next_offset or len(raw),
       "total": len(raw),
     })
-    if not page_notes or page_notes[-1]["path"] != note["path"]:
-      page_notes.append({
-        "id": note["id"], "path": note["path"], "title": note.get("title") or note["id"],
-      })
-    if end < len(raw):
-      offset = end
+    index, offset = next_index, next_offset
+    if index < len(selection) and offset:
       break
-    index += 1
-    offset = 0
-  complete = index >= len(selection)
-  page = {
-    "requested_count": len(selection),
-    "fully_supplied_count": index,
-    "complete": complete,
-  }
-  if not complete:
-    page["next_cursor"] = f"body:{_selection_hash(selection)}:{index}:{offset}"
+
+  output, payload, rendered = _body_state(
+    manifest, selection, frames, page_notes, index, offset,
+  )
+  if len(rendered) > BODY_PAGE_BYTES:
+    return _failure(str(manifest["lookup_id"]), "page_budget_exceeded")
+  print(output, flush=True)
   try:
     record_read_delivery(
       read_id=manifest["read_id"],
@@ -273,28 +355,14 @@ def _body(manifest: dict, raw_selection: str, cursor: str) -> int:
     )
   except (OSError, ValueError):
     return _failure(str(manifest["lookup_id"]), "delivery_audit_failed")
-  output = "\n\n".join(frames)
-  if not complete:
-    output += (
-      "\n\nMemory content continues. Repeat the same selection with cursor "
-      + page["next_cursor"] + "."
-    )
-  return _emit({
-    "status": RESULT_HIT,
-    "phase": "read",
-    "lookup_id": manifest["lookup_id"],
-    "notes": page_notes,
-    "page": page,
-  }, output)
+  print(RESULT_PREFIX + json.dumps(
+    payload, ensure_ascii=True, separators=(",", ":"),
+  ), flush=True)
+  return 0
 
 
-def run() -> int:
-  args = sys.argv[1:]
+def run(args: list[str]) -> int:
   if len(args) != 4:
-    sys.stderr.write(
-      'usage: memory_read.py "<lookup_id>" "<catalog|all|JSON ids>" '
-      '"<cursor>" "<chat_id>"\n'
-    )
     return 2
   lookup_id, selection, cursor, chat_id = args
   if not _LOOKUP_ID_RE.fullmatch(lookup_id):
@@ -305,7 +373,3 @@ def run() -> int:
   if selection == "catalog":
     return _catalog(manifest, cursor)
   return _body(manifest, selection, cursor)
-
-
-if __name__ == "__main__":
-  raise SystemExit(run())

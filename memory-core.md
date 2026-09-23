@@ -117,19 +117,20 @@ when needed, a catalogue cursor. Read every catalogue page before deciding
 which candidates to open:
 
 ```bash
-python3 <source_dir>/memory_read.py "<lookup_id>" "catalog" "<next_cursor>" "$CHAT_ID"
+python3 <source_dir>/memory_search.py "<lookup_id>" "catalog" "<next_cursor>" "$CHAT_ID"
 ```
 
 Then request every useful candidate in full, either as `all` or a JSON array of
 catalogue ids:
 
 ```bash
-python3 <source_dir>/memory_read.py "<lookup_id>" '["candidate-id"]' "start" "$CHAT_ID"
+python3 <source_dir>/memory_search.py "<lookup_id>" '["candidate-id"]' "start" "$CHAT_ID"
 ```
 
 If a body page returns a next cursor, repeat the exact same lookup id and
-selection with that cursor until `complete` is true. Never rerun
-`memory_search.py` merely because a catalogue or body continues. There is no
+selection with that cursor until `complete` is true. This four-argument form
+continues the pinned lookup; never repeat the two-argument discovery invocation
+merely because a catalogue or body continues. There is no
 fixed number of full notes the agent may read; page boundaries control
 transport size without discarding content. Catalogue descriptions are for
 choosing what to open, not evidence for the answer: use only fully delivered

@@ -26,11 +26,11 @@ decision continues only through the newly opened frontier, pruning unchosen
 siblings while retaining them in the recall trace for nightly audit. The graph
 itself bounds the walk: there is no graph-wide catalog, configured breadth,
 depth target, or total-node budget, and the navigator may stop as soon as it has
-enough. Routing nodes need not be selected. The reader returns the complete
-contents of the useful selected nodes from the pinned commit, plus verified file
-pointers; 12 selected notes is a pathological output ceiling, not a target.
-The host also bounds total opened content and turns a pathological broad
-frontier into one final selection-only decision rather than an unbounded prompt.
+enough. Routing nodes need not be selected. Discovery returns a pageable
+catalogue from one pinned commit; the agent then requests every useful node in
+full through lossless body pages. There is no answer-note count cap. The host
+still bounds content opened inside one navigator prompt and marks a pathological
+broad frontier incomplete rather than pretending it was exhaustive.
 
 **Why:** front-loading everything wastes context and lets stale facts steer
 unrelated work. Bounded chat continuity plus prompt-scoped graph retrieval keeps

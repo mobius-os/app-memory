@@ -215,6 +215,11 @@ test('reader returns a bounded catalogue then verified pinned body pages', () =>
   assert.match(expander, /byte_start/)
   assert.match(expander, /next_cursor/)
   assert.match(corePrompt, /Read every catalogue page before deciding/)
+  assert.doesNotMatch(corePrompt, /python3 <source_dir>\/memory_read\.py/)
+  assert.match(corePrompt,
+    /python3 <source_dir>\/memory_search\.py "<lookup_id>" "catalog"/)
+  assert.match(corePrompt,
+    /python3 <source_dir>\/memory_search\.py "<lookup_id>" '\["candidate-id"\]'/)
   assert.match(corePrompt, /blank initial[\s\S]*live session id[\s\S]*not a completed Memory read/)
   assert.match(corePrompt, /never start the same lookup again while its original session is running/)
   assert.match(provider, /"--tools", ""/)

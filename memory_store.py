@@ -44,6 +44,7 @@ MAX_RECALL_EXECUTION_RECEIPT_BYTES = 524_288
 RECALL_EXECUTION_RETENTION_SECONDS = 48 * 60 * 60
 _RECALL_EXECUTION_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 _READ_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_USAGE_DELIVERY_PREFIX = "__delivery__:"
 
 
 def _atomic_text(path: Path, text: str) -> None:
@@ -143,13 +144,10 @@ class RecallExecution:
       value = json.loads(raw)
     except (TypeError, ValueError):
       return None
-    return (
-      value if isinstance(value, dict) and value.get("schema") in {1, 2}
-      else None
-    )
+    return value if isinstance(value, dict) and value.get("schema") == 3 else None
 
   def store(self, value: dict) -> None:
-    if not isinstance(value, dict) or value.get("schema") not in {1, 2}:
+    if not isinstance(value, dict) or value.get("schema") != 3:
       raise ValueError("invalid recall execution receipt")
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n"
     if len(raw.encode("utf-8")) > MAX_RECALL_EXECUTION_RECEIPT_BYTES:
@@ -215,7 +213,7 @@ def load_recall_manifest(key: str) -> dict | None:
     MAX_RECALL_EXECUTION_RECEIPT_BYTES,
     lock=True,
   )
-  return value if isinstance(value, dict) and value.get("schema") == 2 else None
+  return value if isinstance(value, dict) and value.get("schema") == 3 else None
 
 
 def _git_env() -> dict[str, str]:
@@ -820,6 +818,7 @@ def record_read(
   traversal: dict | None = None,
   status: str = "completed",
   reason: str | None = None,
+  discovery_complete: bool = True,
   invocation_fingerprint: str | None = None,
 ) -> dict:
   """Record candidate discovery without claiming those bodies were delivered."""
@@ -854,13 +853,11 @@ def record_read(
       "chat_id": safe_id,
       "question": question[:8_000],
       "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
-      # `files` remains the fully-delivered set for audit compatibility. A V2
-      # discovery has supplied no note bodies yet.
-      "files": [],
       "candidates": files if status == "completed" else [],
       "traversal": (
         traversal if status == "completed" and isinstance(traversal, dict) else {}
       ),
+      "discovery_complete": discovery_complete is not False,
     }
     if invocation_fingerprint:
       trace["invocation_fingerprint"] = invocation_fingerprint
@@ -934,7 +931,7 @@ def record_read_delivery(
     len(candidate_ids) != len(candidates)
     or len(set(candidate_ids.values())) != len(candidates)
     or any(not _SAFE_REL.fullmatch(path) for path in candidate_paths)
-    or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", node_id)
+    or any(not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", node_id)
            for node_id in candidate_ids.values())
     or any(path not in allowed for path in requested_paths)
   ):
@@ -992,9 +989,25 @@ def record_read_delivery(
         usage = {}
       if not isinstance(usage, dict):
         usage = {}
+      now = int(datetime.now(UTC).timestamp())
+      cutoff = now - RECALL_EXECUTION_RETENTION_SECONDS
+      usage = {
+        key: value for key, value in usage.items()
+        if not (
+          isinstance(key, str)
+          and key.startswith(_USAGE_DELIVERY_PREFIX)
+          and (not isinstance(value, int) or value < cutoff)
+        )
+      }
       for path in newly_complete:
         node_id = candidate_ids[path]
+        delivery_key = _USAGE_DELIVERY_PREFIX + hashlib.sha256(
+          f"{read_id}\0{path}".encode("utf-8")
+        ).hexdigest()
+        if delivery_key in usage:
+          continue
         usage[node_id] = int(usage.get(node_id, 0) or 0) + 1
+        usage[delivery_key] = now
       _atomic_text(usage_path, json.dumps(usage, indent=2, sort_keys=True) + "\n")
     state.update({
       "requested_files": requested,
@@ -1018,7 +1031,11 @@ def load_usage() -> dict[str, int]:
     return {}
   return {
     str(key): int(count) for key, count in value.items()
-    if isinstance(key, str) and isinstance(count, int)
+    if (
+      isinstance(key, str)
+      and not key.startswith(_USAGE_DELIVERY_PREFIX)
+      and isinstance(count, int)
+    )
   } if isinstance(value, dict) else {}
 
 

@@ -34,11 +34,12 @@ def _load(data_dir: Path):
   return store, search, reader
 
 
-def _publish(store, bodies: list[str]):
+def _publish(store, bodies: list[str], node_ids: list[str] | None = None):
+  node_ids = node_ids or [f"note-{index:02d}" for index in range(len(bodies))]
   seed = store.ROOT / "seed"
   (seed / "mocs").mkdir(parents=True, exist_ok=True)
   (seed / "notes").mkdir(exist_ok=True)
-  links = "\n".join(f"- [[note-{index:02d}]]" for index in range(len(bodies)))
+  links = "\n".join(f"- [[{node_id}]]" for node_id in node_ids)
   (seed / "index.md").write_text(f"# Memory\n\n{links}\n", encoding="utf-8")
   _, worktree = store.start_staging(seed)
   nodes = [{
@@ -47,7 +48,7 @@ def _publish(store, bodies: list[str]):
   }]
   edges = []
   for index, body in enumerate(bodies):
-    node_id = f"note-{index:02d}"
+    node_id = node_ids[index]
     path = f"notes/{node_id}.md"
     (worktree / path).write_text(body, encoding="utf-8")
     nodes.append({
@@ -62,11 +63,15 @@ def _publish(store, bodies: list[str]):
   return store.publish(worktree)
 
 
-def _manifest(store, commit: str, count: int, *, chat_id="chat-1", lookup_id=None):
+def _manifest(
+  store, commit: str, count: int, *, chat_id="chat-1", lookup_id=None,
+  node_ids: list[str] | None = None,
+):
   lookup_id = lookup_id or ("a" * 64)
+  node_ids = node_ids or [f"note-{index:02d}" for index in range(count)]
   candidates = [{
-    "id": f"note-{index:02d}",
-    "path": f"notes/note-{index:02d}.md",
+    "id": node_ids[index],
+    "path": f"notes/{node_ids[index]}.md",
     "title": f"Note {index:02d}",
     "excerpt": f"Summary {index:02d} " + ("x" * 180),
   } for index in range(count)]
@@ -77,16 +82,16 @@ def _manifest(store, commit: str, count: int, *, chat_id="chat-1", lookup_id=Non
   )
   now = datetime.now(UTC)
   value = {
-    "schema": 2,
+    "schema": 3,
     "lookup_id": lookup_id,
     "status": "hit",
     "commit": commit,
     "chat_id": chat_id,
     "read_id": trace["read_id"],
+    "cursor_secret": "c" * 64,
     "candidates": candidates,
     "expires_at": (now + timedelta(hours=48)).isoformat(),
     "discovery_complete": True,
-    "recorded": True,
   }
   with store.recall_execution(lookup_id) as receipt:
     receipt.store(value)
@@ -95,13 +100,8 @@ def _manifest(store, commit: str, count: int, *, chat_id="chat-1", lookup_id=Non
 
 def _run(reader, *args):
   output = io.StringIO()
-  old_argv = sys.argv
-  try:
-    sys.argv = [str(REPO / "memory_read.py"), *args]
-    with contextlib.redirect_stdout(output):
-      code = reader.run()
-  finally:
-    sys.argv = old_argv
+  with contextlib.redirect_stdout(output):
+    code = reader.run(list(args))
   text = output.getvalue()
   marker = next(
     line for line in text.splitlines()
@@ -124,6 +124,7 @@ def test_catalogue_pages_every_candidate_without_a_fixed_count_cap():
       notes=tuple(manifest["candidates"]),
       lookup_id=manifest["lookup_id"],
       read_id=manifest["read_id"],
+      cursor_secret=manifest["cursor_secret"],
     )
 
     first_text = io.StringIO()
@@ -154,9 +155,16 @@ def test_catalogue_pages_every_candidate_without_a_fixed_count_cap():
 def test_body_pages_reconstruct_exact_pinned_utf8_and_count_usage_once():
   with tempfile.TemporaryDirectory() as raw:
     store, _search, reader = _load(Path(raw))
-    body = "αβ🙂\nline with trailing spaces  \n\n" + ("Z" * 7_000) + "\nend\t \n"
+    body = (
+      "αβ🙂\nline with trailing spaces  \n\n"
+      + ("🙂界" * 5_000)
+      + "\nend\t \n"
+    )
     pointer = _publish(store, [body])
     manifest = _manifest(store, pointer["commit"], 1)
+    manifest["candidates"][0]["title"] = "界" * 120
+    with store.recall_execution(manifest["lookup_id"]) as receipt:
+      receipt.store(manifest)
     cursor = "start"
     rebuilt = bytearray()
     pages: list[tuple[str, str]] = []
@@ -166,7 +174,7 @@ def test_body_pages_reconstruct_exact_pinned_utf8_and_count_usage_once():
         reader, manifest["lookup_id"], '["note-00"]', cursor, "chat-1",
       )
       assert code == 0
-      assert len(text) <= reader.BODY_PAGE_BYTES + 2_048
+      assert len(text.encode("utf-8")) <= reader.BODY_PAGE_BYTES
       frame = FRAME_RE.search(text)
       assert frame is not None
       metadata = json.loads(frame.group("meta"))
@@ -181,7 +189,7 @@ def test_body_pages_reconstruct_exact_pinned_utf8_and_count_usage_once():
       cursor = payload["page"]["next_cursor"]
 
     assert bytes(rebuilt) == body.encode("utf-8")
-    assert json.loads((store.STATE / "usage.json").read_text()) == {"note-00": 1}
+    assert store.load_usage() == {"note-00": 1}
     delivery = store.load_read_delivery(manifest["read_id"])
     assert delivery["requested_files"] == ["notes/note-00.md"]
     assert delivery["fully_supplied_files"] == ["notes/note-00.md"]
@@ -192,7 +200,7 @@ def test_body_pages_reconstruct_exact_pinned_utf8_and_count_usage_once():
       reader, manifest["lookup_id"], '["note-00"]', pages[0][0], "chat-1",
     )
     assert code == 0
-    assert json.loads((store.STATE / "usage.json").read_text()) == {"note-00": 1}
+    assert store.load_usage() == {"note-00": 1}
 
 
 def test_body_byte_budget_replaces_the_old_two_node_page_cap():
@@ -208,9 +216,43 @@ def test_body_byte_budget_replaces_the_old_two_node_page_cap():
 
     assert code == 0
     assert payload["page"]["complete"] is True
-    assert payload["page"]["fully_supplied_count"] == 9
     assert len(payload["notes"]) == 9
     assert len(FRAME_RE.findall(text)) == 9
+
+
+def test_continuation_cursors_cannot_skip_undelivered_content():
+  with tempfile.TemporaryDirectory() as raw:
+    store, _search, reader = _load(Path(raw))
+    pointer = _publish(store, ["x" * 20_000])
+    manifest = _manifest(store, pointer["commit"], 1)
+    code, _text, payload = _run(
+      reader, manifest["lookup_id"], "all", "start", "chat-1",
+    )
+    assert code == 0 and payload["page"]["complete"] is False
+    parts = payload["page"]["next_cursor"].split(":")
+    parts[3] = str(int(parts[3]) + 100)
+    code, _text, payload = _run(
+      reader, manifest["lookup_id"], "all", ":".join(parts), "chat-1",
+    )
+    assert code == 1 and payload["reason"] == "invalid_cursor"
+
+
+def test_every_publishable_node_id_remains_expandable():
+  with tempfile.TemporaryDirectory() as raw:
+    store, _search, reader = _load(Path(raw))
+    long_id = "a" * 129
+    pointer = _publish(store, ["long body", "ordinary body"], [long_id, "ordinary"])
+    manifest = _manifest(
+      store, pointer["commit"], 2, node_ids=[long_id, "ordinary"],
+    )
+
+    code, text, payload = _run(
+      reader, manifest["lookup_id"], '["ordinary"]', "start", "chat-1",
+    )
+
+    assert code == 0
+    assert payload["page"]["complete"] is True
+    assert "ordinary body" in text
 
 
 def test_read_rejects_cross_chat_expired_invalid_and_missing_pinned_content():
@@ -228,7 +270,8 @@ def test_read_rejects_cross_chat_expired_invalid_and_missing_pinned_content():
     )
     assert code == 1 and payload["reason"] == "invalid_selection"
     code, _text, payload = _run(
-      reader, manifest["lookup_id"], "all", "body:deadbeefdeadbeef:0:0", "chat-1",
+      reader, manifest["lookup_id"], "all",
+      "body:deadbeefdeadbeef:0:0:" + ("0" * 32), "chat-1",
     )
     assert code == 1 and payload["reason"] == "invalid_cursor"
 
