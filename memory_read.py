@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import re
+import sys
 from datetime import UTC, datetime
 
 from memory_search import (
@@ -391,3 +392,7 @@ def run(args: list[str]) -> int:
   if selection == "catalog":
     return _catalog(manifest, cursor)
   return _body(manifest, selection, cursor)
+
+
+if __name__ == "__main__":
+  raise SystemExit(run(sys.argv[1:]))

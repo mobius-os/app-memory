@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -109,6 +110,24 @@ def _run(reader, *args):
   )
   payload = json.loads(marker.removeprefix("MOBIUS_APP_ACTIVITY_V1:"))
   return code, text, payload
+
+
+def test_manifest_declared_reader_runs_as_a_direct_command():
+  result = subprocess.run(
+    [sys.executable, str(REPO / "memory_read.py"),
+     "invalid", "catalog", "start", "chat-1"],
+    check=False, capture_output=True, text=True,
+  )
+
+  assert result.returncode == 1
+  marker = next(
+    line for line in result.stdout.splitlines()
+    if line.startswith("MOBIUS_APP_ACTIVITY_V1:")
+  )
+  payload = json.loads(marker.removeprefix("MOBIUS_APP_ACTIVITY_V1:"))
+  assert payload["activity_id"] == "memory-read"
+  assert payload["status"] == "failed"
+  assert payload["reason"] == "invalid_lookup"
 
 
 def test_catalogue_pages_every_candidate_without_a_fixed_count_cap():
