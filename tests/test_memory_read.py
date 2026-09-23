@@ -105,9 +105,9 @@ def _run(reader, *args):
   text = output.getvalue()
   marker = next(
     line for line in text.splitlines()
-    if line.startswith("MOBIUS_MEMORY_RESULT_V2:")
+    if line.startswith("MOBIUS_APP_ACTIVITY_V1:")
   )
-  payload = json.loads(marker.removeprefix("MOBIUS_MEMORY_RESULT_V2:"))
+  payload = json.loads(marker.removeprefix("MOBIUS_APP_ACTIVITY_V1:"))
   return code, text, payload
 
 
@@ -135,7 +135,7 @@ def test_catalogue_pages_every_candidate_without_a_fixed_count_cap():
       if line.startswith(search.RESULT_PREFIX)
     )
     payload = json.loads(first_marker.removeprefix(search.RESULT_PREFIX))
-    seen = [item["id"] for item in payload["notes"]]
+    seen = [item["id"] for item in payload["resources"]]
     assert len(first_text.getvalue()) <= search.TOOL_OUTPUT_PAGE_CHARS
 
     while not payload["page"]["complete"]:
@@ -145,7 +145,7 @@ def test_catalogue_pages_every_candidate_without_a_fixed_count_cap():
       )
       assert code == 0
       assert len(text) <= search.TOOL_OUTPUT_PAGE_CHARS
-      seen.extend(item["id"] for item in payload["notes"])
+      seen.extend(item["id"] for item in payload["resources"])
 
     assert seen == [f"note-{index:02d}" for index in range(25)]
     assert not (store.STATE / "read-delivery" / f"{manifest['read_id']}.json").exists()
@@ -216,7 +216,7 @@ def test_body_byte_budget_replaces_the_old_two_node_page_cap():
 
     assert code == 0
     assert payload["page"]["complete"] is True
-    assert len(payload["notes"]) == 9
+    assert len(payload["resources"]) == 9
     assert len(FRAME_RE.findall(text)) == 9
 
 

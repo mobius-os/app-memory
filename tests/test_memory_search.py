@@ -528,8 +528,14 @@ class MemorySearchContractTests(unittest.TestCase):
         if line.startswith(search.RESULT_PREFIX)
       )
       payload = json.loads(marker.removeprefix(search.RESULT_PREFIX))
-      self.assertEqual(payload["status"], search.RESULT_HIT)
-      self.assertEqual(payload["notes"][0]["path"], "notes/quiet-ui.md")
+      self.assertEqual(payload["status"], "succeeded")
+      self.assertEqual(payload["outcome"], search.RESULT_HIT)
+      self.assertEqual(payload["resources"][0]["path"], "notes/quiet-ui.md")
+      self.assertEqual(payload["resources"][0]["label"], "Quiet interface")
+      self.assertEqual(
+        payload["resources"][0]["summary"], "A durable interface preference",
+      )
+      self.assertEqual(payload["resources"][0]["intent"], "note:quiet-ui")
       trace = json.loads((store.STATE / "read-trace" / "chat-123.json").read_text())
       self.assertEqual(trace["commit"], pointer["commit"])
       self.assertNotIn("files", trace)
@@ -640,12 +646,14 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertEqual(
         json.loads(marker.removeprefix(search.RESULT_PREFIX)),
         {
-          "status": search.RESULT_FAILED,
+          "activity_id": search.SEARCH_ACTIVITY_ID,
+          "status": "failed",
+          "outcome": search.RESULT_FAILED,
+          "label": "Memory lookup failed",
           "phase": "catalog",
           "lookup_id": mock.ANY,
           "reason": search.RESULT_REASON_NOT_READY,
           "discovery_complete": True,
-          "display": {"label": "Memory lookup failed"},
         },
       )
       trace = json.loads(

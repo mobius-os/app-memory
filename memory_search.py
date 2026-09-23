@@ -44,7 +44,9 @@ MAX_OPENED_CONTENT_CHARS = 160_000
 AGENT_TIMEOUT = int(os.environ.get("MEMORY_READER_TIMEOUT", "90"))
 USAGE_PREFLIGHT_TIMEOUT = 1.25
 
-RESULT_PREFIX = "MOBIUS_MEMORY_RESULT_V2:"
+RESULT_PREFIX = "MOBIUS_APP_ACTIVITY_V1:"
+SEARCH_ACTIVITY_ID = "memory-search"
+READ_ACTIVITY_ID = "memory-read"
 RESULT_HIT = "hit"
 RESULT_EMPTY = "empty"
 RESULT_FAILED = "failed"
@@ -53,8 +55,8 @@ RESULT_REASON_NOT_READY = "not_ready"
 RESULT_REASON_READ_FAILED = "read_failed"
 EXECUTION_RECEIPT_SCHEMA = 3
 # A catalogue is intentionally bounded for provider-facing delivery, but it is
-# not forced beneath the chat UI's 4 KiB inline-display heuristic. The platform
-# parses Memory's receipt before it stores a compact display excerpt, while
+# not forced beneath the chat UI's 4 KiB inline-display heuristic. The generic
+# app-activity transport parses the receipt before storing an excerpt, while
 # 12 KiB avoids another full agent/tool round trip for a handful of names.
 TOOL_OUTPUT_PAGE_CHARS = 12_000
 MAX_CATALOG_EXCERPT_CHARS = 300
@@ -1213,19 +1215,52 @@ def _catalog_page(
   return result.answer, notes, page
 
 
+def _activity_resource(note: dict) -> dict:
+  """One catalogue entry shared by the agent protocol and shell card."""
+  node_id = str(note.get("id") or "")
+  path = str(note.get("path") or "")
+  label = str(note.get("title") or node_id or path)[:120]
+  resource = {
+    "id": node_id,
+    "path": path,
+    "label": label,
+    "intent": f"note:{node_id}",
+  }
+  summary = str(note.get("excerpt") or "")[:MAX_CATALOG_EXCERPT_CHARS]
+  if summary and summary.casefold() != label.casefold():
+    resource["summary"] = summary
+  return resource
+
+
 def _result_payload(
   result: RecallResult,
   *,
   notes: list[dict] | None = None,
   page: dict | None = None,
+  activity_id: str = SEARCH_ACTIVITY_ID,
 ) -> dict:
+  display = _display(
+    result.status,
+    phase="catalog",
+    page=page,
+    note_count=len(notes or []),
+    reused=result.reused,
+    discovery_complete=result.discovery_complete,
+  )
   payload = {
-    "status": result.status,
+    "activity_id": activity_id,
+    "status": {
+      RESULT_HIT: "succeeded",
+      RESULT_EMPTY: "empty",
+      RESULT_FAILED: "failed",
+    }[result.status],
+    "outcome": result.status,
+    **display,
     "phase": "catalog",
     "lookup_id": result.lookup_id,
   }
   if result.status == RESULT_HIT:
-    payload["notes"] = notes or []
+    payload["resources"] = [_activity_resource(note) for note in (notes or [])]
     payload["page"] = page or {
       "candidate_count": len(result.notes), "complete": True,
     }
@@ -1243,14 +1278,6 @@ def _result_payload(
   if result.reused:
     payload["reused"] = True
   payload["discovery_complete"] = result.discovery_complete
-  payload["display"] = _display(
-    result.status,
-    phase="catalog",
-    page=payload.get("page"),
-    note_count=len(notes or []),
-    reused=result.reused,
-    discovery_complete=result.discovery_complete,
-  )
   return payload
 
 
