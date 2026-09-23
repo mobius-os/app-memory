@@ -92,13 +92,10 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertEqual(calls, 1)
       self.assertNotIn('"reused":true', outputs[0])
       self.assertIn('"reused":true', outputs[1])
-      self.assertIn("prefers a quiet interface", outputs[1])
+      self.assertIn("A durable interface preference", outputs[1])
       log = next((store.STATE / "read-log").glob("*.jsonl"))
       self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
-      self.assertEqual(
-        json.loads((store.STATE / "usage.json").read_text()),
-        {"quiet-ui": 1},
-      )
+      self.assertFalse((store.STATE / "usage.json").exists())
       receipt = next((store.STATE / "recall-execution").glob("*.json"))
       self.assertNotIn("physical-turn-a", receipt.read_text(encoding="utf-8"))
 
@@ -158,9 +155,11 @@ class MemorySearchContractTests(unittest.TestCase):
         # direct-script contract rather than manufacturing a shared lifetime.
         request = search._prepare_request("quiet interface", "chat-1")
         search._execute_request(request)
-        search._execute_request(request)
+        second_request = search._prepare_request("quiet interface", "chat-1")
+        search._execute_request(second_request)
 
       self.assertIsNone(request.invocation_fingerprint)
+      self.assertNotEqual(request.lookup_id, second_request.lookup_id)
       self.assertEqual(calls, 2)
       log = next((store.STATE / "read-log").glob("*.jsonl"))
       self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
@@ -337,7 +336,10 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertTrue(result.reused)
       self.assertEqual(result.files, ("notes/quiet-ui.md",))
       with store.recall_execution(request.invocation_fingerprint) as execution:
-        self.assertEqual(execution.load()["files"], ["notes/quiet-ui.md"])
+        self.assertEqual(
+          [item["path"] for item in execution.load()["candidates"]],
+          ["notes/quiet-ui.md"],
+        )
 
   def test_tampered_execution_receipt_cannot_escape_the_pinned_graph(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -372,7 +374,10 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertFalse(result.reused)
       self.assertEqual(result.files, ("notes/quiet-ui.md",))
       with store.recall_execution(request.invocation_fingerprint) as execution:
-        self.assertEqual(execution.load()["files"], ["notes/quiet-ui.md"])
+        self.assertEqual(
+          [item["path"] for item in execution.load()["candidates"]],
+          ["notes/quiet-ui.md"],
+        )
 
   def test_selector_change_invalidates_same_turn_reuse_key(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -427,7 +432,8 @@ class MemorySearchContractTests(unittest.TestCase):
         result = search.retrieve("quiet interface")
       self.assertEqual(result.status, search.RESULT_HIT)
       self.assertEqual(result.files, ("notes/quiet-ui.md",))
-      self.assertIn("prefers a quiet interface", result.answer)
+      self.assertNotIn("prefers a quiet interface", result.answer)
+      self.assertEqual(result.notes[0]["excerpt"], "A durable interface preference")
       self.assertTrue(all(
         decision["source"] == "lexical_fallback"
         for decision in result.traversal.decisions
@@ -477,8 +483,7 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertEqual(result.status, search.RESULT_HIT)
       self.assertEqual(result.commit, pointer["commit"])
       self.assertEqual(result.files, ("notes/quiet-ui.md",))
-      self.assertIn("prefers a quiet interface", result.answer)
-      self.assertIn("[notes/quiet-ui.md]", result.answer)
+      self.assertNotIn("prefers a quiet interface", result.answer)
 
       old_argv = sys.argv
       sys.argv = [str(REPO / "memory_search.py"), "quiet UI preference", "chat-123"]
@@ -488,7 +493,7 @@ class MemorySearchContractTests(unittest.TestCase):
           self.assertEqual(search.run(), 0)
       finally:
         sys.argv = old_argv
-      self.assertIn("FILES: notes/quiet-ui.md", out.getvalue())
+      self.assertNotIn("FILES:", out.getvalue())
       marker = next(
         line for line in out.getvalue().splitlines()
         if line.startswith(search.RESULT_PREFIX)
@@ -498,7 +503,8 @@ class MemorySearchContractTests(unittest.TestCase):
       self.assertEqual(payload["notes"][0]["path"], "notes/quiet-ui.md")
       trace = json.loads((store.STATE / "read-trace" / "chat-123.json").read_text())
       self.assertEqual(trace["commit"], pointer["commit"])
-      self.assertEqual(trace["files"], ["notes/quiet-ui.md"])
+      self.assertEqual(trace["files"], [])
+      self.assertEqual(trace["candidates"], ["notes/quiet-ui.md"])
       self.assertEqual(trace["question"], "quiet UI preference")
       self.assertEqual(trace["traversal"]["selected"], ["notes/quiet-ui.md"])
       self.assertEqual(trace["traversal"]["opened"][0]["path"], "index.md")
@@ -583,7 +589,7 @@ class MemorySearchContractTests(unittest.TestCase):
 
       self.assertEqual(result.commit, old["commit"])
       self.assertEqual(result.files, ("notes/quiet-ui.md",))
-      self.assertIn("Old pinned fact", result.answer)
+      self.assertNotIn("Old pinned fact", result.answer)
       self.assertNotIn("New replacement fact", result.answer)
 
   def test_missing_graph_is_an_explicit_failed_result(self):
@@ -606,7 +612,10 @@ class MemorySearchContractTests(unittest.TestCase):
         json.loads(marker.removeprefix(search.RESULT_PREFIX)),
         {
           "status": search.RESULT_FAILED,
+          "phase": "catalog",
+          "lookup_id": mock.ANY,
           "reason": search.RESULT_REASON_NOT_READY,
+          "discovery_complete": True,
         },
       )
       trace = json.loads(

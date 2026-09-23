@@ -16,7 +16,8 @@ repository/graph.json                deterministic viewer index
 repository/.git/                     compact history and rollback data
 app-state/read-trace/                 latest retrieval observation per chat
 app-state/read-log/YYYY-MM-DD.jsonl   append-only auditable read traces
-app-state/recall-execution/            short-lived hashed single-flight receipts
+app-state/recall-execution/            pinned lookup manifests and single-flight receipts
+app-state/read-delivery/               idempotent byte-range delivery evidence
 app-state/recall-audit/YYYY-MM-DD.jsonl
 app-state/recall-stats.json           recall outcomes and retrieval evidence
 app-state/update-log/YYYY-MM-DD.jsonl
@@ -33,11 +34,14 @@ qualitative review, never a recall-quality score.
 Live recall is idempotent for one physical agent/delegation turn, exact query,
 pinned graph commit, and selector lesson. The raw turn identity is never
 persisted: the reader hashes the complete input, serializes matching processes,
-and keeps only a short-lived receipt containing selected graph paths. A reused
-result reopens those paths from the same immutable commit; it does not repeat
-provider calls, usage counters, or nightly audit work. A later physical turn is
-a new read even when its wording is identical. True failed reads are not
-cached, so repairing the graph can succeed on retry.
+and keeps only a short-lived manifest containing selected graph identities. A
+reused result returns that same catalogue from the immutable commit; it does
+not repeat provider calls or nightly audit work. Candidate discovery is not a
+body read and does not increment usage. Deterministic expansion records exact
+delivered byte ranges, and increments a note's usage once only after its full
+pinned body has been supplied. A later physical turn is a new lookup even when
+its wording is identical. True failed lookups are not cached, so repairing the
+graph can succeed on retry.
 
 Published commits are immutable. Readers pin the commit named by `.ready` and
 read its blobs directly; maintenance edits one private worktree and advances
@@ -156,7 +160,7 @@ Every successful night completes four duties across those proposals:
    it only after publication, retain its evidence ids in inspectable app state,
    and let the next live reads carry the exact lesson in their traces. This may
    refine relevance, but it never changes when recall fires, weakens catalog
-   confinement, or turns the 12-note ceiling into a target. Prefer no change
+   confinement, or turns transport pagination into a relevance target. Prefer no change
    when the evidence is mixed or fits only one title collision.
 4. **Consolidate.** In a map-neighborhood item the writer holds every member
    note in full and does the cleanup as its primary work: merge duplicates
@@ -173,11 +177,13 @@ answer nodes, open only linked children, or stop. Unchosen siblings are pruned
 rather than fed into a graph-wide catalog, while the trace retains them for
 later audit. The host accepts only pinned, root-linked paths. A malformed or
 unavailable provider falls back to the same rooted walk using lexical choices.
-Twelve selected answer notes is a pathological output ceiling, never a target.
-The host also bounds total opened content, so a malformed expansion or broad
-lexical collision ends in one selection-only decision instead of an unbounded
-prompt. These ceilings are safety limits, not traversal targets or user-facing
-tuning.
+There is no selected-answer count cap. Discovery returns a pageable catalogue;
+the chat agent then chooses candidates and receives complete pinned bodies in
+deterministic byte pages. The host still bounds total content opened inside one
+navigator prompt, so a malformed expansion or broad lexical collision ends in
+one selection-only decision instead of an unbounded provider call. Reaching
+that emergency boundary marks discovery incomplete; it is never reported as an
+exhaustive success or exposed as a user-facing tuning knob.
 
 Promote only durable, future-useful facts; preserve `source` provenance. Merge
 duplicates when the winner is unambiguous; deleting the redundant copy is safe

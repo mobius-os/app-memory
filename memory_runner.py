@@ -34,6 +34,7 @@ from memory_store import (
   STATE,
   discard_staging,
   load_recall_guidance,
+  load_read_delivery,
   load_usage,
   publish,
   read_revision_file,
@@ -605,7 +606,7 @@ def _pending_read_traces() -> list[dict]:
         record = json.loads(line)
       except ValueError:
         continue
-      if not isinstance(record, dict) or record.get("schema") != 3:
+      if not isinstance(record, dict) or record.get("schema") not in {3, 4}:
         continue
       read_id = record.get("read_id")
       at = record.get("at")
@@ -696,9 +697,24 @@ def _audit_reads(
   audits: list[dict] = []
   hindsight_chats = hindsight_chats or {}
   for trace in traces:
+    raw_candidates = trace.get("candidates", trace.get("files", []))
+    candidate_files = [
+      path for path in raw_candidates
+      if isinstance(path, str)
+    ] if isinstance(raw_candidates, list) else []
+    delivery = (
+      load_read_delivery(str(trace.get("read_id") or ""))
+      if trace.get("schema") == 4 else None
+    )
+    requested_files = [
+      path for path in (delivery or {}).get("requested_files", [])
+      if isinstance(path, str)
+    ]
     live_files = [
-      path for path in trace.get("files", []) if isinstance(path, str)
-    ] if isinstance(trace.get("files"), list) else []
+      path for path in (delivery or {}).get(
+        "fully_supplied_files", trace.get("files", []),
+      ) if isinstance(path, str)
+    ]
     traversal = trace.get("traversal")
     live_opened = (
       [item for item in traversal.get("opened", []) if isinstance(item, dict)]
@@ -728,7 +744,7 @@ def _audit_reads(
             break
     source_commit = str(trace.get("commit") or commit)
     selected_nodes = []
-    for path in live_files:
+    for path in candidate_files:
       try:
         content = read_revision_file(source_commit, path)
       except (OSError, UnicodeError, ValueError):
@@ -759,14 +775,17 @@ def _audit_reads(
       "question": str(trace["question"]),
       "live": {
         "opened": live_opened,
-        "selected": live_files,
+        "selected": candidate_files,
+        "requested": requested_files,
+        "fully_delivered": live_files,
+        "delivery_complete": bool(candidate_files) and set(live_files) == set(candidate_files),
         "selected_nodes": selected_nodes,
         "stop_reason": (
           traversal.get("stop_reason") if isinstance(traversal, dict) else None
         ),
         "frontier_at_stop": live_frontier,
         "host_selection_override": _host_selection_override(
-          traversal, live_files,
+          traversal, candidate_files,
         ),
         "selection_guidance": live_guidance,
       },

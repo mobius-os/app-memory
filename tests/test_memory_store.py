@@ -106,13 +106,32 @@ class MemoryStoreTests(unittest.TestCase):
       self.assertEqual(second["read_id"], first["read_id"])
       log = next((store.STATE / "read-log").glob("*.jsonl"))
       self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
-      usage = json.loads((store.STATE / "usage.json").read_text())
-      self.assertEqual(usage, {"quiet-ui": 1})
+      self.assertFalse((store.STATE / "usage.json").exists())
 
       store.record_read(*args, invocation_fingerprint="e" * 64)
       self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
-      usage = json.loads((store.STATE / "usage.json").read_text())
-      self.assertEqual(usage, {"quiet-ui": 2})
+      self.assertFalse((store.STATE / "usage.json").exists())
+
+  def test_delivery_usage_uses_graph_id_not_filename_stem(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+
+      state = store.record_read_delivery(
+        read_id="1" * 32,
+        lookup_id="2" * 64,
+        commit="3" * 40,
+        candidates=[{"id": "canonical-node", "path": "notes/file-name.md"}],
+        requested_paths=["notes/file-name.md"],
+        segments=[{
+          "path": "notes/file-name.md", "start": 0, "end": 4, "total": 4,
+        }],
+      )
+
+      self.assertEqual(state["fully_supplied_files"], ["notes/file-name.md"])
+      self.assertEqual(
+        json.loads((store.STATE / "usage.json").read_text()),
+        {"canonical-node": 1},
+      )
 
   def test_graph_metadata_and_note_bodies_have_separate_read_caps(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -129,16 +148,8 @@ class MemoryStoreTests(unittest.TestCase):
         "x" * (store.MAX_NOTE_BYTES + 1), encoding="utf-8",
       )
 
-      pointer = store.publish(worktree)
-
-      self.assertEqual(
-        json.loads(store.read_revision_file(pointer["commit"], "graph.json"))[
-          "padding"
-        ],
-        graph["padding"],
-      )
-      with self.assertRaisesRegex(ValueError, "exceeds read cap"):
-        store.read_revision_file(pointer["commit"], "notes/large.md")
+      with self.assertRaisesRegex(ValueError, "note exceeds read cap"):
+        store.publish(worktree)
 
   def test_publish_rejects_unreadable_graph_without_advancing_pointer(self):
     with tempfile.TemporaryDirectory() as raw:
