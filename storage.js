@@ -1,5 +1,27 @@
 import { NOTE_BASE, NOTE_GIT_BASE } from './constants.js'
 
+// Every store created in one app surface shares commit ownership for the same
+// runtime-storage bridge. The bridge's versioned operations provide the same
+// guarantee across separate frames/tabs, where JavaScript objects are not
+// shared. A WeakMap keeps this coordination lifecycle-bound to the bridge.
+const CACHE_COORDINATORS = new WeakMap()
+function cacheCoordinator(bridge) {
+  let coordinator = CACHE_COORDINATORS.get(bridge)
+  if (!coordinator) {
+    coordinator = { claims: new Map(), nextClaim: 0 }
+    CACHE_COORDINATORS.set(bridge, coordinator)
+  }
+  return coordinator
+}
+
+function ensureCacheConflictHandler(bridge, coordinator) {
+  if (coordinator.conflictHandlerInstalled || typeof bridge.onConflict !== 'function') return
+  coordinator.conflictHandlerInstalled = true
+  bridge.onConflict((conflict) => (
+    typeof conflict?.path === 'string' && conflict.path.startsWith('offline-cache/')
+  ))
+}
+
 // ── Shared-memory read-through store ──────────────────────────────────────
 // The graph + notes live in SHARED storage (/api/storage/shared/memory/),
 // which `window.mobius.storage` cannot reach — that runtime hard-scopes every
@@ -17,6 +39,7 @@ export function makeSharedMemoryStore({
   getToken,
   fetchImpl,
   cacheStore,
+  runtimeStorage,
   cacheName = 'mobius-memory-shared-v1',
   pollMs = 4000,
   // How long a background revalidation must stay in flight before the
@@ -34,9 +57,12 @@ export function makeSharedMemoryStore({
   const doFetch = fetchImpl
     || (typeof fetch === 'function' ? (...a) => fetch(...a) : null);
 
-  // The cache is a thin key->{ body, present } map. Backed by Cache Storage when
-  // available (survives reloads, the offline mirror), else an in-memory Map so
-  // a mock / a browser without caches still works (degrades to online-only).
+  // The cache is a thin key->{ body, present } map. In production, prefer the
+  // app-scoped Mobius storage bridge: opaque sandboxed frames cannot use
+  // CacheStorage, while the bridge owns a persistent reload-safe offline
+  // mirror and keeps this private Memory copy inside the app's storage scope.
+  // Cache Storage remains a compatibility path for non-opaque surfaces; the
+  // in-memory fallback is intentionally online-session-only.
   function memoryCache() {
     const m = new Map();
     return {
@@ -44,8 +70,160 @@ export function makeSharedMemoryStore({
       async write(key, entry) { m.set(key, entry); },
     };
   }
+
+  function logicalCacheKey(key) {
+    // Immutable Git URLs change revision on every Memory publish. Cache one
+    // exact request per logical file instead of accumulating one record per
+    // revision forever. The stored requestKey below prevents an older revision
+    // from being returned for a different explicit revision.
+    let logical = String(key);
+    try {
+      const queryAt = logical.indexOf('?');
+      const pathname = queryAt < 0 ? logical : logical.slice(0, queryAt);
+      const params = new URLSearchParams(queryAt < 0 ? '' : logical.slice(queryAt + 1));
+      const gitPath = String(gitBaseUrl).split('?', 1)[0];
+      logical = pathname === gitPath
+        ? `git:${params.get('file') || ''}`
+        : `shared:${pathname}`;
+    } catch { /* the encoded raw key remains a safe deterministic fallback */ }
+    return logical;
+  }
+
+  async function appCachePath(key) {
+    const bytes = new TextEncoder().encode(logicalCacheKey(key));
+    let digest;
+    try {
+      digest = await globalThis.crypto?.subtle?.digest('SHA-256', bytes);
+    } catch { digest = null; }
+    if (digest) {
+      const hex = [...new Uint8Array(digest)]
+        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      return `offline-cache/${hex}.json`;
+    }
+    // Very old test/compatibility realms may not expose SubtleCrypto. The
+    // requestKey stored inside every record still prevents a collision from
+    // returning the wrong body; this deterministic suffix only selects a slot.
+    let hash = 2166136261;
+    for (const byte of bytes) hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+    return `offline-cache/compat-${hash.toString(16).padStart(8, '0')}.json`;
+  }
+
+  const localCoordinator = { claims: new Map(), nextClaim: 0 }
+  let activeCoordinator = localCoordinator
+
+  function requestStartedAt() {
+    try {
+      if (Number.isFinite(globalThis.performance?.timeOrigin)
+          && typeof globalThis.performance?.now === 'function') {
+        return globalThis.performance.timeOrigin + globalThis.performance.now()
+      }
+    } catch { /* use the wall clock compatibility fallback */ }
+    return Date.now()
+  }
+
+  function mobiusCache(bridge) {
+    const coordinator = cacheCoordinator(bridge)
+    activeCoordinator = coordinator
+    ensureCacheConflictHandler(bridge, coordinator)
+    const known = new Map();
+    return {
+      async read(key) {
+        try {
+          const path = await appCachePath(key);
+          const record = await bridge.get(path);
+          known.set(path, record);
+          if (!record || record.requestKey !== key || !record.entry
+              || typeof record.entry.present !== 'boolean') return null;
+          const body = record.entry.body;
+          if (body != null && typeof body !== 'string') return null;
+          return { body: body ?? null, present: record.entry.present };
+        } catch { return null; }
+      },
+      async write(key, entry, owner = null) {
+        try {
+          const path = await appCachePath(key);
+          const next = {
+            requestKey: key,
+            entry: { body: entry.body ?? null, present: entry.present === true },
+            // The request-start time, rather than response-completion time,
+            // expresses which revision the view most recently asked for. A
+            // slow retired revision may finish last, but it must never evict a
+            // newer revision that already became current in another mount.
+            cacheStartedAt: owner?.startedAt ?? Date.now(),
+          };
+          if (owner && !ownsCacheWrite(owner)) return;
+          let current = known.get(path);
+          if (current?.requestKey === next.requestKey
+              && current?.entry?.body === next.entry.body
+              && current?.entry?.present === next.entry.present) return;
+
+          // Across distinct app frames, only storage CAS can make the final
+          // validation and write indivisible. A newer candidate retries a
+          // lost CAS against the winner; an older or retired candidate stops.
+          // Three total attempts bound contention without silently discarding
+          // the current graph merely because an obsolete response committed
+          // first.
+          if (typeof bridge.getWithVersion === 'function'
+              && typeof bridge.durableWrite === 'function') {
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+              const versioned = await bridge.getWithVersion(path)
+              current = versioned?.value ?? null
+              known.set(path, current)
+              if (owner && !ownsCacheWrite(owner)) return;
+              if (Number.isFinite(current?.cacheStartedAt)
+                  && current.cacheStartedAt > next.cacheStartedAt) return;
+              if (current?.requestKey === next.requestKey
+                  && current?.entry?.body === next.entry.body
+                  && current?.entry?.present === next.entry.present) return;
+              try {
+                await bridge.durableWrite(path, next, versioned?.version
+                  ? { ifMatch: versioned.version }
+                  : { ifNoneMatch: true })
+                known.set(path, next)
+                return
+              } catch (error) {
+                // Immediate cache-only CAS losers are acknowledged. Retry
+                // only conflicts; transient/fatal failures remain best-effort
+                // and the next normal Memory poll can refresh the mirror.
+                if (error?.code === 'conflict' && error?.writeId
+                    && typeof bridge._ackConflict === 'function') {
+                  await bridge._ackConflict(error.writeId).catch(() => {})
+                }
+                if (error?.code !== 'conflict') return
+              }
+            }
+            return
+          }
+
+          // Lightweight injected/test bridges have no CAS. They can only be
+          // shared inside one JavaScript realm, where the coordinator above
+          // makes ownership visible across store instances. Re-check after
+          // every asynchronous read so a delayed snapshot cannot authorize an
+          // obsolete set.
+          current = await bridge.get(path)
+          known.set(path, current)
+          if (owner && !ownsCacheWrite(owner)) return;
+          if (Number.isFinite(current?.cacheStartedAt)
+              && current.cacheStartedAt > next.cacheStartedAt) return;
+          if (current?.requestKey === next.requestKey
+              && current?.entry?.body === next.entry.body
+              && current?.entry?.present === next.entry.present) return;
+          await bridge.set(path, next)
+          known.set(path, next)
+        } catch { /* cache persistence must never turn a live graph read into failure */ }
+      },
+    };
+  }
+
   async function openCacheStore() {
     if (cacheStore) return cacheStore;
+    let bridge = runtimeStorage;
+    if (!bridge) {
+      try { bridge = globalThis.window?.mobius?.storage; } catch { bridge = null; }
+    }
+    if (bridge && typeof bridge.get === 'function' && typeof bridge.set === 'function') {
+      return mobiusCache(bridge);
+    }
     // Sandboxed app frames intentionally omit `allow-same-origin`. Chromium
     // exposes the Cache Storage name there, but READING `window.caches` throws
     // a SecurityError. Guard the property access itself — `typeof caches` is
@@ -74,6 +252,32 @@ export function makeSharedMemoryStore({
   let cacheReady = null;
   function cache() { return (cacheReady ||= openCacheStore()); }
 
+  // A logical file has one bounded persistent slot. Network responses can
+  // complete out of order when `.ready` advances and React replaces an old
+  // graph/note subscription. Ownership is claimed when a request STARTS; only
+  // the newest claim may write that logical slot. Retiring a subscription also
+  // invalidates its in-flight claim, even before its replacement starts.
+  function claimCacheWrite(key) {
+    const slot = logicalCacheKey(key);
+    const coordinator = activeCoordinator
+    const owner = {
+      slot,
+      coordinator,
+      id: ++coordinator.nextClaim,
+      startedAt: requestStartedAt(),
+    };
+    coordinator.claims.set(slot, owner.id);
+    return owner;
+  }
+  function ownsCacheWrite(owner) {
+    return owner && owner.coordinator.claims.get(owner.slot) === owner.id;
+  }
+  function retireCacheWrite(owner) {
+    if (ownsCacheWrite(owner)) {
+      owner.coordinator.claims.set(owner.slot, ++owner.coordinator.nextClaim)
+    }
+  }
+
   function url(path, opts = {}) {
     if (opts.revision) {
       const query = new URLSearchParams({ revision: opts.revision, file: path });
@@ -85,21 +289,22 @@ export function makeSharedMemoryStore({
   // One network read. Returns { present, body } on a definitive answer (200 or
   // 404) and writes it through to the cache; throws on transient failure
   // (offline / 5xx) so the caller can fall back to the cached value.
-  async function fetchThrough(path, opts = {}) {
+  async function fetchThrough(path, opts = {}, claimedOwner = null) {
     if (!doFetch) throw new Error('no fetch');
     const token = typeof getToken === 'function' ? await getToken() : null;
     const headers = token ? { Authorization: 'Bearer ' + token } : {};
     const key = url(path, opts);
+    const owner = claimedOwner || claimCacheWrite(key);
     const res = await doFetch(key, { headers });
     if (res.status === 404) {
       const entry = { body: null, present: false };
-      (await cache()).write(key, entry);
+      if (ownsCacheWrite(owner)) await (await cache()).write(key, entry, owner);
       return entry;
     }
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const body = await res.text();
     const entry = { body, present: true };
-    (await cache()).write(key, entry);
+    if (ownsCacheWrite(owner)) await (await cache()).write(key, entry, owner);
     return entry;
   }
 
@@ -152,6 +357,7 @@ export function makeSharedMemoryStore({
     let alive = true;
     let last; // last raw body delivered — repaint only on a real change
     let timer = null;
+    let activeCacheOwner = null;
 
     function deliver(body, present, error) {
       last = body;
@@ -171,7 +377,10 @@ export function makeSharedMemoryStore({
         ? setTimeout(() => { if (!settled) raise(); }, indicatorDelayMs)
         : (raise(), null);
       try {
-        const e = await fetchThrough(path, opts);
+        const owner = claimCacheWrite(url(path, opts));
+        activeCacheOwner = owner;
+        const e = await fetchThrough(path, opts, owner);
+        if (activeCacheOwner === owner) activeCacheOwner = null;
         if (alive && e.body !== last) deliver(e.body, e.present, null);
       } catch { /* transient: keep the last value, just clear the indicator */ }
       finally {
@@ -193,7 +402,10 @@ export function makeSharedMemoryStore({
         // Nothing cached: the first read IS the revalidation.
         onRevalidate(true);
         try {
-          const e = await fetchThrough(path, opts);
+          const owner = claimCacheWrite(url(path, opts));
+          activeCacheOwner = owner;
+          const e = await fetchThrough(path, opts, owner);
+          if (activeCacheOwner === owner) activeCacheOwner = null;
           if (alive) deliver(e.body, e.present, null);
         } catch (e) {
           if (alive) deliver(null, false, e);
@@ -213,7 +425,12 @@ export function makeSharedMemoryStore({
     }
 
     init().finally(schedule);
-    return () => { alive = false; if (timer) clearTimeout(timer); };
+    return () => {
+      alive = false;
+      if (activeCacheOwner) retireCacheWrite(activeCacheOwner);
+      activeCacheOwner = null;
+      if (timer) clearTimeout(timer);
+    };
   }
 
   return { read, getJSON, getText, subscribe, _url: url };

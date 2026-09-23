@@ -714,6 +714,350 @@ test('store falls back when a sandbox throws on Cache Storage access', async () 
   }
 })
 
+test('store persists warmed shared data across opaque-frame reloads through app storage', async () => {
+  const records = new Map()
+  const runtimeStorage = {
+    async get(path) { return records.get(path) ?? null },
+    async set(path, value) { records.set(path, value); return { synced: true } },
+  }
+  const revision = '0123456789abcdef0123456789abcdef01234567'
+  const graph = JSON.stringify({ nodes: [{ id: 'persisted' }], edges: [], problems: [] })
+  let online = true
+  const fetchImpl = async () => {
+    if (!online) throw new TypeError('Failed to fetch')
+    return { ok: true, status: 200, text: async () => graph }
+  }
+
+  const firstFrame = makeSharedMemoryStore({
+    getToken: () => 't', fetchImpl, runtimeStorage, pollMs: 0,
+  })
+  assert.equal((await firstFrame.getJSON('graph.json', { revision })).value.nodes[0].id, 'persisted')
+  assert.equal(records.size, 1, 'the warmed graph was copied into private app storage')
+
+  online = false
+  const reloadedOpaqueFrame = makeSharedMemoryStore({
+    getToken: () => 't', fetchImpl, runtimeStorage, pollMs: 0,
+  })
+  const offline = await reloadedOpaqueFrame.getJSON('graph.json', { revision })
+  assert.equal(offline.error, null)
+  assert.equal(offline.present, true)
+  assert.equal(offline.value.nodes[0].id, 'persisted')
+})
+
+test('app-storage cache keeps one exact revision per logical Memory file', async () => {
+  const records = new Map()
+  let writeCount = 0
+  const runtimeStorage = {
+    async get(path) { return records.get(path) ?? null },
+    async set(path, value) { writeCount += 1; records.set(path, value); return { synced: true } },
+  }
+  let online = true
+  let body = '{"revision":1}'
+  const fetchImpl = async () => {
+    if (!online) throw new TypeError('offline')
+    return { ok: true, status: 200, text: async () => body }
+  }
+  const rev1 = '1111111111111111111111111111111111111111'
+  const rev2 = '2222222222222222222222222222222222222222'
+  const store = makeSharedMemoryStore({ fetchImpl, runtimeStorage, pollMs: 0 })
+  await store.getJSON('graph.json', { revision: rev1 })
+  body = '{"revision":2}'
+  await store.getJSON('graph.json', { revision: rev2 })
+  assert.equal(records.size, 1, 'new graph revisions replace the same bounded logical slot')
+  assert.equal(writeCount, 2)
+
+  // A cached read revalidates in the background. The unchanged network body
+  // must not become a write every poll interval.
+  await store.getJSON('graph.json', { revision: rev2 })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(writeCount, 2, 'unchanged revalidation does not rewrite app storage')
+
+  online = false
+  assert.equal((await store.getJSON('graph.json', { revision: rev2 })).value.revision, 2)
+  const old = await store.getJSON('graph.json', { revision: rev1 })
+  assert.equal(old.present, false, 'the rev2 body is never mislabeled as the requested rev1 body')
+  assert.ok(old.error)
+})
+
+test('a late old revision cannot evict a newer offline graph revision', async () => {
+  const records = new Map()
+  const runtimeStorage = {
+    async get(path) { return records.get(path) ?? null },
+    async set(path, value) { records.set(path, value); return { synced: true } },
+  }
+  let online = true
+  let releaseOld
+  let markOldStarted
+  const oldGate = new Promise((resolve) => { releaseOld = resolve })
+  const oldStarted = new Promise((resolve) => { markOldStarted = resolve })
+  const oldRevision = '1111111111111111111111111111111111111111'
+  const newRevision = '2222222222222222222222222222222222222222'
+  const fetchImpl = async (requestUrl) => {
+    if (!online) throw new TypeError('offline')
+    const isOld = requestUrl.includes(oldRevision)
+    if (isOld) {
+      markOldStarted()
+      await oldGate
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ revision: isOld ? 1 : 2 }),
+    }
+  }
+  const store = makeSharedMemoryStore({ runtimeStorage, fetchImpl, pollMs: 0 })
+  const pendingOld = store.getJSON('graph.json', { revision: oldRevision })
+  await oldStarted
+  assert.equal((await store.getJSON('graph.json', { revision: newRevision })).value.revision, 2)
+  releaseOld()
+  await pendingOld
+
+  online = false
+  const reloaded = makeSharedMemoryStore({ runtimeStorage, fetchImpl, pollMs: 0 })
+  const result = await reloaded.getJSON('graph.json', { revision: newRevision })
+  assert.equal(result.error, null)
+  assert.equal(result.value.revision, 2)
+})
+
+test('detaching a retired subscription prevents its late response from replacing the current revision', async () => {
+  const records = new Map()
+  const runtimeStorage = {
+    async get(path) { return records.get(path) ?? null },
+    async set(path, value) { records.set(path, value); return { synced: true } },
+  }
+  let online = true
+  let releaseOld
+  let markOldStarted
+  const oldGate = new Promise((resolve) => { releaseOld = resolve })
+  const oldStarted = new Promise((resolve) => { markOldStarted = resolve })
+  const oldRevision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const newRevision = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  const fetchImpl = async (requestUrl) => {
+    if (!online) throw new TypeError('offline')
+    const isOld = requestUrl.includes(oldRevision)
+    if (isOld) {
+      markOldStarted()
+      await oldGate
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ revision: isOld ? 1 : 2 }),
+    }
+  }
+  const store = makeSharedMemoryStore({ runtimeStorage, fetchImpl, pollMs: 0 })
+  const detachOld = store.subscribe('graph.json', () => {}, { revision: oldRevision })
+  await oldStarted
+  detachOld()
+  let resolveCurrent
+  const currentDelivered = new Promise((resolve) => { resolveCurrent = resolve })
+  const detachCurrent = store.subscribe('graph.json', ({ present }) => {
+    if (present) resolveCurrent()
+  }, { revision: newRevision })
+  await currentDelivered
+  releaseOld()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  detachCurrent()
+
+  online = false
+  const reloaded = makeSharedMemoryStore({ runtimeStorage, fetchImpl, pollMs: 0 })
+  const result = await reloaded.getJSON('graph.json', { revision: newRevision })
+  assert.equal(result.error, null)
+  assert.equal(result.value.revision, 2)
+})
+
+test('cache commit rechecks ownership after a delayed bridge read across store instances', async () => {
+  const records = new Map()
+  let reads = 0
+  let releaseDelayedRead
+  let markDelayedRead
+  const delayedReadGate = new Promise((resolve) => { releaseDelayedRead = resolve })
+  const delayedReadStarted = new Promise((resolve) => { markDelayedRead = resolve })
+  const runtimeStorage = {
+    async get(path) {
+      const captured = records.get(path) ?? null
+      reads += 1
+      if (reads === 2) {
+        markDelayedRead()
+        await delayedReadGate
+      }
+      return captured
+    },
+    async set(path, value) { records.set(path, value) },
+  }
+  let online = true
+  const oldRevision = '1111111111111111111111111111111111111111'
+  const newRevision = '2222222222222222222222222222222222222222'
+  const fetchImpl = async (requestUrl) => {
+    if (!online) throw new TypeError('offline')
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ revision: requestUrl.includes(oldRevision) ? 1 : 2 }),
+    }
+  }
+  const options = { runtimeStorage, fetchImpl, pollMs: 0 }
+  const oldStore = makeSharedMemoryStore(options)
+  const newStore = makeSharedMemoryStore(options)
+  const pendingOld = oldStore.getJSON('graph.json', { revision: oldRevision })
+  await delayedReadStarted
+  assert.equal((await newStore.getJSON('graph.json', { revision: newRevision })).value.revision, 2)
+  releaseDelayedRead()
+  await pendingOld
+
+  online = false
+  const reloaded = makeSharedMemoryStore(options)
+  const result = await reloaded.getJSON('graph.json', { revision: newRevision })
+  assert.equal(result.error, null)
+  assert.equal(result.value.revision, 2)
+})
+
+test('versioned app-storage commit prevents cross-frame stale cache overwrite', async () => {
+  let record = null
+  let version = 0
+  let blockOld = true
+  let releaseOld
+  let markOldStarted
+  const oldGate = new Promise((resolve) => { releaseOld = resolve })
+  const oldStarted = new Promise((resolve) => { markOldStarted = resolve })
+  const makeBridge = () => ({
+    async get() { return record },
+    async set(_path, value) { record = value },
+    async getWithVersion() {
+      const captured = { value: record, version: version ? `"${version}"` : null }
+      if (blockOld) {
+        blockOld = false
+        markOldStarted()
+        await oldGate
+      }
+      return captured
+    },
+    async durableWrite(_path, value, condition) {
+      const expected = version ? `"${version}"` : null
+      const accepted = condition.ifNoneMatch ? version === 0 : condition.ifMatch === expected
+      if (!accepted) {
+        const error = new Error('conflict')
+        error.code = 'conflict'
+        throw error
+      }
+      record = value
+      version += 1
+      return { durability: 'synced', version: `"${version}"` }
+    },
+  })
+  let online = true
+  const oldRevision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const newRevision = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  const fetchImpl = async (requestUrl) => {
+    if (!online) throw new TypeError('offline')
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ revision: requestUrl.includes(oldRevision) ? 1 : 2 }),
+    }
+  }
+  const oldStore = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
+  const newStore = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
+  const pendingOld = oldStore.getJSON('graph.json', { revision: oldRevision })
+  await oldStarted
+  assert.equal((await newStore.getJSON('graph.json', { revision: newRevision })).value.revision, 2)
+  releaseOld()
+  await pendingOld
+
+  online = false
+  const reloaded = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
+  const result = await reloaded.getJSON('graph.json', { revision: newRevision })
+  assert.equal(result.error, null)
+  assert.equal(result.value.revision, 2)
+})
+
+test('newer mutable body retries a lost cross-frame cache commit once the older body lands', async () => {
+  let record = null
+  let version = 0
+  let releaseOldFetch
+  let markOldFetchStarted
+  let releaseNewRead
+  let markNewReadStarted
+  const oldFetchGate = new Promise((resolve) => { releaseOldFetch = resolve })
+  const oldFetchStarted = new Promise((resolve) => { markOldFetchStarted = resolve })
+  const newReadGate = new Promise((resolve) => { releaseNewRead = resolve })
+  const newReadStarted = new Promise((resolve) => { markNewReadStarted = resolve })
+  const makeBridge = (blockVersionedRead = false) => ({
+    async get() { return record },
+    async set(_path, value) { record = value; version += 1 },
+    async getWithVersion() {
+      const captured = { value: record, version: version ? `"${version}"` : null }
+      if (blockVersionedRead) {
+        blockVersionedRead = false
+        markNewReadStarted()
+        await newReadGate
+      }
+      return captured
+    },
+    async durableWrite(_path, value, condition) {
+      const expected = version ? `"${version}"` : null
+      const accepted = condition.ifNoneMatch ? version === 0 : condition.ifMatch === expected
+      if (!accepted) {
+        const error = new Error('conflict')
+        error.code = 'conflict'
+        throw error
+      }
+      record = value
+      version += 1
+      return { durability: 'synced', version: `"${version}"` }
+    },
+  })
+  let online = true
+  const oldFetch = async () => {
+    if (!online) throw new TypeError('offline')
+    markOldFetchStarted()
+    await oldFetchGate
+    return { ok: true, status: 200, text: async () => 'old-ready-body' }
+  }
+  const newFetch = async () => {
+    if (!online) throw new TypeError('offline')
+    return { ok: true, status: 200, text: async () => 'new-ready-body' }
+  }
+  const oldStore = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl: oldFetch, pollMs: 0 })
+  const newStore = makeSharedMemoryStore({ runtimeStorage: makeBridge(true), fetchImpl: newFetch, pollMs: 0 })
+  const pendingOld = oldStore.getText('.ready')
+  await oldFetchStarted
+  const pendingNew = newStore.getText('.ready')
+  await newReadStarted
+  releaseOldFetch()
+  assert.equal((await pendingOld).value, 'old-ready-body')
+  releaseNewRead()
+  assert.equal((await pendingNew).value, 'new-ready-body')
+
+  online = false
+  const reloaded = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl: newFetch, pollMs: 0 })
+  const result = await reloaded.getText('.ready')
+  assert.equal(result.error, null)
+  assert.equal(result.value, 'new-ready-body')
+})
+
+test('cache CAS retry stays bounded under continuous contention', async () => {
+  let attempts = 0
+  const runtimeStorage = {
+    async get() { return null },
+    async set() {},
+    async getWithVersion() { return { value: null, version: null } },
+    async durableWrite() {
+      attempts += 1
+      const error = new Error('conflict')
+      error.code = 'conflict'
+      throw error
+    },
+  }
+  const store = makeSharedMemoryStore({
+    runtimeStorage,
+    fetchImpl: async () => ({ ok: true, status: 200, text: async () => '{"live":true}' }),
+    pollMs: 0,
+  })
+  assert.deepEqual((await store.getJSON('graph.json')).value, { live: true })
+  assert.equal(attempts, 3)
+})
+
 test('store getText caches a note then serves it offline', async () => {
   const cacheStore = makeFakeCache()
   let online = true
