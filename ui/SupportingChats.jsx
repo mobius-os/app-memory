@@ -6,10 +6,9 @@ function activityDate(value) {
   }).format(new Date(parsed))}`
 }
 
-export function SupportingChats({ refs = [], contribution = '', onOpenChat }) {
+export function SupportingChats({ refs = [], onOpenChat }) {
   const items = Array.isArray(refs) ? refs : []
   if (!items.length) return null
-  const support = String(contribution || '').trim()
 
   return (
     <section className="mg-supporting" aria-labelledby="mg-supporting-heading">
@@ -17,6 +16,7 @@ export function SupportingChats({ refs = [], contribution = '', onOpenChat }) {
         <strong id="mg-supporting-heading">Supporting chats</strong>
         <span>{items.length}</span>
       </div>
+      <p className="mg-supporting-help">Chats used as evidence for this memory.</p>
       <ul className="mg-supporting-list">
         {items.map((ref = {}, index) => {
           const deleted = ref.kind === 'deleted' || ref.kind === 'legacy_deleted'
@@ -27,7 +27,6 @@ export function SupportingChats({ refs = [], contribution = '', onOpenChat }) {
               <div className="mg-supporting-main">
                 <strong>{title}</strong>
                 <span>{activityDate(ref.last_activity)}</span>
-                {support && <p><b>Contributed</b> {support}</p>}
               </div>
               {canOpen && (
                 <button type="button" onClick={() => onOpenChat?.(ref.chat_id)}>

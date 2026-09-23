@@ -1121,6 +1121,7 @@ export default function App({ appId, token }) {
     return c;
   }, [graph]);
   const selectedUpdated = relDate(noteState.fm.updated);
+  const noteSummary = String(selected?.description || '').trim();
   const visibleAgentGroups = agentGroups || [];
   const agentSlots = [
     { mode: primaryAgentMode, provider: agentProvider, model: agentModel },
@@ -1732,12 +1733,17 @@ export default function App({ appId, token }) {
                   )}
                   {noteState.status === 'ready' && (
                     <>
+                      {noteSummary && (
+                        <section className="mg-note-summary" aria-labelledby="mg-note-summary-heading">
+                          <h2 id="mg-note-summary-heading">Summary</h2>
+                          <p>{noteSummary}</p>
+                        </section>
+                      )}
                       {noteHtml != null
                         ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
                         : <pre style={S.pre}>{noteState.md}</pre>}
                       <SupportingChats
                         refs={selected?.source_refs}
-                        contribution={selected?.description}
                         onOpenChat={openSupportingChat}
                       />
                     </>
