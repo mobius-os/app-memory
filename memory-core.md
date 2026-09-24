@@ -117,14 +117,14 @@ when needed, a catalogue cursor. Read every catalogue page before deciding
 which candidates to open:
 
 ```bash
-python3 <source_dir>/memory_search.py "<lookup_id>" "catalog" "<next_cursor>" "$CHAT_ID"
+python3 <source_dir>/memory_read.py "<lookup_id>" "catalog" "<next_cursor>" "$CHAT_ID"
 ```
 
 Then request every useful candidate in full, either as `all` or a JSON array of
 catalogue ids:
 
 ```bash
-python3 <source_dir>/memory_search.py "<lookup_id>" '["candidate-id"]' "start" "$CHAT_ID"
+python3 <source_dir>/memory_read.py "<lookup_id>" '["candidate-id"]' "start" "$CHAT_ID"
 ```
 
 If a body page returns a next cursor, repeat the exact same lookup id and

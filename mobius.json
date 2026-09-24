@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "2.4.2",
+  "version": "2.5.0",
   "description": "Build and retrieve an optional graph of durable facts without injecting it into every chat.",
   "author": "mobius-os",
   "license": "MIT",
@@ -88,5 +88,17 @@
     "seed-memory/mocs/mobius-platform.md",
     "seed-memory/notes/how-the-memory-graph-works.md",
     "seed-memory/notes/memory-is-visible-to-the-partner.md"
-  ]
+  ],
+  "agent_activities": {
+    "memory-search": {
+      "entry": "memory_search.py",
+      "arguments": 2,
+      "running_label": "Searching"
+    },
+    "memory-read": {
+      "entry": "memory_read.py",
+      "arguments": 4,
+      "running_label": "Reading"
+    }
+  }
 }

@@ -6,13 +6,16 @@ import hashlib
 import hmac
 import json
 import re
+import sys
 from datetime import UTC, datetime
 
 from memory_search import (
+  READ_ACTIVITY_ID,
   RESULT_FAILED,
   RESULT_HIT,
   RESULT_PREFIX,
   RecallResult,
+  _activity_resource,
   _catalog_page,
   _cursor_auth,
   _display,
@@ -48,11 +51,23 @@ def _emit(payload: dict, text: str, *, failed: bool = False) -> int:
 
 def _failure(lookup_id: str, reason: str) -> int:
   return _emit({
-    "status": RESULT_FAILED,
+    "activity_id": READ_ACTIVITY_ID,
+    "status": "failed",
+    "outcome": RESULT_FAILED,
+    "label": "Memory read failed",
+    "warning": {
+      "invalid_lookup": "The lookup reference is invalid.",
+      "lookup_unavailable": "This lookup is unavailable or has expired.",
+      "invalid_selection": "The requested memories are not in this catalogue.",
+      "invalid_cursor": "The requested page reference is invalid.",
+      "pinned_content_unavailable": "Pinned Memory content is unavailable.",
+      "delivery_audit_failed": "Memory could not record this delivery safely.",
+      "page_metadata_too_large": "Memory page metadata exceeded its safe budget.",
+      "page_budget_exceeded": "Memory could not fit this page safely.",
+    }.get(reason, "Memory could not complete this read."),
     "phase": "read",
     "lookup_id": lookup_id if _LOOKUP_ID_RE.fullmatch(lookup_id) else "0" * 64,
     "reason": reason,
-    "display": {"label": "Memory lookup failed"},
   }, "Memory read failed.", failed=True)
 
 
@@ -135,7 +150,9 @@ def _catalog(manifest: dict, cursor: str) -> int:
     discovery_complete=manifest.get("discovery_complete") is not False,
   )
   output, notes, page = _catalog_page(result, start)
-  payload = _result_payload(result, notes=notes, page=page)
+  payload = _result_payload(
+    result, notes=notes, page=page, activity_id=READ_ACTIVITY_ID,
+  )
   return _emit(payload, output)
 
 
@@ -228,17 +245,19 @@ def _body_state(
       + page["next_cursor"] + "."
     )
   payload = {
-    "status": RESULT_HIT,
-    "phase": "read",
-    "lookup_id": manifest["lookup_id"],
-    "notes": page_notes,
-    "page": page,
-    "display": _display(
+    "activity_id": READ_ACTIVITY_ID,
+    "status": "succeeded",
+    "outcome": RESULT_HIT,
+    **_display(
       RESULT_HIT,
       phase="read",
       page=page,
       note_count=len(page_notes),
     ),
+    "phase": "read",
+    "lookup_id": manifest["lookup_id"],
+    "resources": [_activity_resource(note) for note in page_notes],
+    "page": page,
   }
   receipt = RESULT_PREFIX + json.dumps(
     payload, ensure_ascii=True, separators=(",", ":"),
@@ -373,3 +392,7 @@ def run(args: list[str]) -> int:
   if selection == "catalog":
     return _catalog(manifest, cursor)
   return _body(manifest, selection, cursor)
+
+
+if __name__ == "__main__":
+  raise SystemExit(run(sys.argv[1:]))
