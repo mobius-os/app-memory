@@ -221,7 +221,11 @@ export default function App({ appId, token }) {
   // token so a token refresh rebuilds it; the app-scoped runtime mirror keeps
   // exact warmed shared-data reads across opaque-frame and full-page reloads.
   const store = useMemo(
-    () => makeSharedMemoryStore({ getToken: () => token }),
+    () => makeSharedMemoryStore({
+      getToken: () => token,
+      authoritativeVersionedReads:
+        window.mobius?.runtimeFeatures?.authoritativeVersionedReads === true,
+    }),
     [token],
   );
 

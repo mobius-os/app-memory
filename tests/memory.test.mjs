@@ -733,6 +733,7 @@ test('store persists warmed shared data across opaque-frame reloads through app 
   }
 
   const firstFrame = makeSharedMemoryStore({
+    authoritativeVersionedReads: true,
     getToken: () => 't', fetchImpl, runtimeStorage, pollMs: 0,
   })
   assert.equal((await firstFrame.getJSON('graph.json', { revision })).value.nodes[0].id, 'persisted')
@@ -740,6 +741,7 @@ test('store persists warmed shared data across opaque-frame reloads through app 
 
   online = false
   const reloadedOpaqueFrame = makeSharedMemoryStore({
+    authoritativeVersionedReads: true,
     getToken: () => 't', fetchImpl, runtimeStorage, pollMs: 0,
   })
   const offline = await reloadedOpaqueFrame.getJSON('graph.json', { revision })
@@ -763,7 +765,8 @@ test('app-storage cache keeps one exact revision per logical Memory file', async
   }
   const rev1 = '1111111111111111111111111111111111111111'
   const rev2 = '2222222222222222222222222222222222222222'
-  const store = makeSharedMemoryStore({ fetchImpl, runtimeStorage, pollMs: 0 })
+  const store = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, fetchImpl, runtimeStorage, pollMs: 0 })
   await store.getJSON('graph.json', { revision: rev1 })
   body = '{"revision":2}'
   await store.getJSON('graph.json', { revision: rev2 })
@@ -809,7 +812,8 @@ test('a late old revision cannot evict a newer offline graph revision', async ()
       text: async () => JSON.stringify({ revision: isOld ? 1 : 2 }),
     }
   }
-  const store = makeSharedMemoryStore({ runtimeStorage, fetchImpl, pollMs: 0 })
+  const store = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage, fetchImpl, pollMs: 0 })
   const pendingOld = store.getJSON('graph.json', { revision: oldRevision })
   await oldStarted
   assert.equal((await store.getJSON('graph.json', { revision: newRevision })).value.revision, 2)
@@ -817,7 +821,8 @@ test('a late old revision cannot evict a newer offline graph revision', async ()
   await pendingOld
 
   online = false
-  const reloaded = makeSharedMemoryStore({ runtimeStorage, fetchImpl, pollMs: 0 })
+  const reloaded = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage, fetchImpl, pollMs: 0 })
   const result = await reloaded.getJSON('graph.json', { revision: newRevision })
   assert.equal(result.error, null)
   assert.equal(result.value.revision, 2)
@@ -849,7 +854,8 @@ test('detaching a retired subscription prevents its late response from replacing
       text: async () => JSON.stringify({ revision: isOld ? 1 : 2 }),
     }
   }
-  const store = makeSharedMemoryStore({ runtimeStorage, fetchImpl, pollMs: 0 })
+  const store = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage, fetchImpl, pollMs: 0 })
   const detachOld = store.subscribe('graph.json', () => {}, { revision: oldRevision })
   await oldStarted
   detachOld()
@@ -864,7 +870,8 @@ test('detaching a retired subscription prevents its late response from replacing
   detachCurrent()
 
   online = false
-  const reloaded = makeSharedMemoryStore({ runtimeStorage, fetchImpl, pollMs: 0 })
+  const reloaded = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage, fetchImpl, pollMs: 0 })
   const result = await reloaded.getJSON('graph.json', { revision: newRevision })
   assert.equal(result.error, null)
   assert.equal(result.value.revision, 2)
@@ -960,8 +967,10 @@ test('versioned app-storage commit prevents cross-frame stale cache overwrite', 
       text: async () => JSON.stringify({ revision: requestUrl.includes(oldRevision) ? 1 : 2 }),
     }
   }
-  const oldStore = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
-  const newStore = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
+  const oldStore = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
+  const newStore = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
   const pendingOld = oldStore.getJSON('graph.json', { revision: oldRevision })
   await oldStarted
   assert.equal((await newStore.getJSON('graph.json', { revision: newRevision })).value.revision, 2)
@@ -969,7 +978,8 @@ test('versioned app-storage commit prevents cross-frame stale cache overwrite', 
   await pendingOld
 
   online = false
-  const reloaded = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
+  const reloaded = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage: makeBridge(), fetchImpl, pollMs: 0 })
   const result = await reloaded.getJSON('graph.json', { revision: newRevision })
   assert.equal(result.error, null)
   assert.equal(result.value.revision, 2)
@@ -1022,8 +1032,10 @@ test('newer mutable body retries a lost cross-frame cache commit once the older 
     if (!online) throw new TypeError('offline')
     return { ok: true, status: 200, text: async () => 'new-ready-body' }
   }
-  const oldStore = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl: oldFetch, pollMs: 0 })
-  const newStore = makeSharedMemoryStore({ runtimeStorage: makeBridge(true), fetchImpl: newFetch, pollMs: 0 })
+  const oldStore = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage: makeBridge(), fetchImpl: oldFetch, pollMs: 0 })
+  const newStore = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage: makeBridge(true), fetchImpl: newFetch, pollMs: 0 })
   const pendingOld = oldStore.getText('.ready')
   await oldFetchStarted
   const pendingNew = newStore.getText('.ready')
@@ -1034,7 +1046,8 @@ test('newer mutable body retries a lost cross-frame cache commit once the older 
   assert.equal((await pendingNew).value, 'new-ready-body')
 
   online = false
-  const reloaded = makeSharedMemoryStore({ runtimeStorage: makeBridge(), fetchImpl: newFetch, pollMs: 0 })
+  const reloaded = makeSharedMemoryStore({
+    authoritativeVersionedReads: true, runtimeStorage: makeBridge(), fetchImpl: newFetch, pollMs: 0 })
   const result = await reloaded.getText('.ready')
   assert.equal(result.error, null)
   assert.equal(result.value, 'new-ready-body')
@@ -1054,12 +1067,37 @@ test('cache CAS retry stays bounded under continuous contention', async () => {
     },
   }
   const store = makeSharedMemoryStore({
+    authoritativeVersionedReads: true,
     runtimeStorage,
     fetchImpl: async () => ({ ok: true, status: 200, text: async () => '{"live":true}' }),
     pollMs: 0,
   })
   assert.deepEqual((await store.getJSON('graph.json')).value, { live: true })
   assert.equal(attempts, 3)
+})
+
+test('older runtimes keep Memory cache writes on the non-CAS compatibility path', async () => {
+  let installed = false
+  let casRead = false
+  let casWrite = false
+  let stored = null
+  const runtimeStorage = {
+    onConflict() { installed = true; return () => {} },
+    async get() { return stored },
+    async set(_path, value) { stored = value },
+    async getWithVersion() { casRead = true; return { value: stored, version: null } },
+    async durableWrite() { casWrite = true; return { durability: 'synced' } },
+  }
+  const store = makeSharedMemoryStore({
+    runtimeStorage,
+    fetchImpl: async () => ({ ok: true, status: 200, text: async () => '{"live":true}' }),
+    pollMs: 0,
+  })
+  assert.deepEqual((await store.getJSON('graph.json')).value, { live: true })
+  assert.equal(installed, false)
+  assert.equal(casRead, false)
+  assert.equal(casWrite, false)
+  assert.equal(stored.entry.body, '{"live":true}')
 })
 
 test('a delayed cache conflict commits the refused fresher revision before acknowledgment', async () => {
@@ -1088,6 +1126,7 @@ test('a delayed cache conflict commits the refused fresher revision before ackno
   }
   // Opening the cache installs the bridge-level conflict handler.
   await makeSharedMemoryStore({
+    authoritativeVersionedReads: true,
     runtimeStorage,
     fetchImpl: async () => { throw new TypeError('offline') },
     pollMs: 0,
@@ -1102,6 +1141,70 @@ test('a delayed cache conflict commits the refused fresher revision before ackno
   assert.equal(await listener(conflict), false, 'queued recovery remains unacknowledged')
   assert.equal(await listener(conflict), true, 'accepted replay acknowledges the conflict')
   assert.deepEqual(record, fresher)
+})
+
+test('a queued cache recovery remains unacknowledged until its value is authoritative', async () => {
+  let listener
+  const old = {
+    requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=old',
+    entry: { body: '{"revision":1}', present: true },
+    cacheStartedAt: 1,
+  }
+  const candidate = {
+    requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=new',
+    entry: { body: '{"revision":2}', present: true },
+    cacheStartedAt: 2,
+  }
+  let authoritative = old
+  let writes = 0
+  const runtimeStorage = {
+    onConflict(cb) { listener = cb; return () => {} },
+    async get() { return authoritative },
+    async set() {},
+    async getWithVersion() { return { value: authoritative, version: '"1"' } },
+    async durableWrite() { writes += 1; return { durability: 'queued' } },
+  }
+  await makeSharedMemoryStore({
+    authoritativeVersionedReads: true,
+    runtimeStorage,
+    fetchImpl: async () => { throw new TypeError('offline') },
+    pollMs: 0,
+  }).getJSON('graph.json', { revision: 'missing' })
+
+  const conflict = { path: 'offline-cache/slot.json', refusedValue: candidate }
+  assert.equal(await listener(conflict), false)
+  assert.equal(await listener(conflict), false, 'a replay cannot acknowledge a pending overlay')
+  assert.equal(writes, 2)
+
+  authoritative = candidate
+  assert.equal(await listener(conflict), true, 'the server-confirmed candidate is acknowledged')
+  assert.equal(writes, 2)
+})
+
+test('an offline cache overlay never confirms a conflict', async () => {
+  let listener
+  const candidate = {
+    requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=new',
+    entry: { body: '{"revision":2}', present: true },
+    cacheStartedAt: 2,
+  }
+  let writes = 0
+  const runtimeStorage = {
+    onConflict(cb) { listener = cb; return () => {} },
+    async get() { return candidate },
+    async set() {},
+    async getWithVersion() { return { value: candidate, version: '"1"', offline: true } },
+    async durableWrite() { writes += 1; return { durability: 'queued' } },
+  }
+  await makeSharedMemoryStore({
+    authoritativeVersionedReads: true,
+    runtimeStorage,
+    fetchImpl: async () => { throw new TypeError('offline') },
+    pollMs: 0,
+  }).getJSON('graph.json', { revision: 'missing' })
+
+  assert.equal(await listener({ path: 'offline-cache/slot.json', refusedValue: candidate }), false)
+  assert.equal(writes, 0)
 })
 
 test('cache conflicts acknowledge stale and identical candidates without rewriting', async () => {
@@ -1145,6 +1248,7 @@ test('cache conflicts acknowledge stale and identical candidates without rewriti
       async durableWrite() { writes += 1; return { durability: 'synced' } },
     }
     await makeSharedMemoryStore({
+    authoritativeVersionedReads: true,
       runtimeStorage,
       fetchImpl: async () => { throw new TypeError('offline') },
       pollMs: 0,

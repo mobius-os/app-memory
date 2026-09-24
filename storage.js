@@ -5,6 +5,16 @@ import { NOTE_BASE, NOTE_GIT_BASE } from './constants.js'
 // guarantee across separate frames/tabs, where JavaScript objects are not
 // shared. A WeakMap keeps this coordination lifecycle-bound to the bridge.
 const CACHE_COORDINATORS = new WeakMap()
+function cacheSlotSupersedes(current, candidate) {
+  return Boolean(current && candidate && (
+    (Number.isFinite(current.cacheStartedAt)
+      && current.cacheStartedAt > candidate.cacheStartedAt)
+    || (current.requestKey === candidate.requestKey
+      && current.entry?.body === candidate.entry?.body
+      && current.entry?.present === candidate.entry?.present)
+  ))
+}
+
 function cacheCoordinator(bridge) {
   let coordinator = CACHE_COORDINATORS.get(bridge)
   if (!coordinator) {
@@ -14,8 +24,9 @@ function cacheCoordinator(bridge) {
   return coordinator
 }
 
-function ensureCacheConflictHandler(bridge, coordinator) {
-  if (coordinator.conflictHandlerInstalled || typeof bridge.onConflict !== 'function') return
+function ensureCacheConflictHandler(bridge, coordinator, authoritativeVersionedReads) {
+  if (!authoritativeVersionedReads || coordinator.conflictHandlerInstalled
+      || typeof bridge.onConflict !== 'function') return
   coordinator.conflictHandlerInstalled = true
   bridge.onConflict(async (conflict) => {
     if (typeof conflict?.path !== 'string' || !conflict.path.startsWith('offline-cache/')) {
@@ -34,12 +45,9 @@ function ensureCacheConflictHandler(bridge, coordinator) {
     // shared Memory source data is never modified here.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const current = await bridge.getWithVersion(conflict.path)
+      if (current?.offline === true) return false
       const value = current?.value ?? null
-      if (Number.isFinite(value?.cacheStartedAt)
-          && value.cacheStartedAt > candidate.cacheStartedAt) return true
-      if (value?.requestKey === candidate.requestKey
-          && value?.entry?.body === candidate.entry?.body
-          && value?.entry?.present === candidate.entry?.present) return true
+      if (cacheSlotSupersedes(value, candidate)) return true
       try {
         const result = await bridge.durableWrite(conflict.path, candidate, current?.version
           ? { ifMatch: current.version }
@@ -76,6 +84,7 @@ export function makeSharedMemoryStore({
   fetchImpl,
   cacheStore,
   runtimeStorage,
+  authoritativeVersionedReads = false,
   cacheName = 'mobius-memory-shared-v1',
   pollMs = 4000,
   // How long a background revalidation must stay in flight before the
@@ -160,7 +169,7 @@ export function makeSharedMemoryStore({
   function mobiusCache(bridge) {
     const coordinator = cacheCoordinator(bridge)
     activeCoordinator = coordinator
-    ensureCacheConflictHandler(bridge, coordinator)
+    ensureCacheConflictHandler(bridge, coordinator, authoritativeVersionedReads)
     const known = new Map();
     return {
       async read(key) {
@@ -199,18 +208,15 @@ export function makeSharedMemoryStore({
           // Three total attempts bound contention without silently discarding
           // the current graph merely because an obsolete response committed
           // first.
-          if (typeof bridge.getWithVersion === 'function'
+          if (authoritativeVersionedReads
+              && typeof bridge.getWithVersion === 'function'
               && typeof bridge.durableWrite === 'function') {
             for (let attempt = 0; attempt < 3; attempt += 1) {
               const versioned = await bridge.getWithVersion(path)
               current = versioned?.value ?? null
               known.set(path, current)
               if (owner && !ownsCacheWrite(owner)) return;
-              if (Number.isFinite(current?.cacheStartedAt)
-                  && current.cacheStartedAt > next.cacheStartedAt) return;
-              if (current?.requestKey === next.requestKey
-                  && current?.entry?.body === next.entry.body
-                  && current?.entry?.present === next.entry.present) return;
+              if (cacheSlotSupersedes(current, next)) return;
               try {
                 await bridge.durableWrite(path, next, versioned?.version
                   ? { ifMatch: versioned.version }
@@ -239,11 +245,7 @@ export function makeSharedMemoryStore({
           current = await bridge.get(path)
           known.set(path, current)
           if (owner && !ownsCacheWrite(owner)) return;
-          if (Number.isFinite(current?.cacheStartedAt)
-              && current.cacheStartedAt > next.cacheStartedAt) return;
-          if (current?.requestKey === next.requestKey
-              && current?.entry?.body === next.entry.body
-              && current?.entry?.present === next.entry.present) return;
+          if (cacheSlotSupersedes(current, next)) return;
           await bridge.set(path, next)
           known.set(path, next)
         } catch { /* cache persistence must never turn a live graph read into failure */ }
