@@ -218,10 +218,14 @@ export default function App({ appId, token }) {
 
   // Read-through, offline-capable, subscribe-driven store over the SHARED
   // /api/storage/shared/memory/ route (see makeSharedMemoryStore). One per
-  // token so a token refresh rebuilds it; the cache mirror is keyed by URL and
-  // shared across instances, so the offline value survives the rebuild.
+  // token so a token refresh rebuilds it; the app-scoped runtime mirror keeps
+  // exact warmed shared-data reads across opaque-frame and full-page reloads.
   const store = useMemo(
-    () => makeSharedMemoryStore({ getToken: () => token }),
+    () => makeSharedMemoryStore({
+      getToken: () => token,
+      authoritativeVersionedReads:
+        window.mobius?.runtimeFeatures?.authoritativeVersionedReads === true,
+    }),
     [token],
   );
 
