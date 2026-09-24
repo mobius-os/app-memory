@@ -17,9 +17,45 @@ function cacheCoordinator(bridge) {
 function ensureCacheConflictHandler(bridge, coordinator) {
   if (coordinator.conflictHandlerInstalled || typeof bridge.onConflict !== 'function') return
   coordinator.conflictHandlerInstalled = true
-  bridge.onConflict((conflict) => (
-    typeof conflict?.path === 'string' && conflict.path.startsWith('offline-cache/')
-  ))
+  bridge.onConflict(async (conflict) => {
+    if (typeof conflict?.path !== 'string' || !conflict.path.startsWith('offline-cache/')) {
+      return false
+    }
+    const candidate = conflict.refusedValue
+    if (!candidate || typeof candidate !== 'object'
+        || !candidate.requestKey || !candidate.entry
+        || typeof bridge.getWithVersion !== 'function'
+        || typeof bridge.durableWrite !== 'function') return false
+
+    // A cache write can be queued during a brief disconnect after the shared
+    // read succeeds. If its delayed CAS later conflicts, compare the refused
+    // candidate with the current slot and commit the freshest one before
+    // acknowledging the platform outcome. This is cache reconciliation only;
+    // shared Memory source data is never modified here.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await bridge.getWithVersion(conflict.path)
+      const value = current?.value ?? null
+      if (Number.isFinite(value?.cacheStartedAt)
+          && value.cacheStartedAt > candidate.cacheStartedAt) return true
+      if (value?.requestKey === candidate.requestKey
+          && value?.entry?.body === candidate.entry?.body
+          && value?.entry?.present === candidate.entry?.present) return true
+      try {
+        const result = await bridge.durableWrite(conflict.path, candidate, current?.version
+          ? { ifMatch: current.version }
+          : { ifNoneMatch: true })
+        return result?.durability === 'synced'
+      } catch (error) {
+        if (error?.code !== 'conflict') return false
+        // This immediate loser is redundant with the still-unacknowledged
+        // original candidate that owns the retry loop.
+        if (error.writeId && typeof bridge._ackConflict === 'function') {
+          await bridge._ackConflict(error.writeId).catch(() => {})
+        }
+      }
+    }
+    return false
+  })
 }
 
 // ── Shared-memory read-through store ──────────────────────────────────────

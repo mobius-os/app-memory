@@ -1058,6 +1058,48 @@ test('cache CAS retry stays bounded under continuous contention', async () => {
   assert.equal(attempts, 3)
 })
 
+test('a delayed cache conflict commits the refused fresher revision before acknowledgment', async () => {
+  let listener
+  let record = {
+    requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=old',
+    entry: { body: '{"revision":1}', present: true },
+    cacheStartedAt: 1,
+  }
+  let version = 1
+  let firstRecovery = true
+  const runtimeStorage = {
+    onConflict(cb) { listener = cb; return () => {} },
+    async get() { return record },
+    async set(_path, value) { record = value },
+    async getWithVersion() { return { value: record, version: `"${version}"` } },
+    async durableWrite(_path, value) {
+      if (firstRecovery) {
+        firstRecovery = false
+        return { durability: 'queued' }
+      }
+      record = value
+      version += 1
+      return { durability: 'synced', version: `"${version}"` }
+    },
+  }
+  // Opening the cache installs the bridge-level conflict handler.
+  await makeSharedMemoryStore({
+    runtimeStorage,
+    fetchImpl: async () => { throw new TypeError('offline') },
+    pollMs: 0,
+  }).getJSON('graph.json', { revision: 'missing' })
+
+  const fresher = {
+    requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=new',
+    entry: { body: '{"revision":2}', present: true },
+    cacheStartedAt: 2,
+  }
+  const conflict = { path: 'offline-cache/slot.json', refusedValue: fresher }
+  assert.equal(await listener(conflict), false, 'queued recovery remains unacknowledged')
+  assert.equal(await listener(conflict), true, 'accepted replay acknowledges the conflict')
+  assert.deepEqual(record, fresher)
+})
+
 test('store getText caches a note then serves it offline', async () => {
   const cacheStore = makeFakeCache()
   let online = true
