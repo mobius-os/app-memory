@@ -1104,6 +1104,60 @@ test('a delayed cache conflict commits the refused fresher revision before ackno
   assert.deepEqual(record, fresher)
 })
 
+test('cache conflicts acknowledge stale and identical candidates without rewriting', async () => {
+  const cases = [
+    {
+      name: 'stale candidate',
+      current: {
+        requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=new',
+        entry: { body: '{"revision":2}', present: true },
+        cacheStartedAt: 3,
+      },
+      candidate: {
+        requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=old',
+        entry: { body: '{"revision":1}', present: true },
+        cacheStartedAt: 2,
+      },
+    },
+    {
+      name: 'identical candidate',
+      current: {
+        requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=same',
+        entry: { body: '{"revision":2}', present: true },
+        cacheStartedAt: 1,
+      },
+      candidate: {
+        requestKey: '/api/storage/shared/memory/git?file=graph.json&revision=same',
+        entry: { body: '{"revision":2}', present: true },
+        cacheStartedAt: 2,
+      },
+    },
+  ]
+
+  for (const { name, current, candidate } of cases) {
+    let listener
+    let writes = 0
+    const runtimeStorage = {
+      onConflict(cb) { listener = cb; return () => {} },
+      async get() { return current },
+      async set() {},
+      async getWithVersion() { return { value: current, version: '"1"' } },
+      async durableWrite() { writes += 1; return { durability: 'synced' } },
+    }
+    await makeSharedMemoryStore({
+      runtimeStorage,
+      fetchImpl: async () => { throw new TypeError('offline') },
+      pollMs: 0,
+    }).getJSON('graph.json', { revision: 'missing' })
+
+    assert.equal(await listener({
+      path: 'offline-cache/slot.json',
+      refusedValue: candidate,
+    }), true, `${name} is acknowledged`)
+    assert.equal(writes, 0, `${name} does not rewrite the current slot`)
+  }
+})
+
 test('store getText caches a note then serves it offline', async () => {
   const cacheStore = makeFakeCache()
   let online = true
