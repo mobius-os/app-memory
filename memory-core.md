@@ -8,12 +8,10 @@ Use Memory decisively whenever durable context could materially improve the
 work: preferences, constraints, people, goals, device or accessibility habits,
 recurring projects, stable decisions, prior user impact, and working style.
 Reading memory is cheap, parallel, and additive — never a gate in front of the
-work, and never something to ration. Because a lookup runs alongside your other
-investigation and never blocks it, efficiency is a reason to read *well*, not a
-reason to skip a cued read: the discipline is in how you read — in parallel, on
-the right cues, trusting owning sources as the source of truth, and flagging
-anything stale so the nightly writer can correct it — never in whether you read
-at all.
+work, and never something to ration. The discipline is in how you read — in
+parallel, on the right cues, trusting owning sources as the source of truth, and
+flagging anything stale so the nightly writer can correct it — never in whether
+you read at all.
 
 Launch one focused lookup early when missing that context could materially
 change priorities, tradeoffs, risk assessment, or the answer. At the same time,
@@ -21,9 +19,9 @@ begin every independent investigation as if Memory were unavailable; do not
 wait for recall before reading the owning sources. Common cues are:
 
 - continuity language such as “again”, “restore”, or “like before”;
-- a regression attributed to earlier agent work, or repeated failed attempts on
-  the same feature, where prior user impact or known invariants could prevent
-  another speculative change;
+- a problem attributed to earlier agent work, or repeated failed attempts at
+  the same task, where prior impact on the partner or known invariants could
+  prevent another speculative attempt;
 - a request that depends on the partner's setup, habits, accessibility, people,
   recurring projects, or workflow without supplying that context; or
 - an underdetermined design, architecture, or interaction choice where an
@@ -31,32 +29,32 @@ wait for recall before reading the owning sources. Common cues are:
 
 When any cue above is present, recall by default: how completely the task is
 specified is not a reason to skip. A fully specified or technically detailed
-request — including self-contained platform or app engineering — still warrants
-one focused lookup whenever a cue is present, because durable preferences, prior
-user impact, and known invariants routinely change how that work is done. Skip
-only when the current conversation already supplies the relevant durable
-context, or when the task genuinely has no cue at all — a mechanical change that
-does not depend on the partner's preferences, setup, people, projects, working
-style, or history. "Self-contained" means cue-free in that sense, never merely
-that the outcome is well specified. Complexity alone is not a cue. Repeat a
-lookup only when a materially different subproblem needs different context.
+request — including detailed technical work — still warrants one focused lookup
+whenever a cue is present, because durable preferences, prior user impact, and
+known invariants routinely change how that work is done. Skip only when the
+current conversation already supplies the relevant durable context, or when the
+task is genuinely self-contained: it has no cue at all, like a mechanical change
+that does not depend on the partner's preferences, setup, people, projects,
+working style, or history. "Self-contained" means cue-free in that sense, never
+merely that the outcome is well specified. Complexity alone is not a cue. Repeat
+a lookup only when a materially different subproblem needs different context.
 
 For technical work, Memory helps determine what may matter to the partner;
 owning sources establish what is true now and what happened. Use recall to
 prioritize investigation, preserve established preferences and interaction
-invariants, or decide whether to ask a clarifying question. Verify current
-state and exact history through chat records, source, Git, tests, contribution
-records, logs, APIs, or current documentation as appropriate. When sources
-disagree, follow the direct evidence and mention the concrete mismatch in the
-visible conversation so later Memory maintenance can correct or supersede the
-stale claim. Never infer an exact requirement from a broader memory; ask rather
-than inventing it.
+invariants, or decide whether to ask a clarifying question. Verify current state
+and exact history through chat records, files, source, Git, tests, logs, APIs,
+account or service records, or current documentation as appropriate. When
+sources disagree, follow the direct evidence and mention the concrete mismatch
+in the visible conversation so later Memory maintenance can correct or supersede
+the stale claim. Never infer an exact requirement from a broader memory; ask
+rather than inventing it.
 
 Choose authority per subproblem. Investigate current state, exact history,
 source code, records, transactions, and operational facts through their owning
 sources whether or not recall is running. A separate Memory lookup may run in
 parallel for the personalized part of the same request. Never use Memory to
-locate chats or establish current app, contribution, operational, or analytics
+locate chats or establish current app, records, operational, or analytics
 state; use it to inform the work, then verify changing facts through their
 owner.
 
@@ -65,21 +63,11 @@ needed and why, anchored to relevant people, projects, or apps. Never request
 credentials or secrets, or ask Memory to establish current account or
 configuration state, exact records or transactions, or implementation history.
 Phrase the lookup around the single decision or risk that recalled context
-could change; do not bundle an audit of whether Memory is being used with the
-underlying preference, constraint, or prior impact you actually need.
-When earlier experience matters, retrieve its user impact, risks, preferences,
-constraints, goals, or habits, then verify what changed through the owning
-source. Then run this read-only background lookup. A confined navigator starts
-at `index.md`, sees the complete contents of each opened routing node, and
-chooses which of its linked branches to open next. It stops when it has enough
-relevant context or no useful branch remains. Unchosen siblings are pruned from
-that read but retained in its audit trace. The graph's links bound the walk;
-there is no graph-wide catalogue, configured depth, breadth target, or
-answer-note count cap. Host-owned emergency context ceilings stop a malformed
-decision or broad lexical collision from creating an unbounded provider prompt.
-If one is reached, the result says discovery is incomplete rather than
-pretending the catalogue is exhaustive. If the text provider is unavailable,
-the same rooted walk falls back to local lexical choices:
+could change. When earlier experience matters, retrieve its user impact, risks,
+preferences, constraints, goals, or habits, then verify what changed through the
+owning source. Then run this read-only background lookup, which walks the graph
+from its root and returns the relevant candidates. If the result says discovery
+is incomplete, treat it as partial rather than exhaustive:
 
 ```bash
 python3 <this installed system app's source_dir>/memory_search.py "<focused description of the facts or prior context needed>" "$CHAT_ID"
@@ -100,21 +88,15 @@ first material recommendation, design commitment, or final answer it could
 inform. Run it serially only when recall determines what to inspect or there is
 no independent work to begin.
 
-A progressive lookup can outlast an exec tool's initial yield. Preserve the
-complete exec result, including any running session or continuation id, and
-poll that exact session until it exits. In particular, a blank initial
-`output` with a live session id is not a completed Memory read. When
-orchestrating parallel work, never project the result down to `output` alone
-and never start the same lookup again while its original session is running.
-The reader also coalesces an accidental identical retry from the same physical
-turn, but that safety net is not a substitute for joining the original exec.
+A lookup can outlast the exec tool's first response. Wait for that exact
+session to finish: a blank initial `output` with a live session id is
+not a completed Memory read, so never start the same lookup again while its
+original session is running.
 
-The navigator distinguishes routing from retrieval: a broad parent can be
-opened to reach a detailed child without being selected. The first lookup
-returns a catalogue of selected node names and short descriptions from one
-pinned immutable commit—not their bodies. It also returns a `lookup_id` and,
-when needed, a catalogue cursor. Read every catalogue page before deciding
-which candidates to open:
+The first lookup returns a catalogue of selected node names and short
+descriptions from one pinned immutable commit—not their bodies. It also returns
+a `lookup_id` and, when needed, a catalogue cursor. Read every catalogue page
+before deciding which candidates to open:
 
 ```bash
 python3 <source_dir>/memory_read.py "<lookup_id>" "catalog" "<next_cursor>" "$CHAT_ID"
