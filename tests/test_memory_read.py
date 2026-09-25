@@ -155,6 +155,7 @@ def test_catalogue_pages_every_candidate_without_a_fixed_count_cap():
     )
     payload = json.loads(first_marker.removeprefix(search.RESULT_PREFIX))
     seen = [item["id"] for item in payload["resources"]]
+    operation_keys = {payload["operation_key"]}
     assert len(first_text.getvalue()) <= search.TOOL_OUTPUT_PAGE_CHARS
 
     while not payload["page"]["complete"]:
@@ -165,8 +166,11 @@ def test_catalogue_pages_every_candidate_without_a_fixed_count_cap():
       assert code == 0
       assert len(text) <= search.TOOL_OUTPUT_PAGE_CHARS
       seen.extend(item["id"] for item in payload["resources"])
+      operation_keys.add(payload["operation_key"])
 
     assert seen == [f"note-{index:02d}" for index in range(25)]
+    # Every catalogue page is one operation, shown as one chat row.
+    assert operation_keys == {f"{manifest['lookup_id']}:catalog"}
     assert not (store.STATE / "read-delivery" / f"{manifest['read_id']}.json").exists()
     assert not (store.STATE / "usage.json").exists()
 
@@ -237,6 +241,43 @@ def test_body_byte_budget_replaces_the_old_two_node_page_cap():
     assert payload["page"]["complete"] is True
     assert len(payload["resources"]) == 9
     assert len(FRAME_RE.findall(text)) == 9
+
+
+def test_every_page_of_one_read_shares_one_operation_key():
+  # The chat folds rows sharing this key into one row, so a read that spans
+  # pages shows every note it read under its "Finished reading" label.
+  with tempfile.TemporaryDirectory() as raw:
+    store, _search, reader = _load(Path(raw))
+    bodies = [(f"Note {index}\n" + ("x" * 5_000)) for index in range(4)]
+    pointer = _publish(store, bodies)
+    manifest = _manifest(store, pointer["commit"], len(bodies))
+    with store.recall_execution(manifest["lookup_id"]) as receipt:
+      receipt.store(manifest)
+
+    cursor, rows = "start", []
+    while True:
+      code, _text, payload = _run(
+        reader, manifest["lookup_id"], "all", cursor, "chat-1",
+      )
+      assert code == 0
+      rows.append(payload)
+      if payload["page"]["complete"]:
+        break
+      cursor = payload["page"]["next_cursor"]
+
+    assert len(rows) > 1
+    keys = {row["operation_key"] for row in rows}
+    assert len(keys) == 1
+    assert next(iter(keys)).startswith(f"{manifest['lookup_id']}:read:")
+    assert rows[-1]["label"] == "Finished reading 4 notes from Memory"
+    delivered = [r["id"] for row in rows for r in row["resources"]]
+    assert set(delivered) == {c["id"] for c in manifest["candidates"]}
+
+    _code, _text, other = _run(
+      reader, manifest["lookup_id"], json.dumps([manifest["candidates"][0]["id"]]),
+      "start", "chat-1",
+    )
+    assert other["operation_key"] not in keys
 
 
 def test_continuation_cursors_cannot_skip_undelivered_content():
