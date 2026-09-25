@@ -1,3 +1,8 @@
+---
+name: memory
+description: Read when running Memory's scheduled consolidation or when Reflection reviews Memory's health — graph shape, admission rules, nightly duties, and how live lookups behave. Ordinary chat lookups follow the always-on Memory system-prompt fragment instead; do not load this skill just to recall something.
+---
+
 # Maintaining Memory
 
 This skill belongs to the installed Memory app. It governs the knowledge graph
@@ -173,7 +178,9 @@ Every successful night completes four duties across those proposals:
 
 Live recall progressively walks from the pinned root. At each step the provider
 sees the complete bodies of the currently opened nodes and may select useful
-answer nodes, open only linked children, or stop. Unchosen siblings are pruned
+answer nodes, open only linked children, or stop. Routing is distinct from
+retrieval: a broad parent can be opened to reach a detailed child without being
+selected itself. Unchosen siblings are pruned
 rather than fed into a graph-wide catalog, while the trace retains them for
 later audit. The host accepts only pinned, root-linked paths. A malformed or
 unavailable provider falls back to the same rooted walk using lexical choices.
@@ -183,7 +190,16 @@ deterministic byte pages. The host still bounds total content opened inside one
 navigator prompt, so a malformed expansion or broad lexical collision ends in
 one selection-only decision instead of an unbounded provider call. Reaching
 that emergency boundary marks discovery incomplete; it is never reported as an
-exhaustive success or exposed as a user-facing tuning knob.
+exhaustive success or exposed as a user-facing tuning knob. The graph's links
+alone bound the walk: there is no graph-wide catalogue, configured depth,
+breadth target, or answer-note count cap.
+
+A progressive lookup can outlast the chat agent's exec tool's first response.
+The agent must keep the complete exec result, including any running session or
+continuation id, and poll that exact session until it exits; reducing the
+result to its initial `output` loses the session. The reader coalesces an
+accidental identical retry from the same physical turn, but that safety net is
+not a substitute for joining the original session.
 
 Promote only durable, future-useful facts; preserve `source` provenance. Merge
 duplicates when the winner is unambiguous; deleting the redundant copy is safe
@@ -191,12 +207,13 @@ because prior published commits remain in Git history. For corrections, update
 the current claim and record `supersedes`; never silently blend contradictory
 facts. Leave ambiguity as a follow-up rather than guessing.
 
-Chat text is testimony, not deployment evidence. In particular, an assistant's
-claim that a local fix, prototype, or capability is complete does not establish
-that it is safe or current. Promote the observed problem, decision, or intended
-invariant when useful, but describe implementation state as provisional unless
-the partner confirms the outcome or a later independent user report corroborates
-it. Never turn “I implemented” into “the app supports” on testimony alone.
+Chat text is testimony, not proof. In particular, an assistant's claim that a
+task is complete — a table booked, an email sent, a bill paid, a fix shipped —
+does not establish that it happened, succeeded, or is still current. Promote the
+observed need, decision, or intended outcome when useful, but describe the
+completion as provisional unless the partner confirms the outcome or a later
+independent report corroborates it. Never turn “I booked it” into “the booking
+is confirmed”, or “I implemented” into “the app supports”, on testimony alone.
 
 Every run, start with maintenance. The prompt payload carries a
 `maintenance_flags` list, derived from `graph.json`, naming structural work such
