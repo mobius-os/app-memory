@@ -256,6 +256,11 @@ def _body_state(
     ),
     "phase": "read",
     "lookup_id": manifest["lookup_id"],
+    # Pages of one selection are one read: the chat folds rows sharing this
+    # key, so "Finished reading N notes" lists all N across its pages.
+    "operation_key": (
+      f"{manifest['lookup_id']}:read:{_selection_hash(selection)}"
+    ),
     "resources": [_activity_resource(note) for note in page_notes],
     "page": page,
   }

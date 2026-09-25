@@ -1260,6 +1260,10 @@ def _result_payload(
     "lookup_id": result.lookup_id,
   }
   if result.status == RESULT_HIT:
+    # Every catalogue page of one lookup is one operation, so the chat shows a
+    # single row listing all candidates rather than one row per page.
+    if result.lookup_id:
+      payload["operation_key"] = f"{result.lookup_id}:catalog"
     payload["resources"] = [_activity_resource(note) for note in (notes or [])]
     payload["page"] = page or {
       "candidate_count": len(result.notes), "complete": True,
