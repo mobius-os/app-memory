@@ -222,11 +222,7 @@ Every successful night completes four duties across those proposals:
    Every deletion is reversible from Git history. A possible stale fact is a
    lead to verify, not proof; a clean neighborhood is a correct empty result.
 
-Live recall has two styles, chosen in Memory's settings (`live_reader`,
-default `walk`) while the replay metrics compare them. `single-pass` chooses
-from every note title in one call, with full descriptions for the strongest
-BM25 text matches; a provider failure falls back to those matches. `walk`
-progressively walks from the pinned root. At each step the provider
+Live recall progressively walks from the pinned root. At each step the provider
 sees the complete bodies of the currently opened nodes and may select useful
 answer nodes, open only linked children, or stop. Routing is distinct from
 retrieval: a broad parent can be opened to reach a detailed child without being

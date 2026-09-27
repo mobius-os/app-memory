@@ -9,7 +9,7 @@ noise, tokens, and time beside the previous run. Use it before and after any
 change to search, organisation, admission, or consolidation.
 
   python3 memory_benchmark.py freeze [size]
-  python3 memory_benchmark.py run [parallel] [walk|single-pass|deep]
+  python3 memory_benchmark.py run [parallel] [walk|deep]
 """
 
 from __future__ import annotations
@@ -54,8 +54,7 @@ def retrieve_deep(question: str) -> RecallResult:
 
 
 READERS = {
-  "walk": lambda question: retrieve(question, "walk"),
-  "single-pass": lambda question: retrieve(question, "single-pass"),
+  "walk": retrieve,
   "deep": retrieve_deep,
 }
 

@@ -79,57 +79,6 @@ def test_run_scores_recall_and_noise_against_expectations(monkeypatch, state):
   assert list(memory_benchmark.RUNS.glob("*.json"))
 
 
-def test_single_pass_drops_invented_ids_and_falls_back_to_bm25(monkeypatch):
-  import memory_search
-
-  graph = {
-    "nodes": [
-      {"id": "index", "path": "index.md", "type": "moc", "title": "Home"},
-      {"id": "lives-in-lisbon", "path": "notes/lives-in-lisbon.md",
-       "type": "note", "title": "Partner lives in Lisbon", "description": ""},
-      {"id": "likes-ramen", "path": "notes/likes-ramen.md", "type": "note",
-       "title": "Partner loves ramen", "description": "Favourite dinner food."},
-    ],
-    "edges": [],
-  }
-  files = {
-    "graph.json": json.dumps(graph), "index.md": "- [[lives-in-lisbon]]\n",
-    "notes/lives-in-lisbon.md": "Lisbon.", "notes/likes-ramen.md": "Ramen.",
-  }
-  monkeypatch.setattr(memory_search, "read_revision_file", lambda _c, p: files[p])
-
-  chosen = memory_search.select_in_one_pass(
-    "book dinner", "c", guidance_record={},
-    text_call=lambda _p: '{"selected":["likes-ramen","made-up"]}',
-  )
-  fallback = memory_search.select_in_one_pass(
-    "ramen dinner", "c", guidance_record={}, text_call=lambda _p: "not json",
-  )
-
-  assert [node.id for node in chosen.selected] == ["likes-ramen"]
-  assert fallback.decisions[0]["source"] == "lexical_fallback"
-  assert fallback.selected[0].id == "likes-ramen"
-
-
-def test_live_reader_follows_memory_settings_and_defaults_to_walk(
-  monkeypatch, tmp_path,
-):
-  import memory_search
-
-  monkeypatch.setattr(memory_search, "DATA_DIR", tmp_path)
-  monkeypatch.delenv("APP_ID", raising=False)
-  assert memory_search.live_reader() == "walk"
-
-  monkeypatch.setenv("APP_ID", "57")
-  settings = tmp_path / "apps" / "57" / "settings.json"
-  settings.parent.mkdir(parents=True)
-  settings.write_text(json.dumps({"live_reader": "single-pass"}))
-  assert memory_search.live_reader() == "single-pass"
-
-  settings.write_text(json.dumps({"live_reader": "telepathy"}))
-  assert memory_search.live_reader() == "walk"
-
-
 def test_deep_batch_maps_numbered_answers_and_drops_invented_or_map_ids(
   monkeypatch,
 ):

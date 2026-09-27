@@ -177,9 +177,6 @@ export default function App({ appId, token }) {
   const [settingsAgentDefaults, setSettingsAgentDefaults] = useState(null);
   const [connectedProviders, setConnectedProviders] = useState(null);
   const [agentSettingsExtra, setAgentSettingsExtra] = useState({});
-  // How chat lookups search Memory; both styles stay available while the
-  // nightly replay metrics compare them.
-  const [liveReader, setLiveReader] = useState('walk');
   const [primaryAgentMode, setPrimaryAgentMode] = useState('system');
   const [agentProvider, setAgentProvider] = useState('claude');
   const [agentModel, setAgentModel] = useState('');
@@ -732,7 +729,6 @@ export default function App({ appId, token }) {
       settingsLoaded = true;
       setSettingsStatus('ready');
       setAgentSettingsExtra(safeSettings);
-      setLiveReader(safeSettings.live_reader === 'single-pass' ? 'single-pass' : 'walk');
       let connected = null;
       if (statusRes?.ok) {
         const data = await statusRes.json();
@@ -1038,7 +1034,6 @@ export default function App({ appId, token }) {
         ? (secondaryAgentModel || null)
         : null,
       fallback_effort: null,
-      live_reader: liveReader,
     };
     try {
       const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, {
@@ -1068,7 +1063,6 @@ export default function App({ appId, token }) {
     authHeaders,
     agentSaving,
     agentSettingsExtra,
-    liveReader,
     primaryAgentMode,
     agentProvider,
     agentModel,
@@ -1405,7 +1399,6 @@ export default function App({ appId, token }) {
                         <button type="button" onClick={loadAgentSettings}>Retry</button>
                       </div>
                     ) : (
-                      <>
                       <BackgroundAgentList
                         onMove={reorderAgents}
                         itemLabels={agentLabels}
@@ -1451,29 +1444,6 @@ export default function App({ appId, token }) {
                           />
                         </div>
                       </BackgroundAgentList>
-                      <div className="mg-reader">
-                      <div className="mg-agent-slot-label">How chats search Memory</div>
-                      <div style={S.toggle} className="mg-reader-toggle" role="group" aria-label="How chats search Memory">
-                        {[['walk', 'Step by step'], ['single-pass', 'Single pass']].map(([key, label]) => (
-                          <button
-                            key={key}
-                            type="button"
-                            className="mg-reader-option"
-                            style={{ ...S.toggleBtn, ...(liveReader === key ? S.toggleActive : {}) }}
-                            aria-pressed={liveReader === key}
-                            onClick={() => { setLiveReader(key); setAgentMessage(''); }}
-                          >
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-                      <p className="mg-reader-note">
-                        {liveReader === 'single-pass'
-                          ? 'Chooses from every note title in one call: faster and cheaper, and in testing it found more of what past chats needed.'
-                          : 'Walks the graph from its top, opening a few notes at a time.'}
-                      </p>
-                      </div>
-                      </>
                     )}
                   </div>
                 )}
