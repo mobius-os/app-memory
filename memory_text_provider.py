@@ -195,6 +195,17 @@ def _claude_result(stdout: str) -> tuple[str, dict | None, float | None] | None:
   return payload["result"], _numeric_usage(payload.get("usage")), cost
 
 
+def _auth_dir(variable: str, provider: str) -> str:
+  """Where a provider CLI keeps its login: explicit env, else the instance's.
+
+  Detection and invocation must agree. Callers differ in what they inherit —
+  the nightly job wrapper exports these, the agent tool service does not — so
+  the adapter resolves them itself rather than relying on each launcher.
+  """
+  data_dir = os.environ.get("DATA_DIR", "/data")
+  return os.environ.get(variable) or os.path.join(data_dir, "cli-auth", provider)
+
+
 def available_provider(requested: str = "auto") -> str | None:
   requested = (requested or "auto").strip().lower()
   if requested in ("none", "off", "deterministic"):
@@ -204,12 +215,10 @@ def available_provider(requested: str = "auto") -> str | None:
   if requested == "codex":
     return "codex"
   claude = os.environ.get("CLAUDE_CLI_PATH") or shutil.which("claude")
-  claude_auth = os.environ.get("CLAUDE_CONFIG_DIR", "/data/cli-auth/claude")
-  if claude and os.path.isdir(claude_auth):
+  if claude and os.path.isdir(_auth_dir("CLAUDE_CONFIG_DIR", "claude")):
     return "claude"
   codex = os.environ.get("CODEX_CLI_PATH") or shutil.which("codex")
-  codex_home = os.environ.get("CODEX_HOME")
-  if codex and codex_home and os.path.isdir(codex_home):
+  if codex and os.path.isdir(_auth_dir("CODEX_HOME", "codex")):
     return "codex"
   return None
 
@@ -232,8 +241,9 @@ def run_text(
       )
     env = {
       key: value for key, value in os.environ.items()
-      if key in ("PATH", "HOME", "LANG", "LC_ALL", "CLAUDE_CONFIG_DIR")
+      if key in ("PATH", "HOME", "LANG", "LC_ALL")
     }
+    env["CLAUDE_CONFIG_DIR"] = _auth_dir("CLAUDE_CONFIG_DIR", "claude")
     cmd = [executable, "-p", "--tools", "", "--output-format", "json"]
     if model:
       cmd += ["--model", str(model)]
@@ -250,8 +260,9 @@ def run_text(
       )
     env = {
       key: value for key, value in os.environ.items()
-      if key in ("PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME")
+      if key in ("PATH", "HOME", "LANG", "LC_ALL")
     }
+    env["CODEX_HOME"] = _auth_dir("CODEX_HOME", "codex")
     cmd = [
       executable, "exec", "--json", "--ephemeral", "--ignore-user-config",
       "--ignore-rules", "--strict-config", "--skip-git-repo-check",

@@ -228,3 +228,18 @@ class MemoryTextProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+def test_provider_login_resolves_without_launcher_exports(monkeypatch, tmp_path):
+  # The agent tool service does not export CLAUDE_CONFIG_DIR/CODEX_HOME the
+  # way the nightly job wrapper does; recall must still reach the login.
+  import memory_text_provider as provider
+
+  monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+  monkeypatch.delenv("CODEX_HOME", raising=False)
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  assert provider._auth_dir("CLAUDE_CONFIG_DIR", "claude") == str(
+    tmp_path / "cli-auth" / "claude"
+  )
+  monkeypatch.setenv("CODEX_HOME", "/elsewhere/codex")
+  assert provider._auth_dir("CODEX_HOME", "codex") == "/elsewhere/codex"

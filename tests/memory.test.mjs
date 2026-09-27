@@ -174,6 +174,8 @@ test('manifest activates Memory only through a system prompt contribution', () =
   const manifest = JSON.parse(readFileSync(new URL('../mobius.json', import.meta.url), 'utf8'))
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(pkg.version, manifest.version)
+  // Ignored since the platform retired system apps (mobius#1460), but still
+  // required by older platforms before they accept a system_prompt fragment.
   assert.equal(manifest.system_app, true)
   assert.equal(manifest.system_prompt, 'memory-core.md')
   assert.deepEqual(manifest.skills, ['memory.md'])
@@ -186,7 +188,7 @@ test('manifest activates Memory only through a system prompt contribution', () =
   for (const file of [
     'memory-core.md', 'memory.md', 'memory_search.py', 'memory_read.py', 'memory_runner.py',
     'memory_store.py', 'memory_graph.py', 'memory_text_provider.py',
-    'personalization_profile.py',
+    'personalization_profile.py', 'remember.py', 'service.py',
   ]) {
     assert.ok(manifest.source_files.includes(file), file)
   }
@@ -206,9 +208,9 @@ test('reader returns a bounded catalogue then verified pinned body pages', () =>
   assert.doesNotMatch(reader, /FILES:/)
   assert.match(reader, /MOBIUS_APP_ACTIVITY_V1:/)
   assert.deepEqual(manifest.agent_activities['memory-read'], {
-    entry: 'memory_read.py', arguments: 4, running_label: 'Reading',
+    tool: 'read', running_label: 'Reading',
   })
-  assert.match(corePrompt, /memory_read\.py "<lookup_id>"/)
+  assert.match(corePrompt, /Memory's `read`\s+tool \(`memory_read`/)
   assert.match(reader, /ready_pointer\(\)/)
   assert.match(reader, /read_revision_file\(self\.commit, path\)/)
   assert.match(reader, /graph\.open\("index", 0, None\)/)
@@ -220,13 +222,10 @@ test('reader returns a bounded catalogue then verified pinned body pages', () =>
   assert.match(expander, /read_revision_file\(commit, note\["path"\]/)
   assert.match(expander, /byte_start/)
   assert.match(expander, /next_cursor/)
-  assert.match(corePrompt, /Read every catalogue page\s+before deciding/)
-  assert.match(corePrompt,
-    /python3 <source_dir>\/memory_read\.py "<lookup_id>" "catalog"/)
-  assert.match(corePrompt,
-    /python3 <source_dir>\/memory_read\.py "<lookup_id>" '\["candidate-id"\]'/)
-  assert.match(corePrompt, /blank initial[\s\S]*live session id[\s\S]*not a completed Memory read/)
-  assert.match(corePrompt, /never start the same lookup again while its\s+original session is running/)
+  assert.match(corePrompt, /Read every catalogue page with Memory's `read`[\s\S]*?before\s+deciding/)
+  assert.match(corePrompt, /repeat `read` with the exact same lookup\s+id and selection and that cursor/)
+  assert.match(corePrompt, /never repeat `search` merely because a catalogue or body/)
+  assert.match(corePrompt, /Never start the same search again while it is still running/)
   assert.match(provider, /"--tools", ""/)
   assert.match(provider, /"--sandbox", "read-only"/)
   for (const feature of [
@@ -247,7 +246,8 @@ test('viewer pins graph and notes to the validated ready commit', () => {
   assert.doesNotMatch(source, /generations\/\$\{/)
   // No published pointer is an empty Memory, never a blocking wait.
   assert.doesNotMatch(source, /initializing/)
-  assert.match(source, /if \(!present \|\| body == null\) \{[\s\S]{0,200}?setStatus\('empty'\)/)
+  assert.match(source, /if \(!present \|\| body == null\) \{\s*setRevision\(null\);\s*showEmptyMemory\(\);/)
+  assert.match(source, /const showEmptyMemory = \(\) => \{[\s\S]{0,200}?signalEmpty\(\);/)
 })
 
 test('note and local-graph tabs use roving focus and a labelled tab panel', () => {
