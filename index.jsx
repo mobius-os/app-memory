@@ -115,7 +115,7 @@ export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
   const [usageCounts, setUsageCounts] = useState({});
   const [revision, setRevision] = useState(null);
-  const [status, setStatus] = useState('loading'); // loading | initializing | ready | empty | error
+  const [status, setStatus] = useState('loading'); // loading | ready | empty | error
   const [errMsg, setErrMsg] = useState('');
   const [view, setView] = useState('graph'); // graph | list
   const [selected, setSelected] = useState(null); // node object
@@ -253,8 +253,9 @@ export default function App({ appId, token }) {
   }, [store]);
 
   // Pin every render to the immutable Git commit selected by the atomic
-  // pointer. A missing pointer means first-install initialization is still in
-  // progress; malformed pointer data is never interpolated into a path.
+  // pointer. A missing pointer means nothing has been published yet (a new
+  // install before its first scheduled run), which is simply an empty Memory;
+  // malformed pointer data is never interpolated into a path.
   useEffect(() => {
     const unsub = store.subscribe('.ready', ({ body, present, error }) => {
       if (error && body == null) {
@@ -264,8 +265,9 @@ export default function App({ appId, token }) {
       }
       if (!present || body == null) {
         setRevision(null);
-        setGraph(null);
-        setStatus('initializing');
+        setGraph({ nodes: [], edges: [], problems: [] });
+        setSelected(null);
+        setStatus('empty');
         return;
       }
       let pointer;
@@ -1456,17 +1458,6 @@ export default function App({ appId, token }) {
           </div>
         )}
 
-        {status === 'initializing' && (
-          <div style={S.center}>
-            <div className="mg-orbit"><span /><span /><span /></div>
-            <div style={S.centerTitle}>Preparing your first memory graph</div>
-            <div style={S.centerText}>
-              Memory is reviewing the available chat summaries. This view will
-              appear when the first complete graph commit is published.
-            </div>
-          </div>
-        )}
-
         {status === 'error' && (
           <div style={S.center}>
             <div style={S.errIcon}>!</div>
@@ -1480,8 +1471,9 @@ export default function App({ appId, token }) {
             <EmptyConstellation />
             <div style={S.centerTitle}>Memory is just getting to know you</div>
             <div style={S.centerText}>
-              Its scheduled review promotes durable facts from your chats only
-              when they are useful enough to keep. Come back after more conversation.
+              As you chat, Möbius notes lasting facts about you and your work,
+              and Memory files the useful ones here each night. Come back after
+              a few conversations.
             </div>
           </div>
         )}

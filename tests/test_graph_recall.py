@@ -656,7 +656,7 @@ def test_failed_receipt_exposes_only_a_safe_reason_enum():
     "activity_id": memory_search.SEARCH_ACTIVITY_ID,
     "status": "failed",
     "outcome": memory_search.RESULT_FAILED,
-    "label": "Memory lookup failed",
+    "label": "Memory isn't ready yet",
     "phase": "catalog",
     "lookup_id": None,
     "reason": memory_search.RESULT_REASON_NOT_READY,

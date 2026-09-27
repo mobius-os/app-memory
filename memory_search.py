@@ -888,7 +888,8 @@ def _retrieve_prepared(request: RecallRequest) -> RecallResult:
   if request.commit is None:
     return RecallResult(
       RESULT_FAILED,
-      "Memory lookup failed.",
+      "Memory isn't ready yet: no memory graph has been published, so there "
+      "is nothing to recall. Continue without it.",
       reason=RESULT_REASON_NOT_READY,
     )
   try:
@@ -1241,6 +1242,7 @@ def _result_payload(
 ) -> dict:
   display = _display(
     result.status,
+    reason=result.reason,
     phase="catalog",
     page=page,
     note_count=len(notes or []),
@@ -1288,6 +1290,7 @@ def _result_payload(
 def _display(
   status: str,
   *,
+  reason: str | None = None,
   phase: str,
   page: dict | None = None,
   note_count: int = 0,
@@ -1296,6 +1299,8 @@ def _display(
 ) -> dict[str, str]:
   """Return bounded owner-facing copy; platform transport stays semantic-free."""
   if status == RESULT_FAILED:
+    if reason == RESULT_REASON_NOT_READY:
+      return {"label": "Memory isn't ready yet"}
     return {"label": "Memory lookup failed"}
   if status == RESULT_EMPTY:
     display = {
