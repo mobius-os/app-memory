@@ -176,6 +176,24 @@ class MemoryStoreTests(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "note exceeds read cap"):
         store.publish(worktree)
 
+  def test_inherited_overlong_description_does_not_block_publication(self):
+    # Regression: a whole-graph description cap at publication deadlocked the
+    # nightly writer on a note published before the cap existed. Length is
+    # writer-owned maintenance (graph warning), not a publication gate.
+    with tempfile.TemporaryDirectory() as raw:
+      store = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _seed(seed)
+      pointer = _publish(store, seed)
+      _, worktree = store.start_staging(seed)
+      graph = json.loads((worktree / "graph.json").read_text(encoding="utf-8"))
+      graph["nodes"].append({"id": "wordy", "description": "x" * 5_000})
+      (worktree / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+      published = store.publish(worktree)
+
+      self.assertNotEqual(published["commit"], pointer["commit"])
+
   def test_publish_rejects_unreadable_graph_without_advancing_pointer(self):
     with tempfile.TemporaryDirectory() as raw:
       store = _load(Path(raw))

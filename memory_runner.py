@@ -2,9 +2,10 @@
 """Memory's scheduled consolidator with commit-addressed publication.
 
 The model never receives filesystem, shell, network, or owner-token authority.
-Python fetches structurally-redacted chat logs with a short-lived app token,
-passes bounded data to a tool-free text process, validates its proposed note
-upserts, and atomically advances a pointer after committing a complete graph.
+Python gathers the facts agents saved with ``remember`` (with each chat's
+title and Digest as context) using a short-lived app token, passes bounded data
+to a tool-free text process, validates its proposed note upserts, and atomically
+advances a pointer after committing a complete graph.
 """
 
 from __future__ import annotations
@@ -28,12 +29,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from memory_graph import build as build_graph
+from memory_search import deep_replay_batch
 from personalization_profile import refresh_profile
 from memory_store import (
+  MAX_NOTE_BYTES,
   MAX_RECALL_GUIDANCE_CHARS,
   STATE,
+  consume_captures,
   discard_staging,
+  load_captures,
   load_recall_guidance,
+  note_usage_evidence,
   load_usage,
   publish,
   read_revision_file,
@@ -73,12 +79,8 @@ _DELETE_PATH = re.compile(r"^(?:notes|mocs)/[a-z0-9][a-z0-9._-]*\.md$")
 _NOTE_PATH = re.compile(r"^notes/[a-z0-9][a-z0-9._-]*\.md$")
 _ROUTE_PATH = re.compile(r"^(?:index\.md|mocs/[a-z0-9][a-z0-9._-]*\.md)$")
 _WIKILINK_TARGET = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
-_MAX_UPDATES = 50
-_MAX_DELETES = 25
-_MAX_CONTENT = 64_000
-# Host safety ceilings for the expensive complete-body portion of one focused
-# analyst prompt. They are not relevance targets or partner-tuned policy.
-_MAX_RELATED_NOTE_BODIES = 12
+# Host safety ceiling for the expensive complete-body portion of one focused
+# analyst prompt. It is not a relevance target or partner-tuned policy.
 _MAX_RELATED_NOTE_CONTENT_CHARS = 160_000
 _DELETED_CHAT_SOURCE = "deleted-chat"
 _DELETED_CHAT_SOURCE_RE = re.compile(
@@ -95,17 +97,25 @@ _GENERATED_DOCS = frozenset({"mocs/memory-unfiled.md"})
 _PROTECTED_DOCS = _MANAGED_DOCS | _GENERATED_DOCS
 _UNFILED_START = "<!-- memory-managed:unfiled:start -->"
 _UNFILED_END = "<!-- memory-managed:unfiled:end -->"
-_PENDING_CHAT_IDS = STATE / "pending-chat-ids.json"
-_CHAT_DISCOVERY = STATE / "chat-discovery.json"
+# Each chat's platform-owned continuity note; its short Digest gives a saved
+# fact its context without sending the transcript to the writer.
+_CHAT_NOTES = STATE.parent / "chats"
 _SOURCE_ARCHIVE_KEY = STATE / "source-archive-key.json"
 _RECALL_STATS = STATE / "recall-stats.json"
-_CHAT_PAGE_SIZE = 100
+# Finished replay batches for one published commit. A run killed mid-night (a
+# planned restart, a timeout) resumes from here instead of paying again; any
+# other commit's file is stale evidence and is discarded.
+_REPLAY_CACHE = STATE / "replay-cache.jsonl"
 _RECENT_AUDIT_KEYS = (
   "schema", "run_id", "read_id", "at", "question_sha256", "outcome",
   "overreach", "miss_class", "reason", "host_selection_override",
-  "usefulness", "hindsight_reason",
+  "usefulness", "hindsight_reason", "deep_recall", "deep_noise",
 )
 _RUN_TIMEOUT_SECONDS = int(os.environ.get("MEMORY_TIMEOUT", "3600"))
+# Lookups replayed per reference call. The catalogue dominates each call, so
+# batching divides its cost; ten questions keep every answer well within one
+# reply and one bad reply cheap to retry.
+_DEEP_REPLAY_BATCH = 10
 _FINISH_RESERVE_SECONDS = 60
 # Consolidation rotates through maps one neighborhood per work item. The cursor
 # only orders that rotation; losing it costs nothing but a repeated pass.
@@ -174,25 +184,13 @@ class ApiResult:
 
 
 @dataclass(frozen=True)
-class ChatIntake:
+class CaptureIntake:
+  """Tonight's saved facts, grouped under the chat that saved them."""
+
   chats: list[dict]
-  discovered_count: int = 0
-  tombstone_count: int = 0
-  tombstone_ids: tuple[str, ...] = ()
-  detail_failure_count: int = 0
-  discovery_complete: bool = True
-  queue_write_ok: bool = True
-  pending_count: int = 0
-  pending_before_ack_count: int = 0
-  acknowledged_count: int = 0
-
-
-@dataclass(frozen=True)
-class QueueAcknowledgement:
-  write_ok: bool
-  before_count: int
-  removed_count: int
-  remaining_count: int
+  capture_count: int = 0
+  dropped_ids: tuple[str, ...] = ()
+  unreachable_chat_count: int = 0
 
 
 class ProposalValidationError(ValueError):
@@ -471,7 +469,6 @@ def _app_active(app_id: int) -> bool:
   return bool(
     value
     and value.get("id") == app_id
-    and value.get("system_app") is True
     and isinstance(contract, dict)
     # The fields below are the compatibility contract this runner consumes.
     # A newer additive envelope schema must not disable maintenance by itself.
@@ -631,12 +628,8 @@ def _pending_read_traces() -> list[dict]:
 
 
 def _audit_prompt_view(audit: dict) -> dict:
-  """Return live trace and hindsight evidence without repeated route metadata."""
+  """Return live trace and deep-replay evidence without repeated route metadata."""
   value = copy.deepcopy(audit)
-  # Canonical chat ids are host-side validation data. The analyst receives
-  # only the short source handle carried beside the bounded hindsight chat.
-  value.pop("hindsight_source_id", None)
-  value.pop("hindsight_source_deleted", None)
 
   def compact_frontier(section: object) -> None:
     if not isinstance(section, dict):
@@ -680,22 +673,100 @@ def _audit_prompt_view(audit: dict) -> dict:
   return value
 
 
+def _deep_replays(
+  commit: str, traces: list[dict], deadline: float | None = None,
+) -> list[dict]:
+  """Replay recorded live reads with the deep reference reader, in batches.
+
+  Returns replays for the longest in-order prefix that got a model answer, so
+  the audit cursor never skips an unreplayed read; the rest wait for a later
+  night. A batch's provider attempts are attached to its first replay only, so
+  model-work totals count each call once.
+  """
+  cached = _load_replay_cache(commit)
+  replays: list[dict] = []
+  pending = []
+  for trace in traces:
+    hit = cached.get(str(trace["read_id"]))
+    if hit is None:
+      pending = traces[len(replays):]
+      break
+    replays.append(hit)
+  for start in range(0, len(pending), _DEEP_REPLAY_BATCH):
+    if deadline is not None and time.monotonic() >= deadline:
+      break
+    batch = pending[start:start + _DEEP_REPLAY_BATCH]
+    started = time.monotonic()
+    results, attempts = deep_replay_batch(
+      [str(trace["question"]) for trace in batch], commit,
+    )
+    elapsed_ms = round((time.monotonic() - started) * 1000)
+    finished = []
+    for index, (trace, result) in enumerate(zip(batch, results)):
+      if result is None:
+        break
+      finished.append({
+        "commit": commit,
+        "read_id": str(trace["read_id"]),
+        "selected": result["selected"],
+        "reason": result["reason"],
+        "attempts": attempts if index == 0 else [],
+        "elapsed_ms": elapsed_ms,
+      })
+    _append_replay_cache(finished)
+    replays.extend(finished)
+    if len(finished) < len(batch):
+      break
+  return replays
+
+
+def _load_replay_cache(commit: str) -> dict[str, dict]:
+  try:
+    lines = _REPLAY_CACHE.read_text(encoding="utf-8").splitlines()
+  except FileNotFoundError:
+    return {}
+  cached = {}
+  for line in lines:
+    try:
+      item = json.loads(line)
+    except ValueError:
+      continue
+    if isinstance(item, dict) and item.get("commit") == commit:
+      # Already paid for by an earlier attempt; not this run's model work.
+      cached[str(item.get("read_id"))] = {**item, "attempts": []}
+  if not cached and lines:
+    _REPLAY_CACHE.unlink(missing_ok=True)
+  return cached
+
+
+def _append_replay_cache(replays: list[dict]) -> None:
+  if not replays:
+    return
+  _REPLAY_CACHE.parent.mkdir(parents=True, exist_ok=True)
+  with _REPLAY_CACHE.open("a", encoding="utf-8") as handle:
+    for replay in replays:
+      handle.write(json.dumps(replay, ensure_ascii=False) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
 def _audit_reads(
   commit: str,
   traces: list[dict],
-  hindsight_chats: dict[str, dict] | None = None,
+  replays: list[dict],
 ) -> list[dict]:
-  """Attach current selected bodies and hindsight to each recorded live read.
+  """Pair each replayed live read with its deep reference selection.
 
-  Live and nightly review now share one retrieval contract, so replaying the
-  same question with a second policy adds cost rather than independent
-  evidence. The nightly analyst reviews the original trace against the compact
-  current graph, complete selected bodies, related note bodies, and the later
-  conversation.
+  `deep.missed` are notes the reference chose that live recall did not;
+  `deep.overreach` are live selections the reference left out. Both are
+  evidence for the writer's verdict, not the verdict itself.
   """
   audits: list[dict] = []
-  hindsight_chats = hindsight_chats or {}
+  replay_by_id = {replay["read_id"]: replay for replay in replays}
   for trace in traces:
+    replay = replay_by_id.get(str(trace.get("read_id")))
+    if replay is None:
+      continue
     raw_candidates = trace.get("candidates", trace.get("files", []))
     candidate_files = [
       path for path in raw_candidates
@@ -728,33 +799,25 @@ def _audit_reads(
           if isinstance(candidate, dict):
             live_guidance = candidate
             break
-    source_commit = str(trace.get("commit") or commit)
-    selected_nodes = []
-    for path in candidate_files:
-      try:
-        content = read_revision_file(source_commit, path)
-      except (OSError, UnicodeError, ValueError):
-        continue
-      selected_nodes.append({
-        "path": path,
-        "title": Path(path).stem.replace("-", " "),
-        "content": content,
-      })
-    hindsight = hindsight_chats.get(str(trace.get("chat_id") or ""))
-    redacted_hindsight = (
-      _redacted_chat(hindsight) if isinstance(hindsight, dict) else None
-    )
-    hindsight_source_id = None
-    hindsight_source_deleted = False
-    if isinstance(redacted_hindsight, dict):
-      hindsight_source_id = redacted_hindsight.pop("id", None)
-      hindsight_source_deleted = bool(redacted_hindsight.get("deleted_at"))
-      if isinstance(hindsight_source_id, str) and hindsight_source_id:
-        redacted_hindsight["source_handle"] = (
-          f"deleted:h{len(audits) + 1:02d}"
-          if hindsight_source_deleted
-          else f"chat:h{len(audits) + 1:02d}"
-        )
+    live = set(candidate_files)
+    deep = list(replay["selected"])
+    missed = [path for path in deep if path not in live]
+    overreach = [path for path in candidate_files if path not in set(deep)]
+
+    def bodies(paths: list[str], revision: str) -> list[dict]:
+      result = []
+      for path in paths:
+        try:
+          content = read_revision_file(revision, path)
+        except (OSError, UnicodeError, ValueError):
+          continue
+        result.append({
+          "path": path,
+          "title": Path(path).stem.replace("-", " "),
+          "content": content,
+        })
+      return result
+
     audits.append({
       "read_id": str(trace["read_id"]),
       "at": str(trace["at"]),
@@ -762,7 +825,7 @@ def _audit_reads(
       "live": {
         "opened": live_opened,
         "selected": candidate_files,
-        "selected_nodes": selected_nodes,
+        "selected_nodes": bodies(candidate_files, str(trace.get("commit") or commit)),
         "stop_reason": (
           traversal.get("stop_reason") if isinstance(traversal, dict) else None
         ),
@@ -772,31 +835,53 @@ def _audit_reads(
         ),
         "selection_guidance": live_guidance,
       },
-      "hindsight_chat": redacted_hindsight,
-      "hindsight_source_id": hindsight_source_id,
-      "hindsight_source_deleted": hindsight_source_deleted,
+      "deep": {
+        "selected": deep,
+        "reason": replay["reason"],
+        "missed": missed,
+        "missed_nodes": bodies(missed, commit),
+        "overreach": overreach,
+      },
     })
   return audits
 
-def _recall_hindsight_chats(
-  traces: list[dict], known_chats: dict[str, dict],
-) -> dict[str, dict]:
-  """Resolve the later conversation for each recall without duplicating fetches."""
-  resolved = {}
-  seen = set()
-  for trace in traces:
-    chat_id = trace.get("chat_id") if isinstance(trace, dict) else None
-    if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", chat_id):
-      continue
-    if chat_id in seen:
-      continue
-    seen.add(chat_id)
-    chat = known_chats.get(chat_id)
-    if not isinstance(chat, dict):
-      chat, _status = _fetch_chat_detail(chat_id)
-    if isinstance(chat, dict):
-      resolved[chat_id] = chat
-  return resolved
+
+def _agreed_verdict(audit: dict) -> dict | None:
+  """Record a read the deep reference fully agreed with, without a model."""
+  deep = audit.get("deep") or {}
+  if deep.get("missed") or deep.get("overreach"):
+    return None
+  return {
+    "read_id": audit["read_id"],
+    "outcome": "ok" if audit["live"]["selected"] else "no_memory",
+    "overreach": False,
+    "missed_nodes": [],
+    "overselected_nodes": [],
+    "reason": "deep replay agreed with live recall",
+    "verdict_source": "deep_replay",
+  }
+
+
+def _unreviewed_verdict(audit: dict) -> dict:
+  """The deep replay's own reading of a disagreement the writer did not reach.
+
+  It keeps tonight's metrics complete and lets the audit cursor move on; the
+  `verdict_source` marks it as unjudged so no expectation is learned from it.
+  """
+  deep = audit.get("deep") or {}
+  missed = list(deep.get("missed") or [])
+  overreach = list(deep.get("overreach") or [])
+  return {
+    "read_id": audit["read_id"],
+    "outcome": "miss" if missed else (
+      "ok" if audit["live"]["selected"] else "no_memory"
+    ),
+    "overreach": bool(overreach),
+    "missed_nodes": missed,
+    "overselected_nodes": overreach,
+    "reason": "deep replay disagreement not reviewed by the writer",
+    "verdict_source": "deep_replay_unreviewed",
+  }
 
 
 def _host_selection_override(traversal: object, selected_paths: list[str]) -> bool:
@@ -829,166 +914,47 @@ def _host_selection_override(traversal: object, selected_paths: list[str]) -> bo
   return list(dict.fromkeys(model_paths)) != list(dict.fromkeys(selected_paths))
 
 
-def _load_chat_discovery_marker() -> dict | None:
+def _chat_digest(chat_id: str) -> str:
   try:
-    value = json.loads(_CHAT_DISCOVERY.read_text(encoding="utf-8"))
-  except (OSError, ValueError):
-    return None
-  marker = value.get("newest") if isinstance(value, dict) else None
-  if not isinstance(marker, dict):
-    return None
-  recency_at = marker.get("recency_at")
-  chat_id = marker.get("id")
-  if not isinstance(recency_at, str) or not isinstance(chat_id, str):
-    return None
-  return {"recency_at": recency_at, "id": chat_id}
+    text = (_CHAT_NOTES / chat_id / "index.md").read_text(encoding="utf-8")
+  except (OSError, UnicodeError):
+    return ""
+  match = re.search(r"^## Digest\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+  return match.group(1).strip()[:1200] if match else ""
 
 
-def _write_chat_discovery_marker(marker: dict) -> bool:
-  try:
-    _write_json_atomic(_CHAT_DISCOVERY, {"schema": 1, "newest": marker})
-    return True
-  except OSError as exc:
-    _log(f"WARN could not advance chat discovery marker: {exc!r}")
-    return False
+def _collect_capture_intake() -> CaptureIntake:
+  """Group saved facts by chat, oldest capture first, without transcripts.
 
-
-def _discover_chat_ids() -> tuple[list[str], bool, bool]:
-  """Queue every chat newer than the last durable keyset marker.
-
-  The marker advances only after all discovered ids are durably appended. A
-  failed page therefore causes harmless rediscovery, never a permanent gap.
+  Memory learns from what working agents chose to save, not from rereading
+  every chat. Each chat contributes its title and short Digest as context and
+  its canonical id as provenance. A capture whose chat has been purged cannot
+  be cited, so it is dropped; a transient fetch failure keeps it queued.
   """
-  previous = _load_chat_discovery_marker()
-  previous_key = (
-    (previous["recency_at"], previous["id"])
-    if previous is not None else None
-  )
-  newest: dict | None = None
-  before: dict | None = None
-  discovered: list[str] = []
-  complete = False
-  page_keys: set[tuple[str, str]] = set()
-  while True:
-    query = {"limit": 100, "include_deleted": "true"}
-    if before is not None:
-      query.update({
-        "before_recency": before["recency_at"],
-        "before_id": before["id"],
-      })
-    result = _api_result("/api/chat-logs?" + urllib.parse.urlencode(query))
-    listing = result.value
-    if listing is None:
-      _log(
-        "WARN chat discovery page failed "
-        f"status={result.status!r} error={result.error!r}"
-      )
-      break
-    items = listing.get("items")
-    if not isinstance(items, list):
-      _log("WARN chat discovery returned no item list")
-      break
-    reached_previous = False
-    invalid_key = False
-    for item in items:
-      if not isinstance(item, dict):
-        continue
-      chat_id = item.get("id")
-      recency_at = item.get("recency_at")
-      if not isinstance(chat_id, str):
-        continue
-      if not isinstance(recency_at, str):
-        # Preserve the id but refuse to advance a marker built on an unstable
-        # ordering contract (for example, before the platform restart).
-        discovered.append(chat_id)
-        invalid_key = True
-        continue
-      key = {"recency_at": recency_at, "id": chat_id}
-      if newest is None:
-        newest = key
-      # The marker row can move when its chat receives new activity, or vanish
-      # after deletion recovery expires. Stop at the ordered watermark rather
-      # than requiring that mutable row to reappear exactly; every following
-      # row is older in the API's (recency_at, id) descending order.
-      if previous_key is not None and (recency_at, chat_id) <= previous_key:
-        reached_previous = True
-        break
-      # Empty chat shells are valid platform lifecycle records, but contain no
-      # facts for Memory. The list response already owns that classification,
-      # so do not turn them into detail reads or permanent queue work.
-      if item.get("message_count") == 0:
-        continue
-      discovered.append(chat_id)
-    if invalid_key:
-      _log("WARN chat discovery response lacked stable recency keys")
-      break
-    if reached_previous:
-      complete = True
-      break
-    next_before = listing.get("next_before")
-    if next_before is None:
-      complete = True
-      break
-    if not isinstance(next_before, dict):
-      _log("WARN chat discovery returned an invalid next-page key")
-      break
-    recency_at = next_before.get("recency_at")
-    chat_id = next_before.get("id")
-    page_key = (str(recency_at or ""), str(chat_id or ""))
-    if not all(page_key) or page_key in page_keys:
-      _log("WARN chat discovery returned a repeated next-page key")
-      break
-    page_keys.add(page_key)
-    before = {"recency_at": page_key[0], "id": page_key[1]}
-
-  # The API is newest-first so keyset pagination can stop at the durable
-  # watermark. The pending queue is FIFO, however: reverse this completed
-  # discovery window before appending it behind work already waiting.
-  discovered = list(reversed(list(dict.fromkeys(discovered))))
-  queue_ok = _remember_pending_chat_ids(discovered)
-  if complete and newest is not None and queue_ok:
-    queue_ok = _write_chat_discovery_marker(newest)
-  return discovered, complete, queue_ok
-
-
-def _collect_chat_intake(limit: int = _CHAT_PAGE_SIZE) -> ChatIntake:
-  discovered, discovery_complete, queue_ok = _discover_chat_ids()
-  pending = _load_pending_chat_ids()
-  # Discovery appends new work to the durable queue. Consume that queue in its
-  # existing order: a missed run may grow the backlog, but newer chats never
-  # jump over work that is already waiting.
-  chat_ids = pending[:limit]
+  by_chat: dict[str, list[dict]] = {}
+  for capture in load_captures():
+    by_chat.setdefault(capture["chat_id"], []).append(capture)
   chats: list[dict] = []
-  tombstones: list[str] = []
-  empty: list[str] = []
-  detail_failures = 0
-  for chat_id in chat_ids:
+  dropped: list[str] = []
+  unreachable = 0
+  for chat_id, captures in by_chat.items():
     chat, status = _fetch_chat_detail(chat_id)
-    if chat is not None:
-      if chat["messages"]:
-        chats.append(chat)
+    if chat is None:
+      if status == 404:
+        dropped.extend(capture["id"] for capture in captures)
       else:
-        empty.append(chat_id)
-    elif status == 404:
-      tombstones.append(chat_id)
-    else:
-      detail_failures += 1
-  discard = tombstones + empty
-  if discard:
-    queue_ok = _discard_pending_chat_ids(discard) and queue_ok
-  if empty:
-    _log(f"discarded empty pending chat records count={len(empty)}")
-  remaining_pending = _load_pending_chat_ids()
-  return ChatIntake(
+        unreachable += 1
+      continue
+    chat["captures"] = captures
+    chat["digest"] = _chat_digest(chat_id)
+    chats.append(chat)
+  if dropped:
+    consume_captures(set(dropped))
+  return CaptureIntake(
     chats=chats,
-    discovered_count=len(discovered),
-    tombstone_count=len(tombstones),
-    tombstone_ids=tuple(tombstones),
-    detail_failure_count=detail_failures,
-    discovery_complete=discovery_complete,
-    queue_write_ok=queue_ok,
-    pending_count=len(remaining_pending),
-    pending_before_ack_count=len(remaining_pending),
+    capture_count=sum(len(chat["captures"]) for chat in chats),
+    dropped_ids=tuple(dropped),
+    unreachable_chat_count=unreachable,
   )
 
 
@@ -1006,89 +972,7 @@ def _fetch_chat_detail(chat_id: str) -> tuple[dict | None, int | None]:
     "title": detail.get("title"),
     "updated_at": detail.get("updated_at"),
     "deleted_at": detail.get("deleted_at"),
-    "messages": (
-      detail.get("messages")
-      if isinstance(detail.get("messages"), list)
-      else []
-    ),
   }, result.status
-
-
-def _load_pending_chat_ids() -> list[str]:
-  try:
-    value = json.loads(_PENDING_CHAT_IDS.read_text(encoding="utf-8"))
-  except (OSError, ValueError):
-    return []
-  ids = value.get("chat_ids") if isinstance(value, dict) else None
-  if not isinstance(ids, list):
-    return []
-  return list(dict.fromkeys(
-    item for item in ids
-    if isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item)
-  ))
-
-
-def _write_pending_chat_ids(ids: list[str], *, warning: str) -> bool:
-  try:
-    if not ids:
-      _PENDING_CHAT_IDS.unlink(missing_ok=True)
-      return True
-    _PENDING_CHAT_IDS.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PENDING_CHAT_IDS.with_name(f".{_PENDING_CHAT_IDS.name}.{os.getpid()}.tmp")
-    tmp.write_text(
-      json.dumps({
-        "schema": 1,
-        "chat_ids": ids,
-      }, sort_keys=True) + "\n",
-      encoding="utf-8",
-    )
-    os.replace(tmp, _PENDING_CHAT_IDS)
-    return True
-  except OSError as exc:
-    _log(f"WARN {warning}: {exc!r}")
-    return False
-
-
-def _remember_pending_chat_ids(chat_ids: list[str]) -> bool:
-  valid = [
-    chat_id for chat_id in chat_ids
-    if isinstance(chat_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", chat_id)
-  ]
-  combined = list(dict.fromkeys(_load_pending_chat_ids() + valid))
-  return _write_pending_chat_ids(
-    combined, warning="could not preserve pending chat ids",
-  )
-
-
-def _discard_pending_chat_ids(chat_ids: list[str]) -> bool:
-  discarded = set(chat_ids)
-  remaining = [
-    chat_id for chat_id in _load_pending_chat_ids()
-    if chat_id not in discarded
-  ]
-  return _write_pending_chat_ids(
-    remaining, warning="could not discard non-source pending chats",
-  )
-
-
-def _acknowledge_pending_chats(chats: list[dict]) -> QueueAcknowledgement:
-  """Remove only chats actually offered to a successful analyst run."""
-  processed = {
-    chat.get("id") for chat in chats
-    if isinstance(chat, dict) and isinstance(chat.get("id"), str)
-  }
-  before = _load_pending_chat_ids()
-  remaining = [chat_id for chat_id in before if chat_id not in processed]
-  write_ok = _write_pending_chat_ids(
-    remaining,
-    warning="published graph but could not acknowledge pending chat ids",
-  )
-  return QueueAcknowledgement(
-    write_ok=write_ok,
-    before_count=len(before),
-    removed_count=len(before) - len(remaining) if write_ok else 0,
-    remaining_count=len(remaining) if write_ok else len(before),
-  )
 
 
 def _graph_catalog(staging: Path) -> list[dict]:
@@ -1145,11 +1029,8 @@ def _work_text(
     if isinstance(chat, dict)
     for value in [
       chat.get("title") or "",
-      *(
-        message.get("text") or ""
-        for message in chat.get("messages", [])
-        if isinstance(message, dict)
-      ),
+      chat.get("digest") or "",
+      *(capture.get("text") or "" for capture in chat.get("captures") or ()),
     ]
   ]
   audit_text = [
@@ -1237,8 +1118,6 @@ def _related_note_contents(
   contents = []
   content_chars = 0
   for score, path in sorted(ranked, key=lambda item: (-item[0], item[1])):
-    if len(contents) >= _MAX_RELATED_NOTE_BODIES:
-      break
     source = staging / path
     if source.is_symlink() or not source.is_file():
       continue
@@ -1327,35 +1206,118 @@ def _record_consolidation_attempt(
     omitted_by_moc[moc_path] = list(omitted)
   else:
     omitted_by_moc.pop(moc_path, None)
+  _write_consolidation_cursor({
+    **cursor, "schema": 1, "attempted": attempted, "omitted": omitted_by_moc,
+  })
+
+
+def _mark_consolidated_through_publication(moc_paths: list[str]) -> None:
+  """Move consolidated maps' attempt time past this run's own update log.
+
+  The run's follow-ups are written at publication, after each map's item. A
+  map's own follow-ups are not new leads for it, so only later ones count.
+  """
+  if not moc_paths:
+    return
+  cursor = _read_consolidation_cursor()
+  attempted = _load_consolidation_cursor()
+  now = datetime.now(UTC).isoformat()
+  attempted.update({path: now for path in moc_paths})
+  _write_consolidation_cursor({**cursor, "attempted": attempted})
+
+
+def _write_consolidation_cursor(cursor: dict) -> None:
   try:
     STATE.mkdir(parents=True, exist_ok=True)
     tmp = _CONSOLIDATION_CURSOR.with_suffix(".tmp")
-    tmp.write_text(
-      json.dumps(
-        {"schema": 1, "attempted": attempted, "omitted": omitted_by_moc},
-        sort_keys=True,
-      ),
-      encoding="utf-8",
-    )
+    tmp.write_text(json.dumps(cursor, sort_keys=True), encoding="utf-8")
     os.replace(tmp, _CONSOLIDATION_CURSOR)
   except OSError as exc:
     _log(f"WARN consolidation cursor not written: {exc!r}")
 
 
+def _map_members(staging: Path) -> dict[str, list[str]]:
+  """Each consolidatable map's path and the note paths filed under it."""
+  try:
+    graph = json.loads((staging / "graph.json").read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return {}
+  nodes = [node for node in graph.get("nodes") or () if isinstance(node, dict)]
+  maps = {
+    str(node.get("id")): str(node.get("path"))
+    for node in nodes
+    if str(node.get("path") or "").startswith("mocs/")
+    and str(node.get("path")) not in _MANAGED_DOCS
+  }
+  members: dict[str, list[str]] = {path: [] for path in maps.values()}
+  for node in nodes:
+    path = str(node.get("path") or "")
+    if not path.startswith("notes/"):
+      continue
+    for moc_id in node.get("mocs") or ():
+      if moc_id in maps:
+        members[maps[moc_id]].append(path)
+  return {path: sorted(paths) for path, paths in members.items()}
+
+
+def _map_fingerprint(staging: Path, moc_path: str, members: list[str]) -> str:
+  """Content identity of a map and every note filed under it."""
+  digest = hashlib.sha256()
+  for path in [moc_path, *members]:
+    try:
+      digest.update(path.encode() + b"\0" + (staging / path).read_bytes() + b"\0")
+    except OSError:
+      digest.update(path.encode() + b"\0missing\0")
+  return digest.hexdigest()
+
+
 def _consolidation_candidates(staging: Path) -> list[str]:
-  """Return map paths in rotation order: never consolidated first, then oldest."""
+  """Maps with something new to act on, oldest first, plus one in rotation.
+
+  A map is due when it or a note filed under it changed since the writer last
+  consolidated it (a filed saved fact, an audit repair, a deletion), or when a
+  follow-up naming it was written since. Everything else waits, so a quiet
+  night finishes early instead of re-reading unchanged maps. One map that is
+  not due still rotates in each night, oldest first, so usage evidence (notes
+  nobody needs) reaches every neighborhood without any fixed age rule.
+  """
+  cursor = _read_consolidation_cursor()
   attempted = _load_consolidation_cursor()
-  paths = [
-    str(item.get("path") or "")
-    for item in _graph_catalog(staging)
-    if str(item.get("path") or "").startswith("mocs/")
-    and str(item.get("path") or "") not in _MANAGED_DOCS
-  ]
-  return sorted(paths, key=lambda path: (attempted.get(path, ""), path))
+  fingerprints = cursor.get("fingerprints")
+  fingerprints = fingerprints if isinstance(fingerprints, dict) else {}
+  due: list[str] = []
+  idle: list[str] = []
+  for moc_path, members in _map_members(staging).items():
+    changed = fingerprints.get(moc_path) != _map_fingerprint(
+      staging, moc_path, members,
+    )
+    led = bool(_consolidation_leads(
+      [Path(moc_path).stem, *(Path(path).stem for path in members)],
+      since=attempted.get(moc_path, ""),
+    ))
+    (due if changed or led else idle).append(moc_path)
+  order = lambda path: (attempted.get(path, ""), path)
+  return sorted(due, key=order) + sorted(idle, key=order)[:1]
 
 
-def _consolidation_leads(ids: list[str]) -> list[str]:
+def _record_consolidation_fingerprint(staging: Path, moc_path: str) -> None:
+  """Remember the neighborhood exactly as the writer left it."""
+  members = _map_members(staging).get(moc_path)
+  if members is None:
+    return
+  cursor = _read_consolidation_cursor()
+  fingerprints = cursor.get("fingerprints")
+  fingerprints = dict(fingerprints) if isinstance(fingerprints, dict) else {}
+  fingerprints[moc_path] = _map_fingerprint(staging, moc_path, members)
+  cursor["fingerprints"] = fingerprints
+  _write_consolidation_cursor(cursor)
+
+
+def _consolidation_leads(ids: list[str], since: str = "") -> list[str]:
   """Return Memory's own recent follow-ups and experiments naming these nodes.
+
+  `since` keeps only leads written after that time, so a lead the writer has
+  already seen does not make its map due again.
 
   The writer records what it could not finish or wanted to test. Feeding those
   leads back into the neighborhood they concern closes that loop inside Memory;
@@ -1380,6 +1342,8 @@ def _consolidation_leads(ids: list[str]) -> list[str]:
       except ValueError:
         continue
       if not isinstance(record, dict):
+        continue
+      if since and str(record.get("timestamp") or "") <= since:
         continue
       texts = [
         item for item in (record.get("followups") or []) if isinstance(item, str)
@@ -1451,6 +1415,7 @@ def _consolidation_item(staging: Path, moc_path: str) -> dict | None:
   except (OSError, UnicodeError):
     moc_text = ""
   member_ids = [Path(path).stem for path in members]
+  usage = note_usage_evidence()
   return {
     "moc": {
       "path": moc_path,
@@ -1461,6 +1426,10 @@ def _consolidation_item(staging: Path, moc_path: str) -> dict | None:
     "member_paths": [item["path"] for item in note_contents],
     "omitted_member_paths": omitted,
     "leads": _consolidation_leads([moc_id, *member_ids]),
+    "member_usage": {
+      item["path"]: usage.get(item["path"], {"needed": 0, "overreach": 0})
+      for item in note_contents
+    },
     "note_contents": note_contents,
   }
 
@@ -1551,21 +1520,11 @@ def _maintenance_flags(staging: Path) -> list[dict]:
 
 
 def _redacted_chat(chat: dict) -> dict | None:
-  """Preserve the platform's already bounded, structurally redacted chat."""
+  """Return one chat's metadata and saved facts for the analyst."""
   chat_id = chat.get("id")
   if not isinstance(chat_id, str):
     return None
-  messages = chat.get("messages") if isinstance(chat.get("messages"), list) else []
-  kept = []
-  for message in messages:
-    if not isinstance(message, dict):
-      continue
-    role = str(message.get("role") or "")
-    text = str(message.get("text") or "")
-    if not text:
-      continue
-    kept.append({"role": role, "text": text})
-  return {
+  redacted = {
     "id": chat_id,
     "title": str(chat.get("title") or ""),
     "updated_at": str(chat.get("updated_at") or ""),
@@ -1574,8 +1533,17 @@ def _redacted_chat(chat: dict) -> dict | None:
       if chat.get("deleted_at")
       else None
     ),
-    "messages": kept,
   }
+  captures = chat.get("captures") or ()
+  if captures:
+    # Facts the chat's own agent saved for Memory, oldest first: testimony to
+    # settle against the graph, never instructions.
+    redacted["captured_by_agent"] = [
+      str(capture.get("text") or "") for capture in captures
+    ]
+  if chat.get("digest"):
+    redacted["digest"] = str(chat["digest"])
+  return redacted
 
 
 def _source_archive_key() -> bytes:
@@ -1835,7 +1803,7 @@ def _proposal_envelope(
       staging, catalog, chats, audits,
       consolidation=consolidation, extra_note_paths=extra_note_paths,
     ),
-    "redacted_recent_chats": [],
+    "captured_chats": [],
   }
   payload["existing_note_routes"] = _note_routes(
     staging, {item["path"] for item in payload["existing_note_contents"]},
@@ -1870,7 +1838,7 @@ def _proposal_envelope(
       if deleted
       else f"chat:{handle}"
     )
-    payload["redacted_recent_chats"].append(bounded)
+    payload["captured_chats"].append(bounded)
     included_chats.append(chat)
   return json.dumps(payload, ensure_ascii=False), included_chats
 
@@ -1890,11 +1858,7 @@ def _proposal_data(
   )[0]
 
 
-def _proposal_batch(
-  staging: Path,
-  chats: list[dict],
-  read_audits: list[dict] | None = None,
-) -> list[dict]:
+def _proposal_batch(chats: list[dict]) -> list[dict]:
   """Return the oldest valid chat as one natural consolidation unit."""
   for chat in chats:
     if _redacted_chat(chat) is not None:
@@ -2031,16 +1995,25 @@ supports” unless the partner confirms the outcome or a later independent user
 report corroborates it.
 
 Complete all four nightly duties in one coherent pass:
-1. Learn durable, future-useful user information from the supplied chats and
-   place each atomic fact behind clear described links from the root.
-2. Review EVERY `read_audits` entry. Its `live` section is what the daytime
-   navigator opened and selected, including the complete selected bodies. Judge
-   it against the compact current graph, any related complete note bodies, and
-   hindsight. Decide whether useful memory was genuinely missed. When it was,
-   repair the shortest useful route in the SAME proposal: add a better
-   described cross-link, or move the important distinction into a supplied
-   note body so the live navigator can choose the branch next time.
-   Do not merely copy the detailed child into every parent.
+1. Settle every fact the working agents saved. Each supplied chat carries its
+   `captured_by_agent` facts with only its title and short `digest` as context
+   (no transcript). For each fact: admit it as an atomic note behind clear
+   described links from the root, merge it into or supersede an existing note,
+   or leave it out when it fails admission or contradicts the digest. A
+   claimed success stays provisional under the testimony rule below. Cite the
+   chat's source handle.
+2. Review EVERY `read_audits` entry. Each is a live lookup where tonight's
+   deep replay disagreed with what live recall selected. `live` holds what the
+   daytime reader opened and selected, with the complete selected bodies;
+   `deep` holds the reference selection from a reader that saw every note
+   title, with `missed` (reference-only notes, bodies in `missed_nodes`) and
+   `overreach` (live-only notes). The reference is evidence, not truth: judge
+   each disagreement yourself against the request. When a genuinely useful
+   note was missed, repair the shortest useful route in the SAME proposal: add
+   a better described cross-link, or move the important distinction into a
+   supplied note body so the live reader can choose the branch next time.
+   Do not merely copy the detailed child into every parent. When a missed note
+   is wrong, stale, or redundant, fix or retire it instead.
    Classify each read precisely: `no_memory` only when no durable
    query-relevant memory fact existed; `miss` when such a fact existed but the
    live selected evidence was insufficient; otherwise `ok`. Independently set
@@ -2048,21 +2021,6 @@ Complete all four nightly duties in one coherent pass:
    unsupported substitute. Adjacent but useful context is not an error. A miss
    must list the relevant missed nodes; overreach must list only materially
    overselected nodes.
-   When `hindsight_chat` is present, use the later conversation as the primary
-   evidence of whether recalled information actually helped the agent perform
-   the task. It may include messages from before and after the recall because
-   chat messages do not carry individual timestamps, so do not invent a causal
-   sequence. Instead judge whether the selected memories were substantively
-   useful to the eventual reasoning or outcome, whether the agent still had to
-   rediscover durable context that Memory already held, and whether irrelevant
-   recall created friction. The original route and pruned frontier remain
-   diagnostic evidence about graph organization; they are not a substitute for
-   this outcome-based hindsight.
-   Record `usefulness` as `helpful`, `mixed`, `unused`, `harmful`, or
-   `unknown`, and explain the concrete outcome evidence in `hindsight_reason`.
-   Use `unknown` when the conversation does not reveal whether the recall
-   affected the work; absence of praise or explicit citation is not evidence
-   that a memory was unused.
 3. Coach the live selector from this batch as a whole. `recall_guidance`
    may `replace` the current bounded guidance with one concise, general lesson,
    `clear` guidance that the evidence shows is harmful or stale, or `keep` it
@@ -2084,9 +2042,18 @@ Complete all four nightly duties in one coherent pass:
    owner in code, tests, skills, or documentation — unless they carry a
    cross-cutting partner-impact invariant worth keeping; repair the map's
    cues and links so its retrieval question is answered from the map itself;
-   and resolve or drop the supplied `leads` rather than restating them. A
-   neighborhood that is already clean is a correct empty result. Every delete
-   is reversible from Git history, so prefer one decisive pass over a hedge.
+   and resolve or drop the supplied `leads` rather than restating them.
+   `consolidation.member_usage` is each note's recall record since it was
+   written: `needed` (lookups that needed it), `overreach` (selections that did
+   not), `last_needed_at`, and `lookups_since_created`. Use it to forget: a note
+   never needed across many lookups, or mostly overreach, is a retirement
+   candidate — merge any still-useful claim into a neighbor, or delete it when
+   nothing in it would help a future task. Low use is not falsehood; keep
+   lasting facts about who the partner is (identity, home, people, enduring
+   preferences) however rarely they are recalled, and give a recent note time
+   to be looked up. A neighborhood that is already clean is a correct empty
+   result. Every delete is reversible from Git history, so prefer one decisive
+   pass over a hedge.
 
 Before returning, record your own decision evidence while this run context is
 still present. `hardest_decision` names the most consequential judgment and why;
@@ -2099,10 +2066,9 @@ into its own later consolidation of the same neighborhood; they are not
 permission to weaken validation or publish uncertain facts.
 
 Return ONLY one JSON object with this shape:
-{{"summary":"...","self_review":{{"hardest_decision":"...","possibly_missed":"none | ...","prompt_change":"none | ...","next_experiment":"none | reversible change + expected evidence"}},"read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short graph-retrieval reason","usefulness":"helpful | mixed | unused | harmful | unknown","hindsight_reason":"short outcome-based reason"}}],"recall_guidance":{{"action":"keep | replace | clear","instruction":"empty unless replacing | one concise general selector lesson","reason":"short evidence-based reason","evidence_read_ids":[]}},"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"links":[{{"from":"index.md | mocs/topic.md","to":"notes/slug.md | mocs/topic.md","cue":"why this target is useful"}}],"deletes":[]}}
+{{"summary":"...","self_review":{{"hardest_decision":"...","possibly_missed":"none | ...","prompt_change":"none | ...","next_experiment":"none | reversible change + expected evidence"}},"read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short graph-retrieval reason"}}],"recall_guidance":{{"action":"keep | replace | clear","instruction":"empty unless replacing | one concise general selector lesson","reason":"short evidence-based reason","evidence_read_ids":[]}},"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"links":[{{"from":"index.md | mocs/topic.md","to":"notes/slug.md | mocs/topic.md","cue":"why this target is useful"}}],"deletes":[]}}
 Return exactly one verdict for every supplied read audit and no invented ids.
-At most {_MAX_UPDATES} updates/links and {_MAX_DELETES} deletes. Update paths
-may only be notes/<slug>.md, plus `consolidation.moc.path` when DATA carries a
+Update paths may only be notes/<slug>.md, plus `consolidation.moc.path` when DATA carries a
 consolidation item. Link sources may be index.md or an existing
 mocs/<slug>.md. Link targets may be an existing MOC or a note that exists after
 this proposal. Delete paths may be notes/<slug>.md or mocs/<slug>.md; never
@@ -2181,27 +2147,6 @@ def _proposal(
   prompt, editable_note_paths = build_prompt(supplied_note_paths)
   source_handles = _source_handles(chats)
   deleted_handles = _deleted_source_handles(chats)
-  # Hindsight is a later conversation, not necessarily one of this proposal's
-  # queued consolidation chats. Give it the same closed-set citation path so a
-  # writer can promote a verified lesson instead of repeating an uncitable
-  # follow-up on every subsequent night.
-  for audit in read_audits or []:
-    if not isinstance(audit, dict):
-      continue
-    source_id = audit.get("hindsight_source_id")
-    hindsight = audit.get("hindsight_chat")
-    handle_value = (
-      hindsight.get("source_handle") if isinstance(hindsight, dict) else None
-    )
-    if not isinstance(source_id, str) or not source_id:
-      continue
-    if not isinstance(handle_value, str) or ":" not in handle_value:
-      continue
-    prefix, handle = handle_value.split(":", 1)
-    if prefix == "chat":
-      source_handles.setdefault(handle, source_id)
-    elif prefix == "deleted":
-      deleted_handles.setdefault(handle, source_id)
   allowed_chat_ids = set(source_handles.values()) | _known_chat_sources(staging)
   deleted_source_handles = {
     handle: _source_archive_id(chat_id)
@@ -2214,18 +2159,9 @@ def _proposal(
     str(chat["id"])
     for chat in chats
     if chat.get("deleted_at") and isinstance(chat.get("id"), str)
-  } | {
-    str(audit["hindsight_source_id"])
-    for audit in (read_audits or []) if isinstance(audit, dict)
-    and audit.get("hindsight_source_deleted")
-    and isinstance(audit.get("hindsight_source_id"), str)
   }
   allow_deleted_source = (
     any(chat.get("deleted_at") for chat in chats)
-    or any(
-      isinstance(audit, dict) and audit.get("hindsight_source_deleted")
-      for audit in (read_audits or [])
-    )
     or _known_deleted_source(staging)
   )
   attempted = []
@@ -2649,10 +2585,10 @@ def _normalize_proposal(
       )
     self_review[field_name] = re.sub(r"\s+", " ", value).strip()[:1200]
   updates = proposal.get("updates")
-  if not isinstance(updates, list) or len(updates) > _MAX_UPDATES:
+  if not isinstance(updates, list):
     raise ProposalValidationError("invalid_update_list", "invalid update list")
   deletes = proposal.get("deletes", [])
-  if not isinstance(deletes, list) or len(deletes) > _MAX_DELETES:
+  if not isinstance(deletes, list):
     raise ProposalValidationError("invalid_delete_list", "invalid delete list")
   delete_paths = []
   for rel in deletes:
@@ -2675,7 +2611,7 @@ def _normalize_proposal(
       "update_delete_overlap", "a memory path cannot be updated and deleted together",
     )
   raw_links = proposal.get("links", [])
-  if not isinstance(raw_links, list) or len(raw_links) > _MAX_UPDATES:
+  if not isinstance(raw_links, list):
     raise ProposalValidationError("invalid_link_list", "invalid link list")
   links = []
   seen_links: set[tuple[str, str]] = set()
@@ -2728,7 +2664,7 @@ def _normalize_proposal(
       )
       or rel in _PROTECTED_DOCS
       or not isinstance(content, str) or not content.strip()
-      or len(content.encode("utf-8")) > _MAX_CONTENT
+      or len(content.encode("utf-8")) > MAX_NOTE_BYTES
       or "\x00" in content
     ):
       raise ProposalValidationError(
@@ -2939,7 +2875,7 @@ def _apply_normalized_proposal(
         continue
     else:
       next_text = text.rstrip() + f"\n\n- [[{target_id}]] — {link['cue']}\n"
-    if len(next_text.encode("utf-8")) > _MAX_CONTENT:
+    if len(next_text.encode("utf-8")) > MAX_NOTE_BYTES:
       raise ValueError("graph link would make a routing document too large")
     source.write_text(next_text, encoding="utf-8")
     changed.append(source_rel)
@@ -3212,6 +3148,22 @@ def _write_json_atomic(path: Path, value: dict) -> None:
     raise
 
 
+def _deep_agreement(audit: dict) -> dict:
+  """Live recall measured against the deep reference selection."""
+  deep = audit.get("deep")
+  if not isinstance(deep, dict):
+    return {}
+  reference = set(deep.get("selected") or ())
+  live = set(audit.get("live", {}).get("selected") or ())
+  return {
+    "deep_selected": sorted(reference),
+    "deep_recall": (
+      len(live & reference) / len(reference) if reference else None
+    ),
+    "deep_noise": len(live - reference) / len(live) if live else None,
+  }
+
+
 def _record_recall_audits(
   run_id: str,
   read_audits: list[dict],
@@ -3306,6 +3258,8 @@ def _record_recall_audits(
       "reason": str(verdict.get("reason") or ""),
       "usefulness": usefulness,
       "hindsight_reason": str(verdict.get("hindsight_reason") or ""),
+      "verdict_source": str(verdict.get("verdict_source") or "writer"),
+      **_deep_agreement(audit),
     }
     records.append(record)
   total = int(prior.get("reads_audited", 0) or 0) + len(records)
@@ -3530,19 +3484,13 @@ def _recall_model_work(read_traces: list[dict]) -> dict:
   return _aggregate_model_work(receipts)
 
 
-def _chat_intake_status(intake: ChatIntake) -> dict:
+def _capture_intake_status(intake: CaptureIntake) -> dict:
   return {
-    "chat_discovered_count": intake.discovered_count,
-    "chat_tombstone_count": intake.tombstone_count,
-    "chat_detail_failure_count": intake.detail_failure_count,
-    "chat_discovery_complete": intake.discovery_complete,
-    "chat_queue_write_ok": intake.queue_write_ok,
-    "pending_chat_count": intake.pending_count,
-    "chat_queue_progress": {
-      "pending_before_ack": intake.pending_before_ack_count,
-      "acknowledged": intake.acknowledged_count,
-      "remaining": intake.pending_count,
-    },
+    "capture_count": intake.capture_count,
+    "captured_chat_count": len(intake.chats),
+    "dropped_capture_count": len(intake.dropped_ids),
+    "unreachable_capture_chat_count": intake.unreachable_chat_count,
+    "remaining_capture_count": len(load_captures()),
   }
 
 
@@ -3587,7 +3535,7 @@ def _consolidate_batches(
     if lane == "audit":
       return bool(remaining_audits)
     if lane == "chat":
-      return bool(_proposal_batch(staging, remaining_chats, []))
+      return bool(_proposal_batch(remaining_chats))
     return bool(remaining_mocs)
 
   while True:
@@ -3610,7 +3558,7 @@ def _consolidate_batches(
     if work_kind == "audit":
       batch_audits = remaining_audits[:1]
     elif work_kind == "chat":
-      batch = _proposal_batch(staging, remaining_chats, batch_audits)
+      batch = _proposal_batch(remaining_chats)
     else:
       moc_path = remaining_mocs.pop(0)
       consolidation = _consolidation_item(staging, moc_path)
@@ -3697,6 +3645,7 @@ def _consolidate_batches(
       remaining_chats = _without_chats(remaining_chats, batch)
     elif moc_path is not None:
       accepted_mocs.append(moc_path)
+      _record_consolidation_fingerprint(staging, moc_path)
 
   return BatchConsolidation(
     proposals=proposals,
@@ -3772,7 +3721,7 @@ async def run() -> int:
   lifecycle_commit_created = False
   run_previous_commit = previous.get("commit") if previous else None
   chats: list[dict] = []
-  intake = ChatIntake(chats=[])
+  intake = CaptureIntake(chats=[])
   read_traces: list[dict] = []
   read_audits: list[dict] = []
   deferred_read_audit_count = 0
@@ -3823,7 +3772,7 @@ async def run() -> int:
         f"published initial graph {previous['commit']} "
         f"nodes={len(prepared['nodes'])}"
       )
-    intake = await asyncio.to_thread(_collect_chat_intake)
+    intake = await asyncio.to_thread(_collect_capture_intake)
     chats = intake.chats
     # Record metadata only for chats that support a durable note. New chats are
     # recorded later only when an accepted proposal actually cites them.
@@ -3838,7 +3787,7 @@ async def run() -> int:
     lifecycle_deleted, lifecycle_unavailable = await asyncio.to_thread(
       _collect_archived_source_lifecycle,
       staging,
-      set(intake_by_id) | set(intake.tombstone_ids),
+      set(intake_by_id),
     )
     lifecycle_by_id = {
       str(chat["id"]): chat
@@ -3846,7 +3795,7 @@ async def run() -> int:
       if isinstance(chat.get("id"), str)
     }
     intake_by_id.update(lifecycle_by_id)
-    unavailable_source_ids = set(intake.tombstone_ids) | lifecycle_unavailable
+    unavailable_source_ids = set(lifecycle_unavailable)
     deleted_known_sources = {
       chat_id for chat_id, chat in intake_by_id.items()
       if chat_id in known_source_chats and chat.get("deleted_at")
@@ -3902,11 +3851,30 @@ async def run() -> int:
     pending_read_audit_count = len(pending_read_traces)
     read_traces = list(pending_read_traces)
     providers = ProviderPool.for_app(app_id)
-    hindsight_chats = await asyncio.to_thread(
-      _recall_hindsight_chats, read_traces, intake_by_id,
+    # Replays may use half of the remaining window; the writer keeps the rest.
+    replay_deadline = time.monotonic() + max(
+      0.0, (work_deadline - time.monotonic()) / 2,
     )
-    read_audits = await asyncio.to_thread(
-      _audit_reads, str(previous["commit"]), read_traces, hindsight_chats,
+    replays = await asyncio.to_thread(
+      _deep_replays, str(previous["commit"]), read_traces, replay_deadline,
+    )
+    replayed_audits = await asyncio.to_thread(
+      _audit_reads, str(previous["commit"]), read_traces, replays,
+    )
+    agreed_verdicts = [
+      verdict for verdict in map(_agreed_verdict, replayed_audits) if verdict
+    ]
+    agreed_ids = {verdict["read_id"] for verdict in agreed_verdicts}
+    agreed_audits = [
+      audit for audit in replayed_audits if audit["read_id"] in agreed_ids
+    ]
+    # Only disagreements need the writer's judgment and a graph repair; the
+    # largest ones first, since the work window may end before the last.
+    read_audits = sorted(
+      (audit for audit in replayed_audits if audit["read_id"] not in agreed_ids),
+      key=lambda audit: -sum(
+        len(audit["deep"].get(key) or ()) for key in ("missed", "overreach")
+      ),
     )
     consolidation = await asyncio.to_thread(
       _consolidate_batches,
@@ -3953,18 +3921,29 @@ async def run() -> int:
         "deferred_chat_count": len(remaining_chats),
         "provider_summary": _provider_summary([], deferred_attempts),
         "graph_scale": _graph_context_scale(staging),
-        **_chat_intake_status(intake),
+        **_capture_intake_status(intake),
       }
       if deferred_detail:
         degraded["detail"] = deferred_detail
       _record_run_status(degraded)
+      try:
+        # Replay metrics do not depend on the writer; keep them.
+        _record_recall_audits(run_id, replayed_audits, {"read_audits": [
+          *agreed_verdicts, *map(_unreviewed_verdict, read_audits),
+        ]}, prepared)
+      except OSError as exc:
+        _log(f"WARN replay metrics not recorded: {exc!r}")
       _log(
         "DEGRADED Memory proposal rejected: "
         f"{degraded['reason']}"
       )
       return 2
+    reviewed_ids = {audit["read_id"] for audit in proposal_audits}
+    unreviewed_audits = [
+      audit for audit in read_audits if audit["read_id"] not in reviewed_ids
+    ]
     deferred_read_audit_count = max(
-      0, pending_read_audit_count - len(proposal_audits),
+      0, pending_read_audit_count - len(replayed_audits),
     )
     proposal = _combined_proposal(proposals)
     outcome = consolidation.provider_outcomes[-1]
@@ -4033,14 +4012,11 @@ async def run() -> int:
       # degradation, not grounds to misreport graph publication as failed.
       profile_status = {"status": "unavailable", "error": type(exc).__name__}
       _log(f"WARN personalization profile refresh failed: {exc!r}")
-    acknowledgement = _acknowledge_pending_chats(proposal_chats)
-    intake = replace(
-      intake,
-      queue_write_ok=intake.queue_write_ok and acknowledgement.write_ok,
-      pending_before_ack_count=acknowledgement.before_count,
-      pending_count=acknowledgement.remaining_count,
-      acknowledged_count=acknowledgement.removed_count,
-    )
+    consume_captures({
+      capture["id"]
+      for chat in proposal_chats
+      for capture in chat.get("captures") or ()
+    })
     status = {
       "schema": 1,
       "run_id": run_id,
@@ -4064,7 +4040,9 @@ async def run() -> int:
       "queued_chat_count": len(chats),
       "chat_input_starved": bool(chats and not proposal_chats),
       "writer_self_reviews": proposal.get("writer_self_reviews", []),
-      "read_audit_count": len(proposal_audits),
+      "read_audit_count": len(replayed_audits),
+      "agreed_read_audit_count": len(agreed_audits),
+      "writer_reviewed_read_audit_count": len(proposal_audits),
       "deferred_read_audit_count": deferred_read_audit_count,
       "proposal_batch_count": len(proposals),
       "audit_proposal_batch_count": audit_proposal_count,
@@ -4080,6 +4058,17 @@ async def run() -> int:
       ),
       "model_work": _model_work_receipt(consolidation.provider_outcomes),
       "recall_model_work": _recall_model_work(read_traces),
+      "replay_model_work": _aggregate_model_work([
+        {
+          "read_id": replay["read_id"],
+          "provider": attempt.get("provider"),
+          "outcome": attempt.get("outcome") or "invoked",
+          "receipt": attempt["usage_receipt"],
+        }
+        for replay in replays
+        for attempt in replay["attempts"]
+        if isinstance(attempt.get("usage_receipt"), dict)
+      ]),
       "recall_guidance": recall_guidance_status,
       "graph_scale": graph_scale,
       "personalization_profile": profile_status,
@@ -4087,7 +4076,7 @@ async def run() -> int:
         item for item in _typed_maintenance_diagnostics(graph)
         if not item["actionable_by_writer"]
       ],
-      **_chat_intake_status(intake),
+      **_capture_intake_status(intake),
       "topology": {
         "before": _topology_counts(baseline),
         "after": _topology_counts(graph),
@@ -4115,10 +4104,21 @@ async def run() -> int:
         recall_guidance_status,
         consolidated_mocs=list(consolidation.accepted_mocs),
       )
+      _mark_consolidated_through_publication(list(consolidation.accepted_mocs))
       _record_recall_audits(
         run_id,
-        proposal_audits,
-        proposal,
+        replayed_audits,
+        {
+          **proposal,
+          "read_audits": [
+            *agreed_verdicts,
+            *map(_unreviewed_verdict, unreviewed_audits),
+            *(
+              {**verdict, "verdict_source": "writer"}
+              for verdict in proposal.get("read_audits") or []
+            ),
+          ],
+        },
         graph,
       )
     except OSError as exc:
@@ -4166,7 +4166,7 @@ async def run() -> int:
         else [],
         deferred_attempts if "deferred_attempts" in locals() else [],
       )
-      failure.update(_chat_intake_status(intake))
+      failure.update(_capture_intake_status(intake))
       failure["source_chat_count"] = len(
         proposal_chats if "proposal_chats" in locals() else []
       )

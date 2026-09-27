@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import fcntl
 import hashlib
 import json
@@ -35,7 +36,6 @@ _SAFE_REL = re.compile(
 _TRACKED_PATHS = ("index.md", "graph.json", "mocs", "notes", "sources")
 MAX_NOTE_BYTES = 256_000
 MAX_GRAPH_BYTES = 4_000_000
-MAX_DESCRIPTION_CHARS = 2_000
 MAX_RECALL_GUIDANCE_CHARS = 800
 MAX_RECALL_EXECUTION_RECEIPT_BYTES = 524_288
 # Agent run identities expire after 26 hours. Keep their hashed single-flight
@@ -575,10 +575,6 @@ def _validate_tree(root: Path, *, require_graph: bool = False) -> None:
     nodes = graph_value.get("nodes") if isinstance(graph_value, dict) else None
     if not isinstance(nodes, list):
       raise ValueError("memory graph has invalid nodes")
-    for node in nodes:
-      description = node.get("description") if isinstance(node, dict) else None
-      if isinstance(description, str) and len(description) > MAX_DESCRIPTION_CHARS:
-        raise ValueError("memory description exceeds publication cap")
   for directory in (root / "mocs", root / "notes"):
     if directory.is_symlink() or not directory.is_dir():
       raise ValueError(f"unsafe memory directory: {directory}")
@@ -793,6 +789,151 @@ def _state_lock():
 
 def safe_chat_id(chat_id: str) -> str:
   return re.sub(r"[^A-Za-z0-9_-]", "", str(chat_id or ""))[:128]
+
+
+def _note_creation_times() -> dict[str, str]:
+  """First-commit time of every note path in the published history."""
+  if _head() is None:
+    return {}
+  log = _git(
+    "log", "--diff-filter=A", "--format=T %cI", "--name-only", "--", "notes",
+    text=True,
+  ).stdout
+  created: dict[str, str] = {}
+  stamp = ""
+  for line in log.splitlines():
+    if line.startswith("T "):
+      stamp = line[2:].strip()
+    elif line.startswith("notes/"):
+      # Log is newest first; the last sighting is the original creation.
+      created[line.strip()] = stamp
+  return created
+
+
+def note_usage_evidence() -> dict[str, dict]:
+  """How each note has fared in audited lookups since it was written.
+
+  Built fresh from the append-only recall-audit log, so it needs no counters
+  of its own. A lookup `needed` a note when a judged verdict kept or missed it
+  (writer review, or full live/deep agreement); an unreviewed replay counts
+  the deep reference's choice. `overreach` counts selections judged unneeded.
+  """
+  created = _note_creation_times()
+  usage: dict[str, dict] = {}
+
+  def entry(path: str) -> dict:
+    return usage.setdefault(path, {
+      "needed": 0, "overreach": 0, "last_needed_at": None,
+    })
+
+  lookups: list[str] = []
+  for log in sorted((STATE / "recall-audit").glob("*.jsonl")):
+    for line in log.read_text(encoding="utf-8").splitlines():
+      try:
+        record = json.loads(line)
+      except ValueError:
+        continue
+      if not isinstance(record, dict) or not isinstance(record.get("at"), str):
+        continue
+      at = record["at"]
+      lookups.append(at)
+      live = set(record.get("live_selected") or ())
+      over = set(record.get("overselected_nodes") or ())
+      source = record.get("verdict_source", "writer")
+      if source == "deep_replay_unreviewed":
+        needed = set(record.get("deep_selected") or ())
+      else:
+        needed = (live - over) | set(record.get("missed_nodes") or ())
+      for path in needed:
+        item = entry(path)
+        item["needed"] += 1
+        if (item["last_needed_at"] or "") < at:
+          item["last_needed_at"] = at
+      for path in over:
+        entry(path)["overreach"] += 1
+  lookups.sort()
+  for path, stamp in created.items():
+    item = entry(path)
+    item["created_at"] = stamp
+    item["lookups_since_created"] = len(lookups) - bisect.bisect_left(
+      lookups, stamp,
+    )
+  return usage
+
+
+# Facts a working agent saved mid-chat for the nightly writer. The file holds
+# only unconsumed captures: the runner removes each one after the writer has
+# seen it alongside its source chat in an accepted, published proposal.
+CAPTURES = STATE / "captures.jsonl"
+# One capture is one self-contained fact; this bounds a runaway argument, not
+# how much the agent may say about a fact.
+MAX_CAPTURE_CHARS = 4_000
+
+
+def append_capture(chat_id: str, text: str) -> dict:
+  chat = safe_chat_id(chat_id)
+  fact = str(text or "").strip()
+  if not chat or chat != chat_id:
+    raise ValueError("a capture needs the current chat id")
+  if not fact:
+    raise ValueError("a capture needs the fact to remember")
+  if len(fact) > MAX_CAPTURE_CHARS:
+    raise ValueError(
+      f"a capture is one fact of at most {MAX_CAPTURE_CHARS} characters"
+    )
+  record = {
+    "id": uuid.uuid4().hex,
+    "at": datetime.now(UTC).isoformat(),
+    "chat_id": chat,
+    "text": fact,
+  }
+  with _state_lock():
+    with CAPTURES.open("a", encoding="utf-8") as handle:
+      handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+      handle.flush()
+      os.fsync(handle.fileno())
+  return record
+
+
+def _read_captures() -> list[dict]:
+  try:
+    lines = CAPTURES.read_text(encoding="utf-8").splitlines()
+  except FileNotFoundError:
+    return []
+  captures = []
+  for line in lines:
+    try:
+      item = json.loads(line)
+    except ValueError:
+      continue
+    if (
+      isinstance(item, dict)
+      and isinstance(item.get("id"), str)
+      and isinstance(item.get("chat_id"), str)
+      and isinstance(item.get("text"), str)
+    ):
+      captures.append(item)
+  return captures
+
+
+def load_captures() -> list[dict]:
+  """Return unconsumed captures in the order they were saved."""
+  with _state_lock():
+    return _read_captures()
+
+
+def consume_captures(capture_ids: set[str]) -> None:
+  """Remove captures the writer has handled; later captures stay queued."""
+  if not capture_ids:
+    return
+  with _state_lock():
+    remaining = [
+      item for item in _read_captures() if item["id"] not in capture_ids
+    ]
+    _atomic_text(
+      CAPTURES,
+      "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in remaining),
+    )
 
 
 def load_read_trace(chat_id: str) -> dict | None:

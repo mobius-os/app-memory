@@ -12,7 +12,7 @@
 // Only App lives here: it owns top-level graph/note state, persistence wiring,
 // shell navigation state, and mounts the graph, list, and note-panel UI.
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { ArrowLeft, ChevronDown, SettingsCog } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowLeft, ChevronDown, Pulse, SettingsCog } from '@openai/apps-sdk-ui/components/Icon'
 import { NOTE_BASE, PALETTE, S } from './constants.js'
 import { CSS } from './theme.js'
 import { makeSharedMemoryStore } from './storage.js'
@@ -46,11 +46,31 @@ import { ChatGlyph } from './ui/ChatGlyph.jsx'
 import { TextGlyph } from './ui/TextGlyph.jsx'
 import { NetworkGlyph } from './ui/NetworkGlyph.jsx'
 import { ModelPicker } from './ui/ModelPicker.jsx'
+import { ActivityView } from './ui/ActivityView.jsx'
 import { BackgroundAgentList } from './ui/BackgroundAgentList.jsx'
 import { SupportingChats } from './ui/SupportingChats.jsx'
 import { agentSlotLabel, canReorderAgentSlots, reorderAgentSlots } from './ui/backgroundAgentOrder.js'
 
 export { makeSharedMemoryStore } from './storage.js'
+
+const HOURS_24 = Array.from({ length: 24 }, (_, value) => String(value).padStart(2, '0'))
+const MINUTES_60 = Array.from({ length: 60 }, (_, value) => String(value).padStart(2, '0'))
+
+function Time24Field({ value, onChange }) {
+  const [hour = '00', minute = '00'] = String(value || '').split(':')
+  return (
+    <div className="mg-time24" role="group" aria-labelledby="mg-run-time-label">
+      <select value={hour} onChange={(event) => onChange(`${event.target.value}:${minute}`)} aria-label="Hour, 24-hour clock">
+        {HOURS_24.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+      <span aria-hidden="true">:</span>
+      <select value={minute} onChange={(event) => onChange(`${hour}:${event.target.value}`)} aria-label="Minute">
+        {MINUTES_60.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </div>
+  )
+}
+
 export {
   MEMORY_SANITIZE_OPTIONS,
   buildLocalGraphData,
@@ -117,7 +137,9 @@ export default function App({ appId, token }) {
   const [revision, setRevision] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ready | empty | error
   const [errMsg, setErrMsg] = useState('');
-  const [view, setView] = useState('graph'); // graph | list
+  const [view, setView] = useState('graph'); // graph | list | activity
+  // The gesture hint teaches the graph once; the first touch retires it.
+  const [graphTouched, setGraphTouched] = useState(false);
   const [selected, setSelected] = useState(null); // node object
   const [nodeVisitHistory, setNodeVisitHistory] = useState([]);
   const [pendingIntentId, setPendingIntentId] = useState(null);
@@ -155,6 +177,9 @@ export default function App({ appId, token }) {
   const [settingsAgentDefaults, setSettingsAgentDefaults] = useState(null);
   const [connectedProviders, setConnectedProviders] = useState(null);
   const [agentSettingsExtra, setAgentSettingsExtra] = useState({});
+  // How chat lookups search Memory; both styles stay available while the
+  // nightly replay metrics compare them.
+  const [liveReader, setLiveReader] = useState('walk');
   const [primaryAgentMode, setPrimaryAgentMode] = useState('system');
   const [agentProvider, setAgentProvider] = useState('claude');
   const [agentModel, setAgentModel] = useState('');
@@ -201,6 +226,21 @@ export default function App({ appId, token }) {
   // so without these the open/empty signals would inflate on a single session.
   const openedSignaledRef = useRef(false);
   const emptySignaledRef = useRef(false);
+  // memory_empty_shown flags installs that have not gathered any notes yet.
+  const signalEmpty = () => {
+    if (emptySignaledRef.current) return;
+    emptySignaledRef.current = true;
+    window.mobius.signal('memory_empty_shown');
+  };
+  // Nothing published yet and a published graph with no file are the same
+  // empty Memory.
+  const showEmptyMemory = () => {
+    setGraph({ nodes: [], edges: [], problems: [] });
+    setSelected(null);
+    setNodeVisitHistory([]);
+    setStatus('empty');
+    signalEmpty();
+  };
   const usageCountsRef = useRef(usageCounts);
   usageCountsRef.current = usageCounts;
 
@@ -265,9 +305,7 @@ export default function App({ appId, token }) {
       }
       if (!present || body == null) {
         setRevision(null);
-        setGraph({ nodes: [], edges: [], problems: [] });
-        setSelected(null);
-        setStatus('empty');
+        showEmptyMemory();
         return;
       }
       let pointer;
@@ -292,18 +330,12 @@ export default function App({ appId, token }) {
   useEffect(() => {
     if (!revision) return undefined;
     setStatus('loading');
-    // Fire-and-forget open-outcome signals, each once per session (see the refs
-    // above). memory_opened reports that the app reached a real graph;
-    // memory_empty_shown flags cold-start installs that never got data.
+    // Fire-and-forget once per session (see the refs above): memory_opened
+    // reports that the app reached a real graph.
     const signalReady = (nodeCount, linkCount) => {
       if (openedSignaledRef.current) return;
       openedSignaledRef.current = true;
       window.mobius.signal('memory_opened', { node_count: nodeCount, link_count: linkCount });
-    };
-    const signalEmpty = () => {
-      if (emptySignaledRef.current) return;
-      emptySignaledRef.current = true;
-      window.mobius.signal('memory_empty_shown');
     };
     const unsub = store.subscribe('graph.json', ({ body, present, error }) => {
       if (error && body == null) {
@@ -312,11 +344,7 @@ export default function App({ appId, token }) {
         return;
       }
       if (!present || body == null) {
-        setGraph({ nodes: [], edges: [], problems: [] });
-        setSelected(null);
-        setNodeVisitHistory([]);
-        setStatus('empty');
-        signalEmpty();
+        showEmptyMemory();
         return;
       }
       let data;
@@ -704,6 +732,7 @@ export default function App({ appId, token }) {
       settingsLoaded = true;
       setSettingsStatus('ready');
       setAgentSettingsExtra(safeSettings);
+      setLiveReader(safeSettings.live_reader === 'single-pass' ? 'single-pass' : 'walk');
       let connected = null;
       if (statusRes?.ok) {
         const data = await statusRes.json();
@@ -1009,6 +1038,7 @@ export default function App({ appId, token }) {
         ? (secondaryAgentModel || null)
         : null,
       fallback_effort: null,
+      live_reader: liveReader,
     };
     try {
       const res = await fetch(`/api/storage/apps/${encodeURIComponent(appId)}/settings.json`, {
@@ -1038,6 +1068,7 @@ export default function App({ appId, token }) {
     authHeaders,
     agentSaving,
     agentSettingsExtra,
+    liveReader,
     primaryAgentMode,
     agentProvider,
     agentModel,
@@ -1228,6 +1259,17 @@ export default function App({ appId, token }) {
             >
               <ListGlyph /> <span className="mg-tgl-label">List</span>
             </button>
+            <button
+              type="button"
+              className="mg-tgl"
+              style={{ ...S.toggleBtn, ...(view === 'activity' ? S.toggleActive : {}) }}
+              onClick={() => selectView('activity')}
+              aria-pressed={view === 'activity'}
+              aria-label="Activity"
+            >
+              <Pulse width={13} height={13} aria-hidden="true" style={{ marginRight: 5 }} />
+              <span className="mg-tgl-label">Activity</span>
+            </button>
           </div>
         </div>
       </header>
@@ -1303,7 +1345,7 @@ export default function App({ appId, token }) {
                       <div className="mg-schedule-card">
                         <div className="mg-schedule-orb" aria-hidden="true"><span /></div>
                         <div className="mg-schedule-copy">
-                          <label htmlFor="mg-run-time">Daily run time</label>
+                          <label id="mg-run-time-label">Daily run time</label>
                           <span>
                             {scheduleTzSupported
                               ? 'In the time zone picked here.'
@@ -1315,13 +1357,10 @@ export default function App({ appId, token }) {
                             </small>
                           )}
                         </div>
-                        <input
-                          id="mg-run-time"
-                          type="time"
-                          step="60"
+                        <Time24Field
                           value={scheduleTime}
-                          onChange={(event) => {
-                            setScheduleTime(event.target.value);
+                          onChange={(value) => {
+                            setScheduleTime(value);
                             setScheduleCustom(false);
                             setScheduleMessage('');
                           }}
@@ -1366,6 +1405,7 @@ export default function App({ appId, token }) {
                         <button type="button" onClick={loadAgentSettings}>Retry</button>
                       </div>
                     ) : (
+                      <>
                       <BackgroundAgentList
                         onMove={reorderAgents}
                         itemLabels={agentLabels}
@@ -1411,6 +1451,29 @@ export default function App({ appId, token }) {
                           />
                         </div>
                       </BackgroundAgentList>
+                      <div className="mg-reader">
+                      <div className="mg-agent-slot-label">How chats search Memory</div>
+                      <div style={S.toggle} className="mg-reader-toggle" role="group" aria-label="How chats search Memory">
+                        {[['walk', 'Step by step'], ['single-pass', 'Single pass']].map(([key, label]) => (
+                          <button
+                            key={key}
+                            type="button"
+                            className="mg-reader-option"
+                            style={{ ...S.toggleBtn, ...(liveReader === key ? S.toggleActive : {}) }}
+                            aria-pressed={liveReader === key}
+                            onClick={() => { setLiveReader(key); setAgentMessage(''); }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="mg-reader-note">
+                        {liveReader === 'single-pass'
+                          ? 'Chooses from every note title in one call: faster and cheaper, and in testing it found more of what past chats needed.'
+                          : 'Walks the graph from its top, opening a few notes at a time.'}
+                      </p>
+                      </div>
+                      </>
                     )}
                   </div>
                 )}
@@ -1472,14 +1535,20 @@ export default function App({ appId, token }) {
             <div style={S.centerTitle}>Memory is just getting to know you</div>
             <div style={S.centerText}>
               As you chat, Möbius notes lasting facts about you and your work,
-              and Memory files the useful ones here each night. Come back after
+              and Memory files the useful ones here each day. Come back after
               a few conversations.
             </div>
           </div>
         )}
 
         {status === 'ready' && view === 'graph' && (
-          <div ref={wrapRef} style={S.graphWrap} className="mg-graph">
+          <div
+            ref={wrapRef}
+            style={S.graphWrap}
+            className="mg-graph"
+            onPointerDownCapture={() => setGraphTouched(true)}
+            onWheelCapture={() => setGraphTouched(true)}
+          >
             {dims.w > 0 && dims.h > 0 ? (
               <MemoryGraphRenderer
                 graphData={fgData}
@@ -1501,7 +1570,11 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            <div style={S.graphHint} className="mg-graph-hint">
+            <div
+              style={S.graphHint}
+              className={`mg-graph-hint${graphTouched ? ' is-dismissed' : ''}`}
+              aria-hidden={graphTouched ? 'true' : undefined}
+            >
               <span className="mg-hint-pointer">Drag to pan · scroll or use the buttons to zoom · select a node</span>
               <span className="mg-hint-touch">Drag · pinch or buttons to zoom · tap a node</span>
             </div>
@@ -1554,6 +1627,15 @@ export default function App({ appId, token }) {
             sortKey={sortKey}
             sortDir={sortDir}
             onSort={toggleSort}
+            colorForNode={colorForNode}
+            onOpenNode={openPanel}
+          />
+        )}
+
+        {status === 'ready' && view === 'activity' && (
+          <ActivityView
+            store={store}
+            graph={graph}
             colorForNode={colorForNode}
             onOpenNode={openPanel}
           />

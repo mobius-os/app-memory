@@ -118,8 +118,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._collect_chat_intake = lambda: runner.ChatIntake([{"id": "chat-1", "messages": []}])
-      runner._remember_pending_chat_ids(["chat-1"])
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([{"id": "chat-1", "messages": []}])
       runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome(
         "ok", _proposal(), "test", None, [],
       )
@@ -147,7 +146,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._collect_chat_intake = lambda: runner.ChatIntake([])
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([])
       proposal_started = threading.Event()
       finish_proposal = threading.Event()
 
@@ -201,7 +200,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._collect_chat_intake = lambda: runner.ChatIntake([])
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([])
       runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome(
         status="degraded",
         proposal=None,
@@ -355,10 +354,21 @@ class MemoryRunnerTests(unittest.TestCase):
         "source: [chat:missing]\n---\nShort.\n",
         encoding="utf-8",
       )
+      (staging / "mocs" / "map.md").write_text(
+        "---\ntitle: Map\ntype: moc\n---\n# Map\n\n"
+        "- [[sprawling]]\n- [[filed-nowhere]]\n- [[wordy]]\n",
+        encoding="utf-8",
+      )
+      (staging / "notes" / "wordy.md").write_text(
+        "---\ntitle: Wordy\ntype: note\nmocs: [map]\ndescription: "
+        + "x" * 2_001 + "\n---\nShort.\n",
+        encoding="utf-8",
+      )
 
       graph = runner.build_graph(staging, usage={})
 
       by_kind = {p["kind"]: p for p in graph["problems"]}
+      self.assertEqual(by_kind["description_too_long"]["node"], "wordy")
       self.assertIn("bare_map_entry", by_kind)
       self.assertEqual(by_kind["bare_map_entry"]["node"], "filed-nowhere")
       self.assertIn("missing_description", by_kind)
@@ -437,7 +447,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._collect_chat_intake = lambda: runner.ChatIntake([])
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([])
       runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome(
         status="degraded", proposal=None, provider=None, model=None,
         attempted_agents=[{
@@ -466,7 +476,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._collect_chat_intake = lambda: runner.ChatIntake([])
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([])
       runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome("ok", _reviewed({
         "summary": "replace the root", "followups": [], "deletes": [],
         "updates": [{"path": "index.md", "content": "# Empty root\n"}],
@@ -477,24 +487,6 @@ class MemoryRunnerTests(unittest.TestCase):
       status = json.loads((store.STATE / "run-status.json").read_text())
       self.assertEqual(status["status"], "degraded")
       self.assertEqual(status["reason"], "topology_regression")
-
-  def test_proposal_data_preserves_one_platform_redacted_work_item(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      staging = Path(raw) / "staging"
-      staging.mkdir()
-      chat = {
-        "id": "chat-one", "title": "A" * 500,
-        "messages": [
-          {"role": "user", "text": "x" * 2_000} for _ in range(200)
-        ],
-      }
-
-      encoded = runner._proposal_data(staging, [chat])
-      value = json.loads(encoded)
-
-      self.assertEqual(len(value["redacted_recent_chats"]), 1)
-      self.assertEqual(len(value["redacted_recent_chats"][0]["messages"]), 200)
 
   def test_proposal_data_exposes_short_handles_not_canonical_chat_ids(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -507,7 +499,7 @@ class MemoryRunnerTests(unittest.TestCase):
         "id": canonical, "title": "Capability work", "messages": [],
       }]))
 
-      row = data["redacted_recent_chats"][0]
+      row = data["captured_chats"][0]
       self.assertEqual(row["source_handle"], "chat:c01")
       self.assertNotIn("id", row)
       self.assertNotIn(canonical, json.dumps(data))
@@ -521,7 +513,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
       canonical = "1f905105-a3a6-4a67-a6e3-1b34ea6963d8"
-      runner._collect_chat_intake = lambda: runner.ChatIntake([{"id": canonical, "messages": []}])
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([{"id": canonical, "messages": []}])
       proposal = runner._normalize_proposal(
         _proposal("c01"),
         allowed_chat_ids={canonical},
@@ -530,7 +522,6 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome(
         "ok", proposal, "test", None, [],
       )
-      runner._remember_pending_chat_ids([canonical])
 
       self.assertEqual(asyncio.run(runner.run()), 0)
 
@@ -539,44 +530,7 @@ class MemoryRunnerTests(unittest.TestCase):
       )
       self.assertIn(f"source: [chat:{canonical}]", note)
       self.assertNotIn("chat:c01", note)
-      self.assertFalse(runner._PENDING_CHAT_IDS.exists())
-
-  def test_success_acknowledges_only_chats_that_fit_the_prompt(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      staging = Path(raw) / "staging"
-      staging.mkdir()
-      chats = [
-        {"id": "first", "title": "first", "messages": [{"role": "user", "text": "a"}]},
-        {"id": "second", "title": "second", "messages": [{"role": "user", "text": "b" * 1000}]},
-      ]
-      runner._remember_pending_chat_ids([chat["id"] for chat in chats])
-
-      offered = runner._proposal_batch(staging, chats)
-      outcome = runner._acknowledge_pending_chats(offered)
-
-      self.assertEqual([chat["id"] for chat in offered], ["first"])
-      self.assertEqual(runner._load_pending_chat_ids(), ["second"])
-      self.assertTrue(outcome.write_ok)
-      self.assertEqual(outcome.removed_count, 1)
-      self.assertEqual(outcome.remaining_count, 1)
-
-  def test_failed_queue_write_never_reports_acknowledged_chats(self):
-    with tempfile.TemporaryDirectory() as raw:
-      _store, runner = _load(Path(raw))
-      runner._remember_pending_chat_ids(["first", "second"])
-      runner._write_pending_chat_ids = lambda *_args, **_kwargs: False
-
-      outcome = runner._acknowledge_pending_chats([{"id": "first"}])
-
-      self.assertFalse(outcome.write_ok)
-      self.assertEqual(outcome.removed_count, 0)
-      self.assertEqual(outcome.remaining_count, 2)
-      self.assertEqual(runner._load_pending_chat_ids(), ["first", "second"])
-
-
-
-
+      self.assertEqual(store.load_captures(), [])
 
   def test_semantically_invalid_primary_proposal_uses_configured_fallback(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -803,7 +757,7 @@ class MemoryRunnerTests(unittest.TestCase):
       runner.SEED_DIR = seed
       runner._app_id = lambda: 7
       runner._app_active = lambda _app_id: True
-      runner._collect_chat_intake = lambda: runner.ChatIntake([])
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([])
       runner._proposal = lambda *_args, **_kwargs: runner.ProposalOutcome("ok", _reviewed({
         "summary": "no provider", "followups": [], "updates": [], "deletes": [],
       }), "test", None, [])
@@ -825,7 +779,6 @@ class MemoryRunnerTests(unittest.TestCase):
       runner._api_json = lambda _path: {
         "id": 7,
         "slug": "memory-2",
-        "system_app": True,
         "capability_contract": contract,
       }
 

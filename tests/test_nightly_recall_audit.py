@@ -57,7 +57,6 @@ def test_app_active_requires_current_memory_permissions_and_scheduled_job(
 ):
   app = {
     "id": 57,
-    "system_app": True,
     "capability_contract": _memory_contract(),
   }
   monkeypatch.setattr(memory_runner, "_api_json", lambda _path: app)
@@ -99,8 +98,11 @@ def test_app_active_requires_current_memory_permissions_and_scheduled_job(
   assert memory_runner._app_active(57) is False
 
 
-def test_preflight_failure_replaces_stale_run_status(monkeypatch):
+def test_preflight_failure_replaces_stale_run_status(monkeypatch, tmp_path):
   recorded = []
+  # Read no live run journal: an orphaned "running" entry there would be
+  # closed first and add a record this test is not about.
+  monkeypatch.setattr(memory_runner, "STATE", tmp_path)
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "")
   monkeypatch.setattr(
@@ -149,323 +151,6 @@ def test_orphaned_running_status_is_closed_before_the_next_run(
   }]
 
 
-def test_chat_discovery_pages_to_the_durable_marker(monkeypatch, tmp_path):
-  state = tmp_path / "app-state"
-  pending = state / "pending-chat-ids.json"
-  discovery = state / "chat-discovery.json"
-  state.mkdir()
-  pending.write_text(json.dumps({"schema": 1, "chat_ids": ["backlog"]}))
-  discovery.write_text(json.dumps({
-    "schema": 1,
-    "newest": {"recency_at": "2026-07-28T01:00:00", "id": "seen"},
-  }))
-  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
-  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", discovery)
-  calls = []
-
-  def api(path):
-    calls.append(path)
-    query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
-    if "before_id" not in query:
-      return memory_runner.ApiResult({
-        "items": [
-          {"id": "new-2", "recency_at": "2026-07-30T02:00:00"},
-          {"id": "new-1", "recency_at": "2026-07-29T02:00:00"},
-        ],
-        "next_before": {
-          "recency_at": "2026-07-29T02:00:00", "id": "new-1",
-        },
-      }, 200)
-    return memory_runner.ApiResult({
-      "items": [
-        {"id": "seen", "recency_at": "2026-07-28T01:00:00"},
-        {"id": "older", "recency_at": "2026-07-27T01:00:00"},
-      ],
-      "next_before": None,
-    }, 200)
-
-  monkeypatch.setattr(memory_runner, "_api_result", api)
-
-  ids, complete, queue_ok = memory_runner._discover_chat_ids()
-
-  assert ids == ["new-1", "new-2"]
-  assert complete is queue_ok is True
-  assert len(calls) == 2
-  assert all(
-    urllib.parse.parse_qs(urllib.parse.urlsplit(call).query).get(
-      "include_deleted"
-    ) == ["true"]
-    for call in calls
-  )
-  assert memory_runner._load_pending_chat_ids() == [
-    "backlog", "new-1", "new-2",
-  ]
-  assert json.loads(discovery.read_text())["newest"] == {
-    "recency_at": "2026-07-30T02:00:00", "id": "new-2",
-  }
-
-
-def test_fresh_discovery_queues_descending_pages_oldest_first(monkeypatch, tmp_path):
-  state = tmp_path / "app-state"
-  state.mkdir()
-  pending = state / "pending.json"
-  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
-  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", state / "discovery.json")
-
-  def api(path):
-    query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
-    if "before_id" not in query:
-      return memory_runner.ApiResult({
-        "items": [
-          {"id": "newest", "recency_at": "2026-07-30T03:00:00"},
-          {"id": "middle", "recency_at": "2026-07-30T02:00:00"},
-        ],
-        "next_before": {
-          "recency_at": "2026-07-30T02:00:00", "id": "middle",
-        },
-      }, 200)
-    return memory_runner.ApiResult({
-      "items": [
-        {"id": "oldest", "recency_at": "2026-07-30T01:00:00"},
-      ],
-      "next_before": None,
-    }, 200)
-
-  monkeypatch.setattr(memory_runner, "_api_result", api)
-
-  ids, complete, queue_ok = memory_runner._discover_chat_ids()
-
-  assert complete is queue_ok is True
-  assert ids == ["oldest", "middle", "newest"]
-  assert memory_runner._load_pending_chat_ids() == ids
-
-
-def test_chat_discovery_uses_ordered_watermark_and_skips_empty_rows(
-  monkeypatch, tmp_path,
-):
-  state = tmp_path / "app-state"
-  pending = state / "pending-chat-ids.json"
-  discovery = state / "chat-discovery.json"
-  state.mkdir()
-  discovery.write_text(json.dumps({
-    "schema": 1,
-    "newest": {"recency_at": "2026-07-28T01:00:00", "id": "moved"},
-  }))
-  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
-  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", discovery)
-  calls = []
-
-  def api(path):
-    calls.append(path)
-    return memory_runner.ApiResult({
-      "items": [
-        {
-          "id": "moved", "recency_at": "2026-07-30T03:00:00",
-          "message_count": 2,
-        },
-        {
-          "id": "empty", "recency_at": "2026-07-30T02:00:00",
-          "message_count": 0,
-        },
-        {
-          "id": "new", "recency_at": "2026-07-29T01:00:00",
-          "message_count": 1,
-        },
-        {
-          "id": "older", "recency_at": "2026-07-27T01:00:00",
-          "message_count": 4,
-        },
-      ],
-      "next_before": None,
-    }, 200)
-
-  monkeypatch.setattr(memory_runner, "_api_result", api)
-
-  ids, complete, queue_ok = memory_runner._discover_chat_ids()
-
-  assert ids == ["new", "moved"]
-  assert complete is queue_ok is True
-  assert len(calls) == 1
-  assert memory_runner._load_pending_chat_ids() == ["new", "moved"]
-  assert json.loads(discovery.read_text())["newest"] == {
-    "recency_at": "2026-07-30T03:00:00", "id": "moved",
-  }
-
-
-def test_chat_discovery_stops_at_watermark_after_marker_chat_disappears(
-  monkeypatch, tmp_path,
-):
-  state = tmp_path / "app-state"
-  state.mkdir()
-  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", state / "pending.json")
-  marker = state / "discovery.json"
-  marker.write_text(json.dumps({
-    "schema": 1,
-    "newest": {"recency_at": "2026-07-28T01:00:00", "id": "gone"},
-  }))
-  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", marker)
-  monkeypatch.setattr(
-    memory_runner,
-    "_api_result",
-    lambda _path: memory_runner.ApiResult({
-      "items": [
-        {
-          "id": "new", "recency_at": "2026-07-29T01:00:00",
-          "message_count": 1,
-        },
-        {
-          "id": "older", "recency_at": "2026-07-27T01:00:00",
-          "message_count": 1,
-        },
-      ],
-      "next_before": None,
-    }, 200),
-  )
-
-  ids, complete, queue_ok = memory_runner._discover_chat_ids()
-
-  assert ids == ["new"]
-  assert complete is queue_ok is True
-
-
-def test_all_empty_discovery_page_advances_watermark_without_queueing(
-  monkeypatch, tmp_path,
-):
-  state = tmp_path / "app-state"
-  state.mkdir()
-  pending = state / "pending.json"
-  marker = state / "discovery.json"
-  marker.write_text(json.dumps({
-    "schema": 1,
-    "newest": {"recency_at": "2026-07-28T01:00:00", "id": "previous"},
-  }))
-  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
-  monkeypatch.setattr(memory_runner, "_CHAT_DISCOVERY", marker)
-  monkeypatch.setattr(
-    memory_runner,
-    "_api_result",
-    lambda _path: memory_runner.ApiResult({
-      "items": [
-        {
-          "id": "empty-newest", "recency_at": "2026-07-30T02:00:00",
-          "message_count": 0,
-        },
-        {
-          "id": "empty-newer", "recency_at": "2026-07-29T02:00:00",
-          "message_count": 0,
-        },
-        {
-          "id": "older", "recency_at": "2026-07-27T01:00:00",
-          "message_count": 2,
-        },
-      ],
-      "next_before": None,
-    }, 200),
-  )
-
-  ids, complete, queue_ok = memory_runner._discover_chat_ids()
-
-  assert ids == []
-  assert complete is queue_ok is True
-  assert memory_runner._load_pending_chat_ids() == []
-  assert json.loads(marker.read_text())["newest"] == {
-    "recency_at": "2026-07-30T02:00:00", "id": "empty-newest",
-  }
-
-
-def test_chat_intake_prunes_404s_but_retries_transient_failures(
-  monkeypatch, tmp_path,
-):
-  pending = tmp_path / "pending-chat-ids.json"
-  pending.write_text(json.dumps({
-    "schema": 1,
-    "chat_ids": ["gone", "transient", "empty", "good", "recent"],
-  }))
-  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
-  monkeypatch.setattr(
-    memory_runner, "_discover_chat_ids", lambda: (["recent"], True, True),
-  )
-
-  def api(path):
-    split = urllib.parse.urlsplit(path)
-    chat_id = urllib.parse.unquote(split.path.rsplit("/", 1)[-1])
-    assert urllib.parse.parse_qs(split.query)["include_deleted"] == ["true"]
-    if chat_id == "gone":
-      return memory_runner.ApiResult(None, 404, "http_error")
-    if chat_id == "transient":
-      return memory_runner.ApiResult(None, 503, "http_error")
-    messages = [] if chat_id == "empty" else [
-      {"role": "user", "text": f"content from {chat_id}"},
-    ]
-    return memory_runner.ApiResult({
-      "id": chat_id,
-      "title": chat_id,
-      "updated_at": "2026-07-30T00:00:00",
-      "deleted_at": (
-        "2026-07-30T01:00:00" if chat_id == "recent" else None
-      ),
-      "messages": messages,
-    }, 200)
-
-  monkeypatch.setattr(memory_runner, "_api_result", api)
-
-  intake = memory_runner._collect_chat_intake()
-
-  assert [chat["id"] for chat in intake.chats] == ["good", "recent"]
-  assert intake.chats[-1]["deleted_at"] == "2026-07-30T01:00:00"
-  assert intake.tombstone_count == 1
-  assert intake.tombstone_ids == ("gone",)
-  assert intake.detail_failure_count == 1
-  assert memory_runner._load_pending_chat_ids() == [
-    "transient", "good", "recent",
-  ]
-
-
-def test_pending_chat_queue_preserves_more_than_the_old_fixed_window(
-  monkeypatch, tmp_path,
-):
-  pending = tmp_path / "pending-chat-ids.json"
-  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
-  ids = [f"chat-{index}" for index in range(700)]
-
-  assert memory_runner._remember_pending_chat_ids(ids) is True
-  assert memory_runner._load_pending_chat_ids() == ids
-
-
-def test_chat_intake_processes_the_pending_queue_in_order(monkeypatch, tmp_path):
-  pending = tmp_path / "pending-chat-ids.json"
-  pending.write_text(json.dumps({
-    "schema": 1,
-    "chat_ids": ["waiting-one", "waiting-two", "newly-discovered"],
-  }))
-  monkeypatch.setattr(memory_runner, "_PENDING_CHAT_IDS", pending)
-  monkeypatch.setattr(
-    memory_runner,
-    "_discover_chat_ids",
-    lambda: (["newly-discovered"], True, True),
-  )
-  requested = []
-
-  def api(path):
-    chat_id = urllib.parse.unquote(
-      urllib.parse.urlsplit(path).path.rsplit("/", 1)[-1],
-    )
-    requested.append(chat_id)
-    return memory_runner.ApiResult({
-      "id": chat_id,
-      "title": chat_id,
-      "updated_at": "2026-08-10T00:00:00Z",
-      "messages": [{"role": "user", "text": chat_id}],
-    }, 200)
-
-  monkeypatch.setattr(memory_runner, "_api_result", api)
-
-  intake = memory_runner._collect_chat_intake(limit=2)
-
-  assert requested == ["waiting-one", "waiting-two"]
-  assert [chat["id"] for chat in intake.chats] == requested
-
-
 def test_deleted_chat_prompt_uses_non_linking_provenance(tmp_path):
   chat = {
     "id": "deleted-chat-id",
@@ -478,7 +163,7 @@ def test_deleted_chat_prompt_uses_non_linking_provenance(tmp_path):
   payload = json.loads(encoded)
 
   assert included == [chat]
-  staged = payload["redacted_recent_chats"][0]
+  staged = payload["captured_chats"][0]
   assert staged["source_handle"] == "deleted:d01"
   assert "deleted-chat-id" not in encoded
   assert memory_runner._source_handles([chat]) == {}
@@ -940,98 +625,6 @@ def test_maintenance_routes_app_owned_warnings_without_repeated_writer_work(
   assert flags[0]["code"] == "graph.missing_description"
 
 
-def test_hindsight_source_handle_can_cite_the_later_chat(monkeypatch, tmp_path):
-  providers = memory_runner.ProviderPool([
-    {"provider": "claude", "model": "claude-test", "effort": None},
-  ])
-  audit = {
-    "read_id": "read-1",
-    "hindsight_source_id": "later-chat",
-    "hindsight_source_deleted": False,
-    "hindsight_chat": {
-      "source_handle": "chat:h01",
-      "messages": [{"role": "user", "text": "That context fixed it."}],
-    },
-  }
-  proposal = {
-    "updates": [{
-      "path": "notes/lesson-from-hindsight.md",
-      "content": (
-        "---\ntitle: Lesson from hindsight\ntype: note\n"
-        "mocs: [about-the-user]\nsource: [chat:h01]\n---\nUseful lesson.\n"
-      ),
-    }],
-    "deletes": [],
-    "summary": "Promoted the verified later outcome.",
-    "followups": [],
-    "read_audits": [{
-      "read_id": "read-1", "outcome": "ok", "overreach": False,
-      "missed_nodes": [], "overselected_nodes": [],
-      "reason": "The later chat established the outcome.",
-    }],
-    "self_review": _self_review(),
-  }
-  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
-  monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
-  monkeypatch.setattr(
-    memory_runner, "run_text",
-    lambda *_args, **_kwargs: TextResult(json.dumps(proposal)),
-  )
-
-  result = memory_runner._proposal(57, tmp_path, [], [audit], providers)
-
-  assert result.status == "ok"
-  assert "source: [chat:later-chat]" in result.proposal["updates"][0]["content"]
-
-
-def test_deleted_hindsight_source_uses_only_opaque_provenance(monkeypatch, tmp_path):
-  providers = memory_runner.ProviderPool([
-    {"provider": "claude", "model": "claude-test", "effort": None},
-  ])
-  audit = {
-    "read_id": "read-1",
-    "hindsight_source_id": "deleted-later-chat",
-    "hindsight_source_deleted": True,
-    "hindsight_chat": {
-      "source_handle": "deleted:h01", "deleted_at": "2026-08-20T00:00:00Z",
-      "messages": [{"role": "user", "text": "That context fixed it."}],
-    },
-  }
-  proposal = {
-    "updates": [{
-      "path": "notes/deleted-hindsight.md",
-      "content": (
-        "---\ntitle: Deleted hindsight\ntype: note\n"
-        "mocs: [about-the-user]\nsource: [deleted:h01]\n---\nUseful lesson.\n"
-      ),
-    }],
-    "deletes": [], "summary": "Promoted verified hindsight.", "followups": [],
-    "read_audits": [{
-      "read_id": "read-1", "outcome": "ok", "overreach": False,
-      "missed_nodes": [], "overselected_nodes": [], "reason": "Verified.",
-    }],
-    "self_review": _self_review(),
-  }
-  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
-  monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
-  monkeypatch.setattr(memory_runner, "_known_deleted_source_ids", lambda _path: set())
-  monkeypatch.setattr(memory_runner, "_known_deleted_source", lambda _path: False)
-  monkeypatch.setattr(
-    memory_runner, "_SOURCE_ARCHIVE_KEY", tmp_path / "source-key.json",
-  )
-  monkeypatch.setattr(
-    memory_runner, "run_text",
-    lambda *_args, **_kwargs: TextResult(json.dumps(proposal)),
-  )
-
-  result = memory_runner._proposal(57, tmp_path, [], [audit], providers)
-  content = result.proposal["updates"][0]["content"]
-
-  assert result.status == "ok"
-  assert "source: [deleted-chat:" in content
-  assert "deleted-later-chat" not in content
-
-
 def test_audit_reads_loads_selected_nodes_from_trace_revision(monkeypatch):
   loaded = []
 
@@ -1049,9 +642,11 @@ def test_audit_reads_loads_selected_nodes_from_trace_revision(monkeypatch):
     "commit": "trace-commit",
     "files": ["notes/quiet-ui.md"],
     "traversal": {"opened": [], "frontier_at_stop": []},
-  }])
+  }], [{"read_id": "read-1", "selected": ["notes/quiet-ui.md"], "reason": ""}])
 
   assert loaded == [("trace-commit", "notes/quiet-ui.md")]
+  assert audits[0]["deep"]["missed"] == []
+  assert audits[0]["deep"]["overreach"] == []
   assert audits[0]["live"]["selected_nodes"] == [{
     "path": "notes/quiet-ui.md",
     "title": "quiet ui",
@@ -1235,7 +830,10 @@ def test_transient_provider_failure_is_retried_on_the_next_batch(
 def test_batch_coordinator_combines_terminal_fallback_and_topology_rollback(
   monkeypatch, tmp_path,
 ):
-  chats = [{"id": f"chat-{index}"} for index in range(5)]
+  chats = [
+    {"id": f"chat-{index}", "captures": [{"id": f"chat-{index}"}]}
+    for index in range(5)
+  ]
   providers = memory_runner.ProviderPool([
     {"provider": "claude", "model": "claude-test", "effort": None},
     {"provider": "codex", "model": "gpt-test", "effort": None},
@@ -1253,7 +851,7 @@ def test_batch_coordinator_combines_terminal_fallback_and_topology_rollback(
   monkeypatch.setattr(
     memory_runner,
     "_proposal_batch",
-    lambda _staging, remaining, _audits: remaining[:2],
+    lambda remaining: remaining[:2],
   )
   def text(provider, _prompt, **_kwargs):
     calls.append(provider)
@@ -1553,13 +1151,19 @@ def test_run_reaches_consolidation_with_each_recall_as_one_work_item(
     memory_runner, "_reconcile_app_owned_docs", lambda *_args: ([], []),
   )
   monkeypatch.setattr(
-    memory_runner, "_collect_chat_intake", lambda: memory_runner.ChatIntake([]),
+    memory_runner, "_collect_capture_intake", lambda: memory_runner.CaptureIntake([]),
   )
   monkeypatch.setattr(memory_runner, "_pending_read_traces", lambda: traces)
 
-  def audit(_commit, selected, _hindsight=None):
+  def audit(_commit, selected, _replays):
     audited.extend(selected)
-    return selected
+    # Every read disagrees with its deep replay, so each reaches the writer.
+    return [
+      {**trace, "live": {"selected": []}, "deep": {"missed": ["notes/x.md"]}}
+      for trace in selected
+    ]
+
+  monkeypatch.setattr(memory_runner, "_deep_replays", lambda *_args: [])
 
   monkeypatch.setattr(memory_runner, "_audit_reads", audit)
   monkeypatch.setattr(
@@ -1587,13 +1191,7 @@ def test_run_reaches_consolidation_with_each_recall_as_one_work_item(
     "publish",
     lambda _staging: {"commit": "next", "changed": True},
   )
-  monkeypatch.setattr(
-    memory_runner,
-    "_acknowledge_pending_chats",
-    lambda _items: memory_runner.QueueAcknowledgement(
-      write_ok=True, before_count=0, removed_count=0, remaining_count=0,
-    ),
-  )
+  monkeypatch.setattr(memory_runner, "consume_captures", lambda _ids: None)
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
   )
@@ -1615,21 +1213,18 @@ def test_run_reaches_consolidation_with_each_recall_as_one_work_item(
 def test_run_consolidates_focused_chat_items_before_one_publish(
   monkeypatch, tmp_path,
 ):
-  chats = [{"id": f"chat-{index}"} for index in range(5)]
+  chats = [
+    {"id": f"chat-{index}", "captures": [{"id": f"chat-{index}"}]}
+    for index in range(5)
+  ]
   proposed_batches = []
   acknowledged = []
   published = []
   statuses = []
   graph = {"nodes": [], "edges": [], "problems": []}
 
-  def acknowledge(selected):
-    acknowledged.extend(chat["id"] for chat in selected)
-    return memory_runner.QueueAcknowledgement(
-      write_ok=True,
-      before_count=len(selected),
-      removed_count=len(selected),
-      remaining_count=0,
-    )
+  def acknowledge(capture_ids):
+    acknowledged.extend(sorted(capture_ids))
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
@@ -1650,8 +1245,8 @@ def test_run_consolidates_focused_chat_items_before_one_publish(
   )
   monkeypatch.setattr(
     memory_runner,
-    "_collect_chat_intake",
-    lambda: memory_runner.ChatIntake(chats, pending_count=len(chats)),
+    "_collect_capture_intake",
+    lambda: memory_runner.CaptureIntake(chats),
   )
   monkeypatch.setattr(memory_runner, "_pending_read_traces", lambda: [])
   monkeypatch.setattr(memory_runner, "_audit_reads", lambda *_args: [])
@@ -1682,11 +1277,7 @@ def test_run_consolidates_focused_chat_items_before_one_publish(
       published.append("publish") or {"commit": "next", "changed": True}
     ),
   )
-  monkeypatch.setattr(
-    memory_runner,
-    "_acknowledge_pending_chats",
-    acknowledge,
-  )
+  monkeypatch.setattr(memory_runner, "consume_captures", acknowledge)
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
   )
@@ -1713,20 +1304,17 @@ def test_run_consolidates_focused_chat_items_before_one_publish(
 def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   monkeypatch, tmp_path, rejection_code,
 ):
-  chats = [{"id": f"chat-{index}"} for index in range(3)]
+  chats = [
+    {"id": f"chat-{index}", "captures": [{"id": f"chat-{index}"}]}
+    for index in range(3)
+  ]
   acknowledged = []
   statuses = []
   graph = {"nodes": [], "edges": [], "problems": []}
   apply_count = 0
 
-  def acknowledge(selected):
-    acknowledged.extend(chat["id"] for chat in selected)
-    return memory_runner.QueueAcknowledgement(
-      write_ok=True,
-      before_count=len(selected),
-      removed_count=len(selected),
-      remaining_count=0,
-    )
+  def acknowledge(capture_ids):
+    acknowledged.extend(sorted(capture_ids))
 
   monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
   monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
@@ -1747,15 +1335,15 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
   )
   monkeypatch.setattr(
     memory_runner,
-    "_collect_chat_intake",
-    lambda: memory_runner.ChatIntake(chats, pending_count=len(chats)),
+    "_collect_capture_intake",
+    lambda: memory_runner.CaptureIntake(chats),
   )
   monkeypatch.setattr(memory_runner, "_pending_read_traces", lambda: [])
   monkeypatch.setattr(memory_runner, "_audit_reads", lambda *_args: [])
   monkeypatch.setattr(
     memory_runner,
     "_proposal_batch",
-    lambda _staging, remaining, _audits: remaining[:2],
+    lambda remaining: remaining[:2],
   )
   monkeypatch.setattr(
     memory_runner,
@@ -1796,11 +1384,7 @@ def test_run_publishes_accepted_batches_and_defers_structural_rejection(
     "publish",
     lambda _staging: {"commit": "next", "changed": True},
   )
-  monkeypatch.setattr(
-    memory_runner,
-    "_acknowledge_pending_chats",
-    acknowledge,
-  )
+  monkeypatch.setattr(memory_runner, "consume_captures", acknowledge)
   monkeypatch.setattr(
     memory_runner, "_record_run_status", lambda status: statuses.append(status),
   )
@@ -1843,10 +1427,8 @@ def test_nightly_prompt_requires_learn_recall_repair_and_prune(tmp_path):
   assert "stale, superseded, or obsolete" in prompt
   assert "make future recall more useful" in prompt
   assert "`next_experiment`" in prompt
-  assert "use the later conversation as the primary" in prompt
-  assert "original route and pruned frontier" in prompt
-  assert '`usefulness` as `helpful`, `mixed`, `unused`, `harmful`, or' in prompt
-  assert '"hindsight_reason":"short outcome-based reason"' in prompt
+  assert "deep replay disagreed" in prompt
+  assert "The reference is evidence, not truth" in prompt
   assert "coach the live selector" in prompt.lower()
   assert '"recall_guidance"' in prompt
   assert '"read_id": "read-1"' in prompt
@@ -1908,24 +1490,6 @@ def test_accepted_recall_guidance_applies_replace_keep_and_clear(monkeypatch):
   assert kept["instruction"] == review["instruction"]
   assert cleared["status"] == "cleared"
   assert stored[-1]["instruction"] == ""
-
-
-def test_recall_hindsight_reuses_intake_and_fetches_each_missing_chat_once(monkeypatch):
-  fetched = []
-  known = {"known": {"id": "known", "messages": []}}
-
-  def fetch(chat_id):
-    fetched.append(chat_id)
-    return ({"id": chat_id, "messages": [{"role": "user", "text": "later"}]}, 200)
-
-  monkeypatch.setattr(memory_runner, "_fetch_chat_detail", fetch)
-  result = memory_runner._recall_hindsight_chats([
-    {"chat_id": "known"}, {"chat_id": "missing"},
-    {"chat_id": "missing"}, {"chat_id": "not valid!"},
-  ], known)
-
-  assert set(result) == {"known", "missing"}
-  assert fetched == ["missing"]
 
 
 def test_audit_verdicts_must_cover_each_replayed_read_exactly_once():
@@ -2259,7 +1823,6 @@ def test_focused_envelope_bounds_broad_shared_term_note_bodies(tmp_path):
   }]))
   contents = data["existing_note_contents"]
 
-  assert len(contents) <= memory_runner._MAX_RELATED_NOTE_BODIES
   assert sum(len(item["content"]) for item in contents) <= (
     memory_runner._MAX_RELATED_NOTE_CONTENT_CHARS
   )
@@ -2318,12 +1881,9 @@ def test_audit_envelope_loads_pruned_candidate_from_original_trace(tmp_path):
   }]
 
 
-def test_proposal_batch_uses_one_oldest_platform_redacted_chat(tmp_path):
-  chats = [
-    {"id": "first", "messages": [{"role": "user", "text": "one"}]},
-    {"id": "second", "messages": [{"role": "user", "text": "two" * 50_000}]},
-  ]
-  assert memory_runner._proposal_batch(tmp_path, chats) == [chats[0]]
+def test_proposal_batch_uses_the_oldest_chat():
+  chats = [{"id": "first"}, {"id": "second"}]
+  assert memory_runner._proposal_batch(chats) == [chats[0]]
 
 
 def test_host_adds_described_link_without_rewriting_the_map(tmp_path):
@@ -2431,15 +1991,14 @@ def test_model_cannot_rewrite_map_files_or_unseen_existing_notes(tmp_path):
   assert note_error.value.code == "note_body_not_supplied"
 
 
-def test_memory_prompt_keeps_lookup_invocation_isolated():
+def test_memory_prompt_reaches_memory_through_its_tools():
   prompt = MEMORY_CORE_PROMPT
 
-  assert "python3 <this installed system app's source_dir>/memory_search.py" in prompt
-  assert "/data/apps/memory/memory_search" not in prompt
-  assert "own exact exec invocation" in prompt
-  assert "pipes, redirects, or other shell operations" in prompt
-  assert "isolation describes the command shape, not the schedule" in prompt
-  assert "Dispatch the Memory invocation in parallel" in prompt
+  for tool in ("memory_search", "memory_read", "memory_remember"):
+    assert f"(`{tool}`" in prompt
+  assert "python3" not in prompt
+  assert "source_dir" not in prompt
+  assert "Never start the same search again while it is still running" in prompt
 
 
 def test_memory_prompt_balances_recall_with_direct_evidence():
@@ -2460,7 +2019,7 @@ def test_memory_prompt_balances_recall_with_direct_evidence():
   assert "Complexity alone is not a cue." in prompt
   assert "owning sources establish what is true now and what happened" in prompt
   assert "A separate Memory lookup may run in parallel" in prompt
-  assert "mention the concrete mismatch in the visible conversation" in prompt
+  assert "save the correction (below), naming the stale claim it supersedes" in prompt
   assert "Never infer an exact requirement from a broader memory" in prompt
 
 
@@ -2504,3 +2063,136 @@ def test_host_selection_override_detects_model_empty_replaced_by_host():
     traversal, ["notes/near.md"],
   ) is True
   assert memory_runner._host_selection_override(traversal, []) is False
+
+
+def test_agreed_reads_need_no_writer_and_disagreements_do():
+  agreed = {"read_id": "a", "live": {"selected": ["notes/x.md"]},
+            "deep": {"selected": ["notes/x.md"], "missed": [], "overreach": []}}
+  empty = {"read_id": "e", "live": {"selected": []},
+           "deep": {"selected": [], "missed": [], "overreach": []}}
+  missed = {"read_id": "m", "live": {"selected": []},
+            "deep": {"selected": ["notes/x.md"], "missed": ["notes/x.md"],
+                     "overreach": []}}
+
+  assert memory_runner._agreed_verdict(agreed)["outcome"] == "ok"
+  assert memory_runner._agreed_verdict(empty)["outcome"] == "no_memory"
+  assert memory_runner._agreed_verdict(missed) is None
+  assert memory_runner._deep_agreement(missed) == {
+    "deep_selected": ["notes/x.md"], "deep_recall": 0.0, "deep_noise": None,
+  }
+
+
+def test_deep_replays_batch_lookups_and_stop_at_first_unanswered_read(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(memory_runner, "_REPLAY_CACHE", tmp_path / "replays.jsonl")
+  calls = []
+
+  def batch(questions, _commit):
+    calls.append(list(questions))
+    # The reference answers everything except q12.
+    return (
+      [None if q == "q12" else {"selected": [f"notes/{q}.md"], "reason": ""}
+       for q in questions],
+      [{"provider": "claude", "usage_receipt": {"usage": {}}}],
+    )
+
+  monkeypatch.setattr(memory_runner, "deep_replay_batch", batch)
+  traces = [
+    {"read_id": str(index), "question": f"q{index}"} for index in range(25)
+  ]
+
+  replays = memory_runner._deep_replays("c", traces)
+
+  assert [len(questions) for questions in calls] == [10, 10]
+  assert [item["read_id"] for item in replays] == [str(i) for i in range(12)]
+  assert replays[0]["attempts"] and not replays[1]["attempts"]
+
+
+def test_killed_run_resumes_replays_from_cache_for_the_same_commit(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(memory_runner, "_REPLAY_CACHE", tmp_path / "replays.jsonl")
+  calls = []
+
+  def batch(questions, _commit):
+    calls.append(list(questions))
+    return [{"selected": [], "reason": ""} for _ in questions], [{"x": 1}]
+
+  monkeypatch.setattr(memory_runner, "deep_replay_batch", batch)
+  traces = [{"read_id": str(i), "question": f"q{i}"} for i in range(12)]
+
+  memory_runner._deep_replays("c1", traces[:10])
+  resumed = memory_runner._deep_replays("c1", traces)
+  fresh = memory_runner._deep_replays("c2", traces[:1])
+
+  assert calls == [[f"q{i}" for i in range(10)], ["q10", "q11"], ["q0"]]
+  assert [item["read_id"] for item in resumed] == [str(i) for i in range(12)]
+  assert resumed[0]["attempts"] == [] and resumed[10]["attempts"] == [{"x": 1}]
+  assert [item["read_id"] for item in fresh] == ["0"]
+
+
+def test_only_changed_or_led_maps_are_due_plus_one_in_rotation(
+  monkeypatch, tmp_path,
+):
+  state = tmp_path / "state"
+  staging = tmp_path / "staging"
+  (staging / "mocs").mkdir(parents=True)
+  (staging / "notes").mkdir()
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(
+    memory_runner, "_CONSOLIDATION_CURSOR", state / "cursor.json",
+  )
+  maps = ["a", "b", "c", "d"]
+  nodes = [{"id": m, "path": f"mocs/{m}.md", "type": "moc"} for m in maps]
+  for m in maps:
+    (staging / f"mocs/{m}.md").write_text(f"# {m}\n")
+    (staging / f"notes/{m}-fact.md").write_text("fact\n")
+    nodes.append({"id": f"{m}-fact", "path": f"notes/{m}-fact.md", "mocs": [m]})
+  (staging / "graph.json").write_text(json.dumps({"nodes": nodes}))
+
+  # First night: nothing has been fingerprinted, so every map is due.
+  assert memory_runner._consolidation_candidates(staging) == [
+    "mocs/a.md", "mocs/b.md", "mocs/c.md", "mocs/d.md",
+  ]
+  for m in maps:
+    memory_runner._record_consolidation_attempt(f"mocs/{m}.md")
+    memory_runner._record_consolidation_fingerprint(staging, f"mocs/{m}.md")
+
+  # Quiet night: only the one oldest map rotates in.
+  assert memory_runner._consolidation_candidates(staging) == ["mocs/a.md"]
+
+  # A saved fact edits b's note; a new follow-up names c's note.
+  (staging / "notes/b-fact.md").write_text("fact, corrected\n")
+  monkeypatch.setattr(
+    memory_runner, "_consolidation_leads",
+    lambda ids, since="": ["check c-fact"] if "c-fact" in ids else [],
+  )
+
+  assert memory_runner._consolidation_candidates(staging) == [
+    "mocs/b.md", "mocs/c.md", "mocs/a.md",
+  ]
+
+
+def test_a_maps_own_publication_followups_do_not_make_it_due_again(
+  monkeypatch, tmp_path,
+):
+  state = tmp_path / "state"
+  (state / "update-log").mkdir(parents=True)
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_CONSOLIDATION_CURSOR", state / "c.json")
+  memory_runner._record_consolidation_attempt("mocs/a.md")
+  from datetime import UTC, datetime
+  (state / "update-log" / "d.jsonl").write_text(json.dumps({
+    "timestamp": datetime.now(UTC).isoformat(),
+    "followups": ["Resolved: keep a-fact separate"],
+  }) + "\n")
+  assert memory_runner._consolidation_leads(
+    ["a-fact"], since=memory_runner._load_consolidation_cursor()["mocs/a.md"],
+  )
+
+  memory_runner._mark_consolidated_through_publication(["mocs/a.md"])
+
+  assert not memory_runner._consolidation_leads(
+    ["a-fact"], since=memory_runner._load_consolidation_cursor()["mocs/a.md"],
+  )

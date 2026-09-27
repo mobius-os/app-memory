@@ -10,6 +10,10 @@ from pathlib import Path
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 _SOURCE_ID = re.compile(r"^[0-9a-f]{32}$")
+# Recall routes on descriptions, so they must stay short. An over-long one is
+# writer-owned maintenance, never a publication gate: gating would block the
+# very run that is supposed to shorten an already-published description.
+MAX_DESCRIPTION_CHARS = 2_000
 
 
 def _frontmatter(text: str) -> dict:
@@ -182,6 +186,12 @@ def build(root: Path, *, usage: dict[str, int] | None = None) -> dict:
           "severity": "warning",
           "node": node_id,
         })
+    if len(description) > MAX_DESCRIPTION_CHARS:
+      problems.append({
+        "kind": "description_too_long",
+        "severity": "warning",
+        "node": node_id,
+      })
 
   ids = set(paths_by_id)
   edges = []

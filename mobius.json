@@ -7,7 +7,6 @@
   "license": "MIT",
   "homepage": "https://github.com/mobius-os/app-memory",
   "entry": "index.jsx",
-  "system_app": true,
   "system_prompt": "memory-core.md",
   "skills": [
     "memory.md"
@@ -56,6 +55,9 @@
     "memory.md",
     "memory_search.py",
     "memory_read.py",
+    "remember.py",
+    "memory_benchmark.py",
+    "service.py",
     "memory_text_provider.py",
     "memory_runner.py",
     "model_selection.py",
@@ -79,6 +81,7 @@
     "ui/NetworkGlyph.jsx",
     "ui/BackgroundAgentList.jsx",
     "ui/SupportingChats.jsx",
+    "ui/ActivityView.jsx",
     "ui/backgroundAgentOrder.js",
     "ui/ModelPicker.jsx",
     "seed-memory/index.md",
@@ -91,14 +94,87 @@
   ],
   "agent_activities": {
     "memory-search": {
-      "entry": "memory_search.py",
-      "arguments": 2,
+      "tool": "search",
       "running_label": "Searching"
     },
     "memory-read": {
-      "entry": "memory_read.py",
-      "arguments": 4,
+      "tool": "read",
       "running_label": "Reading"
+    },
+    "memory-capture": {
+      "tool": "remember",
+      "running_label": "Saving"
     }
-  }
+  },
+  "service": {
+    "entry": "service.py"
+  },
+  "tools": [
+    {
+      "name": "search",
+      "description": "Search Memory for durable context about the partner (preferences, constraints, people, goals, projects, prior decisions and their impact) that could change this work. Describe the context needed and why, anchored to the relevant people, projects, or apps. Returns a catalogue of relevant notes and a lookup_id; open notes with Memory's read tool. Takes up to a few minutes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Focused description of the facts or prior context needed, and why."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "read",
+      "description": "Continue a Memory lookup: page its catalogue (selection \"catalog\") or read full notes (selection \"all\" or a list of catalogue ids). Repeat with the returned cursor until complete.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "lookup_id": {
+            "type": "string"
+          },
+          "selection": {
+            "description": "\"catalog\", \"all\", or a list of catalogue ids.",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "description": "\"start\" (default) or the next cursor the previous page returned."
+          }
+        },
+        "required": [
+          "lookup_id",
+          "selection"
+        ]
+      }
+    },
+    {
+      "name": "remember",
+      "description": "Save one self-contained fact a future chat would want to know. Memory's nightly writer checks it against this chat before filing it.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "fact": {
+            "type": "string",
+            "description": "One fact that stands alone months from now: who and what, absolute dates, and the why when known."
+          }
+        },
+        "required": [
+          "fact"
+        ]
+      }
+    }
+  ]
 }
