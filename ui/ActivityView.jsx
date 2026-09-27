@@ -114,7 +114,7 @@ export function ActivityView({ store, graph, colorForNode, onOpenNode }) {
           )}
           {published && (
             <div className="mg-act-stats">
-              <Stat value={run.capture_count ?? 0} label="saved facts filed" />
+              <Stat value={run.capture_count ?? 0} label="saved facts read" />
               <Stat value={run.read_audit_count ?? 0} label="lookups checked" />
               <Stat value={retired.length} label="notes retired" />
             </div>

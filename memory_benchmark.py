@@ -176,14 +176,22 @@ def _summary(results: list[dict]) -> dict:
   selected = sum(r["selected"] for r in results)
   return {
     "cases": len(results),
-    "mean_recall": round(statistics.mean(r["recall"] for r in scored), 3),
+    "mean_recall": (
+      round(statistics.mean(r["recall"] for r in scored), 3) if scored else None
+    ),
     "full_hits": sum(1 for r in scored if r["found"] == r["expected"]),
     "noise": round(
       sum(len(r["extra"]) for r in results) / selected, 3,
     ) if selected else 0.0,
-    "median_tokens": statistics.median(r["tokens"] for r in results),
-    "median_seconds": statistics.median(r["seconds"] for r in results),
-    "median_model_calls": statistics.median(r["model_calls"] for r in results),
+    "median_tokens": (
+      statistics.median(r["tokens"] for r in results) if results else None
+    ),
+    "median_seconds": (
+      statistics.median(r["seconds"] for r in results) if results else None
+    ),
+    "median_model_calls": (
+      statistics.median(r["model_calls"] for r in results) if results else None
+    ),
     "failed": sum(1 for r in results if r["status"] == "failed"),
   }
 

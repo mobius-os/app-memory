@@ -7,6 +7,7 @@
   "license": "MIT",
   "homepage": "https://github.com/mobius-os/app-memory",
   "entry": "index.jsx",
+  "system_app": true,
   "system_prompt": "memory-core.md",
   "skills": [
     "memory.md"

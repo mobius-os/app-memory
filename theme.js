@@ -112,7 +112,7 @@ export const CSS = `
   gap: 8px;
   padding: 0 11px 0 13px;
   border: 0;
-  background: color-mix(in srgb, var(--surface-2) 56%, transparent);
+  background: color-mix(in srgb, var(--surface2) 56%, transparent);
   color: var(--text);
   font: 700 11.5px var(--font);
   text-align: left;
@@ -147,16 +147,16 @@ export const CSS = `
 .mg-memory-list th.mg-col-size { width: 82px; }
 
 @media (hover: hover) {
-  .mg-row:hover { background: var(--surface-2); }
+  .mg-row:hover { background: var(--surface2); }
   .mg-th:hover { color: var(--text); }
-  .mg-legend-row:hover { background: var(--surface-2); }
+  .mg-legend-row:hover { background: var(--surface2); }
   .mg-tgl:hover { color: var(--text); }
   .mg-settings-btn:hover { color: var(--text); }
   .mg-tab:hover { color: var(--text); }
   .mg-node-back:not(:disabled):hover { background: var(--border); }
   .mg-close:hover { background: var(--border); color: var(--text); }
   .mg-discuss:hover { filter: brightness(0.94); }
-  .mg-graph-control:not(:disabled):hover { background: var(--surface-2); }
+  .mg-graph-control:not(:disabled):hover { background: var(--surface2); }
 }
 .mg-node-back svg { width: 18px; height: 18px; }
 .mg-node-back:disabled { color: var(--muted); opacity: .4; cursor: default !important; }
@@ -184,7 +184,7 @@ export const CSS = `
 @keyframes mg-pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
 .mg-skel {
   height: 13px; border-radius: 5px;
-  background: linear-gradient(90deg, var(--surface-2), var(--border), var(--surface-2));
+  background: linear-gradient(90deg, var(--surface2), var(--border), var(--surface2));
   animation: mg-skel-pulse 1.4s ease-in-out infinite;
 }
 
@@ -231,7 +231,7 @@ export const CSS = `
   padding: 9px 14px;
   border: 1px solid var(--border);
   border-radius: 9px;
-  background: var(--surface-2);
+  background: var(--surface2);
   color: var(--text);
   font: 650 13px var(--font);
   cursor: pointer;
@@ -304,7 +304,7 @@ export const CSS = `
   flex: none;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-2) 78%, transparent);
+  background: color-mix(in srgb, var(--surface2) 78%, transparent);
   color: var(--muted);
   font: 300 25px/1 var(--font);
   cursor: pointer;
@@ -323,7 +323,7 @@ export const CSS = `
   gap: 7px;
   padding: 18px 14px;
   border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+  background: color-mix(in srgb, var(--surface2) 45%, transparent);
 }
 .mg-settings-nav-item {
   width: 100%;
@@ -638,7 +638,7 @@ export const CSS = `
   padding: 0 13px;
   border: 1px solid var(--border);
   border-radius: 9px;
-  background: var(--surface-2);
+  background: var(--surface2);
   color: var(--text);
   font: 650 12px var(--font);
   cursor: pointer;
@@ -675,7 +675,7 @@ export const CSS = `
 .mg-settings-save:disabled { opacity: .5; cursor: default; box-shadow: none; }
 @media (hover:hover) {
   .mg-settings-close:hover,
-  .mg-settings-nav-item:not(.is-active):hover { color: var(--text); background: var(--surface-2); }
+  .mg-settings-nav-item:not(.is-active):hover { color: var(--text); background: var(--surface2); }
   .mg-settings-save:not(:disabled):hover { filter: brightness(1.06); }
 }
 .mobius-agent-priority-list { display:flex; flex-direction:column; gap:6px; position:relative; }
@@ -715,7 +715,7 @@ export const CSS = `
   overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
 }
 @media (hover:hover) and (pointer:fine) {
-  .mobius-agent-priority-handle:not(:disabled):hover { color:var(--text); background:var(--surface-2); }
+  .mobius-agent-priority-handle:not(:disabled):hover { color:var(--text); background:var(--surface2); }
 }
 @media (prefers-reduced-motion:reduce) { .mobius-agent-priority-row { transition:none; } }
 .mobius-model-trigger {
@@ -937,8 +937,8 @@ export const CSS = `
 .mg-md a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim, rgba(167,139,250,0.4)); }
 .mg-md a:hover { border-bottom-color: var(--accent); }
 .mg-md strong { color: var(--text); font-weight: 700; }
-.mg-md code { background: var(--surface-2); border-radius: 5px; padding: 1px 5px; font-family: var(--mono); font-size: 0.85em; border: 1px solid var(--border-light, var(--border)); }
-.mg-md pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 13px; overflow-x: auto; margin: 11px 0; }
+.mg-md code { background: var(--surface2); border-radius: 5px; padding: 1px 5px; font-family: var(--mono); font-size: 0.85em; border: 1px solid var(--border-light, var(--border)); }
+.mg-md pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; padding: 13px; overflow-x: auto; margin: 11px 0; }
 .mg-md pre code { background: none; padding: 0; border: none; }
 .mg-md blockquote {
   margin: 11px 0; padding: 10px 13px;
@@ -949,7 +949,7 @@ export const CSS = `
 }
 .mg-md table { border-collapse: collapse; margin: 11px 0; font-size: 13px; width: 100%; }
 .mg-md th, .mg-md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
-.mg-md th { background: var(--surface-2); font-weight: 600; }
+.mg-md th { background: var(--surface2); font-weight: 600; }
 .mg-md img { max-width: 100%; border-radius: 8px; }
 .mg-md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 `;

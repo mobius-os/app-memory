@@ -65,8 +65,7 @@ Phrase the lookup around the single decision or risk that recalled context
 could change. When earlier experience matters, retrieve its user impact, risks,
 preferences, constraints, goals, or habits, then verify what changed through the
 owning source. Then call Memory's `search` tool (`memory_search`) with that
-description. It walks the graph from its root and returns the relevant
-candidates. If the result says discovery is incomplete, treat it as partial
+description. It returns the relevant candidates. If the result says discovery is incomplete, treat it as partial
 rather than exhaustive.
 
 A search can take a few minutes, and the tool waits for its result. Start it

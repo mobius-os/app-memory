@@ -174,7 +174,9 @@ test('manifest activates Memory only through a system prompt contribution', () =
   const manifest = JSON.parse(readFileSync(new URL('../mobius.json', import.meta.url), 'utf8'))
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(pkg.version, manifest.version)
-  assert.equal('system_app' in manifest, false)
+  // Ignored since the platform retired system apps (mobius#1460), but still
+  // required by older platforms before they accept a system_prompt fragment.
+  assert.equal(manifest.system_app, true)
   assert.equal(manifest.system_prompt, 'memory-core.md')
   assert.deepEqual(manifest.skills, ['memory.md'])
   assert.equal('extensions' in manifest, false)

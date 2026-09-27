@@ -78,6 +78,8 @@ def dispatch(request: dict) -> dict:
   # The recall cache distinguishes physical runs by this identity.
   if isinstance(call.get("run_id"), str):
     os.environ["MOBIUS_RUN_TOKEN"] = call["run_id"]
+  else:
+    os.environ.pop("MOBIUS_RUN_TOKEN", None)
   return handler(arguments, chat_id)
 
 
