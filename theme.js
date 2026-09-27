@@ -364,9 +364,6 @@ export const CSS = `
   font-weight: 720;
   letter-spacing: .01em;
 }
-.mg-reader-toggle { width: fit-content; }
-.mg-reader-option { white-space: nowrap; padding-inline: 14px !important; }
-.mg-reader-option:hover { color: var(--text) !important; }
 .mg-act {
   position: absolute;
   inset: 0;
@@ -540,13 +537,6 @@ export const CSS = `
 }
 @media (prefers-reduced-motion: reduce) {
   .mg-act-bar span { transition: none; }
-}
-.mg-reader-note {
-  margin: 8px 0 0 2px;
-  max-width: 52ch;
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.45;
 }
 .mg-section-intro {
   display: grid;
