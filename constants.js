@@ -49,7 +49,7 @@ export const S = {
   headerRight: { display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 },
   settingsBtn: {
     minHeight: 44, border: '1px solid var(--border)', borderRadius: 8,
-    background: 'var(--surface2)', color: 'var(--muted)', cursor: 'pointer',
+    background: 'var(--surface-2)', color: 'var(--muted)', cursor: 'pointer',
     fontFamily: 'var(--font)', fontSize: 12.5, fontWeight: 650,
     padding: '0 11px', transition: 'color 0.15s, background 0.15s',
   },
@@ -59,7 +59,7 @@ export const S = {
   },
   settingsPanel: {
     display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap',
-    padding: '10px 14px', background: 'var(--surface2)',
+    padding: '10px 14px', background: 'var(--surface-2)',
     borderBottom: '1px solid var(--border)', flexShrink: 0,
     position: 'relative', zIndex: 4,
   },
@@ -112,7 +112,7 @@ export const S = {
   },
 
   toggle: {
-    display: 'flex', height: 44, background: 'var(--surface2)', borderRadius: 9,
+    display: 'flex', height: 44, background: 'var(--surface-2)', borderRadius: 9,
     boxShadow: 'inset 0 0 0 1px var(--border)', gap: 2,
   },
   toggleBtn: {
@@ -178,7 +178,7 @@ export const S = {
   },
   legendSwatch: {
     width: 11, height: 11, borderRadius: '50%', flexShrink: 0,
-    boxShadow: '0 0 0 3px var(--surface2)',
+    boxShadow: '0 0 0 3px var(--surface-2)',
   },
   legendLabel: {
     fontSize: 12, color: 'var(--text)', whiteSpace: 'nowrap',
@@ -224,7 +224,7 @@ export const S = {
   },
   typeTag: {
     fontSize: 10.5, fontWeight: 600, padding: '2px 8px', borderRadius: 999,
-    background: 'var(--surface2)', color: 'var(--muted)', letterSpacing: 0,
+    background: 'var(--surface-2)', color: 'var(--muted)', letterSpacing: 0,
     border: '1px solid var(--border)',
   },
   typeMoc: {
@@ -250,7 +250,7 @@ export const S = {
   panelTitle: { fontSize: 18, fontWeight: 700, lineHeight: 1.18, letterSpacing: 0 },
   nodeBackBtn: {
     width: 44, height: 44, border: 'none', borderRadius: 8,
-    background: 'var(--surface2)', color: 'var(--text)', cursor: 'pointer',
+    background: 'var(--surface-2)', color: 'var(--text)', cursor: 'pointer',
     flexShrink: 0, display: 'grid', placeItems: 'center', padding: 0,
     transition: 'background 0.15s, color 0.15s, opacity 0.15s',
   },
@@ -260,7 +260,7 @@ export const S = {
     fontVariantNumeric: 'tabular-nums',
   },
   closeBtn: {
-    border: 'none', background: 'var(--surface2)', color: 'var(--muted)',
+    border: 'none', background: 'var(--surface-2)', color: 'var(--muted)',
     width: 44, height: 44, borderRadius: 8, fontSize: 20, lineHeight: 1, cursor: 'pointer',
     flexShrink: 0, fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
     justifyContent: 'center', transition: 'background 0.15s, color 0.15s',
@@ -284,7 +284,7 @@ export const S = {
   },
   depthToggle: {
     display: 'flex', alignItems: 'center', gap: 2, height: 44, borderRadius: 8,
-    background: 'var(--surface2)', boxShadow: 'inset 0 0 0 1px var(--border)', flexShrink: 0,
+    background: 'var(--surface-2)', boxShadow: 'inset 0 0 0 1px var(--border)', flexShrink: 0,
   },
   depthBtn: {
     minWidth: 44, height: 44, border: 'none', borderRadius: 6, background: 'transparent',
@@ -296,7 +296,7 @@ export const S = {
   },
   tabToggle: {
     display: 'flex', gap: 2, height: 44, borderRadius: 8,
-    background: 'var(--surface2)', boxShadow: 'inset 0 0 0 1px var(--border)', flexShrink: 0,
+    background: 'var(--surface-2)', boxShadow: 'inset 0 0 0 1px var(--border)', flexShrink: 0,
   },
   tabBtn: {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -324,7 +324,7 @@ export const S = {
     display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
     margin: '0 0 10px', padding: '3px 10px', borderRadius: 999,
     fontSize: 11.5, fontWeight: 600, letterSpacing: 0.2,
-    color: 'var(--muted)', background: 'var(--surface2)',
+    color: 'var(--muted)', background: 'var(--surface-2)',
     border: '1px solid var(--border)',
   },
   mergeDot: {
