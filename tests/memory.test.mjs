@@ -245,7 +245,9 @@ test('viewer pins graph and notes to the validated ready commit', () => {
   assert.match(source, /store\.subscribe\('graph\.json'/)
   assert.match(source, /revision/)
   assert.doesNotMatch(source, /generations\/\$\{/)
-  assert.match(source, /status === 'initializing'/)
+  // No published pointer is an empty Memory, never a blocking wait.
+  assert.doesNotMatch(source, /initializing/)
+  assert.match(source, /if \(!present \|\| body == null\) \{[\s\S]{0,200}?setStatus\('empty'\)/)
 })
 
 test('note and local-graph tabs use roving focus and a labelled tab panel', () => {

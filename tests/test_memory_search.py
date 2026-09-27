@@ -649,7 +649,7 @@ class MemorySearchContractTests(unittest.TestCase):
           "activity_id": search.SEARCH_ACTIVITY_ID,
           "status": "failed",
           "outcome": search.RESULT_FAILED,
-          "label": "Memory lookup failed",
+          "label": "Memory isn't ready yet",
           "phase": "catalog",
           "lookup_id": mock.ANY,
           "reason": search.RESULT_REASON_NOT_READY,
