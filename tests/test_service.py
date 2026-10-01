@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import sys
 from pathlib import Path
 
@@ -78,6 +79,32 @@ def test_read_accepts_a_list_selection_and_defaults_the_cursor(recorded):
 def test_remember_saves_one_fact_for_this_chat(recorded):
   service.dispatch(_request("/tools/remember", {"fact": "Prefers tea."}))
   assert recorded == [("remember", ["remember.py", "Prefers tea.", "chat-1"])]
+
+
+@pytest.mark.parametrize("path, module_name, function_name, arguments", [
+  ("/tools/search", "memory_search", "run", {"query": "prefs"}),
+  ("/tools/read", "memory_read", "run", {"lookup_id": "abc", "selection": "all"}),
+  ("/tools/remember", "remember", "main", {"fact": "Prefers tea."}),
+])
+def test_nonzero_tool_exit_preserves_failure_text_and_activity_receipt(
+  monkeypatch, path, module_name, function_name, arguments,
+):
+  module = importlib.import_module(module_name)
+  output = 'Could not complete.\nMOBIUS_APP_ACTIVITY_V1:{"status":"failed","detail":"disk unavailable"}\n'
+
+  def failed(_args):
+    print(output, end="")
+    return 1
+
+  monkeypatch.setattr(module, function_name, failed)
+  response = service.dispatch(_request(path, arguments))
+  assert response == {"status": 500, "body": output}
+
+
+def test_nonzero_tool_exit_without_stdout_is_still_an_error():
+  assert service._text_tool(lambda _args: 2, []) == {
+    "status": 500, "body": {"detail": "Memory tool failed without output."},
+  }
 
 
 def test_tools_need_the_platforms_chat_identity(recorded):
