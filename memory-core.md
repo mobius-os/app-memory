@@ -1,7 +1,7 @@
 # Memory
 
 Memory is an Obsidian-style graph of durable facts. Its graph is never injected
-into a chat automatically. Recent chat Digests are separate from Memory and do
+into a chat automatically. Recent chat summaries are separate from Memory and do
 not count as a Memory lookup.
 
 Use Memory decisively whenever durable context could materially improve the
