@@ -163,6 +163,7 @@
     },
     {
       "name": "remember",
+      "result_independent": true,
       "description": "Save one self-contained fact a future chat would want to know. Memory's nightly writer checks it against this chat before filing it.",
       "input_schema": {
         "type": "object",
