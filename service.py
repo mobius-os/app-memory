@@ -21,8 +21,11 @@ from collections.abc import Callable
 def _text_tool(run: Callable[[list[str]], int], args: list[str]) -> dict:
   output = io.StringIO()
   with contextlib.redirect_stdout(output):
-    run(args)
-  return {"status": 200, "body": output.getvalue()}
+    exit_code = run(args)
+  body = output.getvalue()
+  if exit_code != 0:
+    return {"status": 500, "body": body or {"detail": "Memory tool failed without output."}}
+  return {"status": 200, "body": body}
 
 
 def _search(arguments: dict, chat_id: str) -> dict:
