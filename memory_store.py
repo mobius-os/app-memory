@@ -815,8 +815,8 @@ def note_usage_evidence() -> dict[str, dict]:
 
   Built fresh from the append-only recall-audit log, so it needs no counters
   of its own. A lookup `needed` a note when a judged verdict kept or missed it
-  (writer review, or full live/deep agreement); an unreviewed replay counts
-  the deep reference's choice. `overreach` counts selections judged unneeded.
+  (writer review, or full live/deep agreement). Unreviewed replay readings
+  are provisional and cannot justify retaining or retiring a note.
   """
   created = _note_creation_times()
   usage: dict[str, dict] = {}
@@ -826,31 +826,33 @@ def note_usage_evidence() -> dict[str, dict]:
       "needed": 0, "overreach": 0, "last_needed_at": None,
     })
 
-  lookups: list[str] = []
+  latest: dict[str, dict] = {}
   for log in sorted((STATE / "recall-audit").glob("*.jsonl")):
-    for line in log.read_text(encoding="utf-8").splitlines():
+    for index, line in enumerate(log.read_text(encoding="utf-8").splitlines()):
       try:
         record = json.loads(line)
       except ValueError:
         continue
       if not isinstance(record, dict) or not isinstance(record.get("at"), str):
         continue
-      at = record["at"]
-      lookups.append(at)
-      live = set(record.get("live_selected") or ())
-      over = set(record.get("overselected_nodes") or ())
-      source = record.get("verdict_source", "writer")
-      if source == "deep_replay_unreviewed":
-        needed = set(record.get("deep_selected") or ())
-      else:
-        needed = (live - over) | set(record.get("missed_nodes") or ())
-      for path in needed:
-        item = entry(path)
-        item["needed"] += 1
-        if (item["last_needed_at"] or "") < at:
-          item["last_needed_at"] = at
-      for path in over:
-        entry(path)["overreach"] += 1
+      read_id = record.get("read_id")
+      latest[read_id if isinstance(read_id, str) else f"{log.name}:{index}"] = record
+  lookups: list[str] = []
+  for record in latest.values():
+    if record.get("verdict_source") == "deep_replay_unreviewed":
+      continue
+    at = record["at"]
+    lookups.append(at)
+    live = set(record.get("live_selected") or ())
+    over = set(record.get("overselected_nodes") or ())
+    needed = (live - over) | set(record.get("missed_nodes") or ())
+    for path in needed:
+      item = entry(path)
+      item["needed"] += 1
+      if (item["last_needed_at"] or "") < at:
+        item["last_needed_at"] = at
+    for path in over:
+      entry(path)["overreach"] += 1
   lookups.sort()
   for path, stamp in created.items():
     item = entry(path)

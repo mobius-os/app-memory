@@ -110,6 +110,7 @@ _RECENT_AUDIT_KEYS = (
   "schema", "run_id", "read_id", "at", "question_sha256", "outcome",
   "overreach", "miss_class", "reason", "host_selection_override",
   "usefulness", "hindsight_reason", "deep_recall", "deep_noise",
+  "verdict_source",
 )
 _RUN_TIMEOUT_SECONDS = int(os.environ.get("MEMORY_TIMEOUT", "3600"))
 # Lookups replayed per reference call. The catalogue dominates each call, so
@@ -553,6 +554,9 @@ def _migrate_recall_stats() -> bool:
   if not isinstance(recent, list):
     return False
   compact = _compact_recent_audits(recent)
+  if "reads_judged" not in stats and any((STATE / "recall-audit").glob("*.jsonl")):
+    _write_json_atomic(_RECALL_STATS, _recall_stats_from_log(stats))
+    return True
   if compact == recent:
     return False
   _write_json_atomic(_RECALL_STATS, {**stats, "recent": compact})
@@ -625,6 +629,78 @@ def _pending_read_traces() -> list[dict]:
           logical_positions[logical_key] = len(records)
         records.append(record)
   return sorted(records, key=lambda item: (str(item["at"]), str(item["read_id"])))
+
+
+def _unreviewed_read_audits() -> list[dict]:
+  """Recover cursor-passed disagreements without buying another deep replay.
+
+  The append-only audit log owns the replay selection; the original read log
+  owns the question and live traversal. A later writer verdict supersedes an
+  unreviewed row with the same read id, including rows from older releases.
+  """
+  latest: dict[str, dict] = {}
+  for path in sorted((STATE / "recall-audit").glob("*.jsonl")):
+    for line in path.read_text(encoding="utf-8").splitlines():
+      try:
+        row = json.loads(line)
+      except ValueError:
+        continue
+      if isinstance(row, dict) and isinstance(row.get("read_id"), str):
+        latest[row["read_id"]] = row
+  pending = {
+    read_id: row for read_id, row in latest.items()
+    if row.get("verdict_source") == "deep_replay_unreviewed"
+  }
+  if not pending:
+    return []
+  cached_revisions: dict[str, str] = {}
+  try:
+    cache_lines = _REPLAY_CACHE.read_text(encoding="utf-8").splitlines()
+  except OSError:
+    cache_lines = []
+  for line in cache_lines:
+    try:
+      replay = json.loads(line)
+    except ValueError:
+      continue
+    if (isinstance(replay, dict) and replay.get("read_id") in pending
+        and isinstance(replay.get("selected"), list)
+        and all(isinstance(path, str) for path in replay["selected"])
+        and isinstance(pending[replay["read_id"]].get("deep_selected"), list)
+        and all(isinstance(path, str) for path in pending[replay["read_id"]]["deep_selected"])
+        and set(replay["selected"]) == set(pending[replay["read_id"]]["deep_selected"])
+        and isinstance(replay.get("commit"), str)):
+      cached_revisions[replay["read_id"]] = replay["commit"]
+  traces: dict[str, dict] = {}
+  for path in sorted((STATE / "read-log").glob("*.jsonl")):
+    for line in path.read_text(encoding="utf-8").splitlines():
+      try:
+        trace = json.loads(line)
+      except ValueError:
+        continue
+      if isinstance(trace, dict) and trace.get("read_id") in pending:
+        traces[trace["read_id"]] = trace
+  result = []
+  for read_id, row in pending.items():
+    trace = traces.get(read_id)
+    if not trace or not isinstance(row.get("deep_selected"), list):
+      continue
+    # The live trace commit is NOT necessarily the nightly deep replay commit.
+    # An older source-lifecycle publication can change the graph first. Never
+    # present a live body as the historical deep-selected body by inference.
+    revision = str(row.get("deep_revision") or cached_revisions.get(read_id) or "")
+    replay = {"read_id": read_id, "selected": row["deep_selected"],
+              "reason": row.get("deep_reason") or "prior deep replay"}
+    audits = _audit_reads(revision, [trace], [replay])
+    if audits:
+      deep = audits[0]["deep"]
+      audits[0]["deep"]["body_revision_status"] = (
+        "verified"
+        if revision and len(deep["missed_nodes"]) == len(deep["missed"])
+        else "historical_revision_unavailable"
+      )
+      result.extend(audits)
+  return result
 
 
 def _audit_prompt_view(audit: dict) -> dict:
@@ -838,6 +914,7 @@ def _audit_reads(
       "deep": {
         "selected": deep,
         "reason": replay["reason"],
+        "revision": commit or None,
         "missed": missed,
         "missed_nodes": bodies(missed, commit),
         "overreach": overreach,
@@ -1788,6 +1865,7 @@ def _proposal_envelope(
   *,
   consolidation: dict | None = None,
   extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  current_recall_guidance: dict | None = None,
 ) -> tuple[str, list[dict]]:
   """Encode one focused work item without a graph-wide character envelope."""
   catalog = _graph_catalog(staging)
@@ -1796,7 +1874,10 @@ def _proposal_envelope(
   ]
   payload = {
     "maintenance_flags": _maintenance_flags(staging),
-    "current_recall_guidance": load_recall_guidance(),
+    "current_recall_guidance": (
+      current_recall_guidance if current_recall_guidance is not None
+      else load_recall_guidance()
+    ),
     "read_audits": [_audit_prompt_view(audit) for audit in audits],
     "existing_graph": _prompt_graph_index(catalog),
     "existing_note_contents": _work_item_note_contents(
@@ -1850,11 +1931,13 @@ def _proposal_data(
   *,
   consolidation: dict | None = None,
   extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  current_recall_guidance: dict | None = None,
 ) -> str:
   """Encode one focused, structurally valid JSON work item."""
   return _proposal_envelope(
     staging, chats, read_audits,
     consolidation=consolidation, extra_note_paths=extra_note_paths,
+    current_recall_guidance=current_recall_guidance,
   )[0]
 
 
@@ -1889,9 +1972,8 @@ def _combined_proposal(proposals: list[dict]) -> dict:
     if isinstance(self_review, dict):
       self_reviews.append(self_review)
     batch_guidance = proposal.get("recall_guidance")
-    if isinstance(batch_guidance, dict):
-      # Audit batches are oldest-first, so the last accepted batch carries the
-      # freshest bounded coaching decision. Chat/maintenance batches normalize
+    if isinstance(batch_guidance, dict) and batch_guidance.get("action") in {"replace", "clear"}:
+      # The last accepted intentional change wins. Chat/maintenance batches normalize
       # this field to None and cannot overwrite it.
       recall_guidance = batch_guidance
   return {
@@ -1921,6 +2003,7 @@ def _proposal_prompt(
   *,
   consolidation: dict | None = None,
   extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  current_recall_guidance: dict | None = None,
 ) -> str:
   try:
     rules = SKILL_PATH.read_text(encoding="utf-8")
@@ -1929,6 +2012,7 @@ def _proposal_prompt(
   payload = _proposal_data(
     staging, chats, read_audits,
     consolidation=consolidation, extra_note_paths=extra_note_paths,
+    current_recall_guidance=current_recall_guidance,
   )
   return f"""You are Memory's confined consolidation analyst.
 
@@ -2003,18 +2087,26 @@ Complete all four nightly duties in one coherent pass:
    claimed success stays provisional under the testimony rule below. Cite the
    chat's source handle.
 2. Review EVERY `read_audits` entry. Each is a live lookup where tonight's
-   deep replay disagreed with what live recall selected. `live` holds what the
+   deep replay disagreed with what live recall selected (tonight or an earlier
+   night). `live` holds what the
    daytime reader opened and selected, with the complete selected bodies;
    `deep` holds the reference selection from a reader that saw every note
    title, with `missed` (reference-only notes, bodies in `missed_nodes`) and
-   `overreach` (live-only notes). The reference is evidence, not truth: judge
+   `overreach` (live-only notes). An older audit may say
+   `body_revision_status=historical_revision_unavailable`; in that case
+   `missed_nodes` deliberately omits unverified historical bodies. Do not
+   infer their old content from live bodies or claim it was inspected.
+   If that missing body prevents a sound verdict, return `outcome=defer` with
+   empty missed/overselected arrays, `overreach=false`, and a short reason.
+   The read stays provisional for a later review; do not fabricate a verdict.
+   The reference is evidence, not truth: judge
    each disagreement yourself against the request. When a genuinely useful
    note was missed, repair the shortest useful route in the SAME proposal: add
    a better described cross-link, or move the important distinction into a
    supplied note body so the live reader can choose the branch next time.
    Do not merely copy the detailed child into every parent. When a missed note
    is wrong, stale, or redundant, fix or retire it instead.
-   Classify each read precisely: `no_memory` only when no durable
+   Classify each reviewable read precisely: `no_memory` only when no durable
    query-relevant memory fact existed; `miss` when such a fact existed but the
    live selected evidence was insufficient; otherwise `ok`. Independently set
    `overreach` true when any live-selected node was materially irrelevant or an
@@ -2066,7 +2158,7 @@ into its own later consolidation of the same neighborhood; they are not
 permission to weaken validation or publish uncertain facts.
 
 Return ONLY one JSON object with this shape:
-{{"summary":"...","self_review":{{"hardest_decision":"...","possibly_missed":"none | ...","prompt_change":"none | ...","next_experiment":"none | reversible change + expected evidence"}},"read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short graph-retrieval reason"}}],"recall_guidance":{{"action":"keep | replace | clear","instruction":"empty unless replacing | one concise general selector lesson","reason":"short evidence-based reason","evidence_read_ids":[]}},"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"links":[{{"from":"index.md | mocs/topic.md","to":"notes/slug.md | mocs/topic.md","cue":"why this target is useful"}}],"deletes":[]}}
+{{"summary":"...","self_review":{{"hardest_decision":"...","possibly_missed":"none | ...","prompt_change":"none | ...","next_experiment":"none | reversible change + expected evidence"}},"read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory | defer","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short graph-retrieval reason"}}],"recall_guidance":{{"action":"keep | replace | clear","instruction":"empty unless replacing | one concise general selector lesson","reason":"short evidence-based reason","evidence_read_ids":[]}},"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"links":[{{"from":"index.md | mocs/topic.md","to":"notes/slug.md | mocs/topic.md","cue":"why this target is useful"}}],"deletes":[]}}
 Return exactly one verdict for every supplied read audit and no invented ids.
 Update paths may only be notes/<slug>.md, plus `consolidation.moc.path` when DATA carries a
 consolidation item. Link sources may be index.md or an existing
@@ -2122,6 +2214,7 @@ def _proposal(
   deadline: float | None = None,
   *,
   consolidation: dict | None = None,
+  current_recall_guidance: dict | None = None,
 ) -> ProposalOutcome:
   catalog = _graph_catalog(staging)
   existing_note_paths = {
@@ -2141,6 +2234,7 @@ def _proposal(
     return _proposal_prompt(
       staging, chats, read_audits,
       consolidation=consolidation, extra_note_paths=extra_note_paths,
+      current_recall_guidance=current_recall_guidance,
     ), editable
 
   supplied_note_paths: set[str] = set()
@@ -2338,7 +2432,7 @@ def _normalize_audit_verdicts(
       not isinstance(read_id, str)
       or read_id not in expected
       or read_id in seen
-      or outcome not in {"ok", "miss", "no_memory"}
+      or outcome not in {"ok", "miss", "no_memory", "defer"}
       or not isinstance(missed_nodes, list)
       or any(not isinstance(path, str) for path in missed_nodes)
       or not isinstance(overreach, bool)
@@ -2348,6 +2442,7 @@ def _normalize_audit_verdicts(
       or (outcome != "miss" and bool(missed_nodes))
       or (overreach and not overselected_nodes)
       or (not overreach and bool(overselected_nodes))
+      or (outcome == "defer" and (overreach or missed_nodes or overselected_nodes or not str(reason).strip()))
       or not isinstance(reason, str)
       or usefulness not in {"helpful", "mixed", "unused", "harmful", "unknown"}
       or not isinstance(hindsight_reason, str)
@@ -2375,7 +2470,9 @@ def _normalize_audit_verdicts(
     **proposal,
     "read_audits": normalized,
     "recall_guidance": _normalize_recall_guidance(
-      proposal.get("recall_guidance"), expected,
+      proposal.get("recall_guidance"), {
+        item["read_id"] for item in normalized if item["outcome"] != "defer"
+      },
     ),
   }
 
@@ -3164,6 +3261,71 @@ def _deep_agreement(audit: dict) -> dict:
   }
 
 
+def _recall_stats_from_log(prior: dict, graph: dict | None = None) -> dict:
+  # A later writer review is a new evidence row, not a second lookup. Rebuild
+  # the hot counters from the latest row per id so old provisional misses are
+  # removed from judged rates even across restarts and release upgrades.
+  latest: dict[str, dict] = {}
+  for path in sorted((STATE / "recall-audit").glob("*.jsonl")):
+    for line in path.read_text(encoding="utf-8").splitlines():
+      try:
+        row = json.loads(line)
+      except ValueError:
+        continue
+      if isinstance(row, dict) and isinstance(row.get("read_id"), str):
+        latest[row["read_id"]] = row
+  rows = list(latest.values())
+  judged = [row for row in rows if row.get("verdict_source") != "deep_replay_unreviewed"]
+  provisional = len(rows) - len(judged)
+  total = len(judged)
+  def count(key: str, value: object) -> int:
+    return sum(row.get(key) == value for row in judged)
+  misses = count("outcome", "miss")
+  overreaches = count("overreach", True)
+  no_memory = count("outcome", "no_memory")
+  route_misses = count("miss_class", "route")
+  continuation_misses = count("miss_class", "continuation")
+  selection_misses = count("miss_class", "selection")
+  overrides = count("host_selection_override", True)
+  usefulness_counts = {
+    key: count("usefulness", key)
+    for key in ("helpful", "mixed", "unused", "harmful", "unknown")
+  }
+  stats = {
+    "schema": 4,
+    "updated_at": datetime.now(UTC).isoformat(),
+    "last_audited_at": max(
+      [str(prior.get("last_audited_at") or ""),
+       *(str(row.get("at") or "") for row in rows)],
+      default="",
+    ),
+    "reads_audited": len(rows),
+    "reads_judged": total,
+    "provisional_reads": provisional,
+    "usefulness_counts": usefulness_counts,
+    "hindsight_assessed": sum(usefulness_counts[key] for key in ("helpful", "mixed", "unused", "harmful")),
+    "misses": misses,
+    "miss_rate": misses / total if total else 0.0,
+    "overreaches": overreaches,
+    "overreach_rate": overreaches / total if total else 0.0,
+    "no_memory": no_memory,
+    "no_memory_rate": no_memory / total if total else 0.0,
+    "route_misses": route_misses,
+    "route_miss_rate": route_misses / total if total else 0.0,
+    "continuation_misses": continuation_misses,
+    "continuation_miss_rate": continuation_misses / total if total else 0.0,
+    "selection_misses": selection_misses,
+    "selection_miss_rate": selection_misses / total if total else 0.0,
+    "host_selection_overrides": overrides,
+    "model_to_host_selection_override_rate": overrides / total if total else 0.0,
+    "graph_nodes": len(graph.get("nodes") or []) if graph is not None else prior.get("graph_nodes", 0),
+    "graph_edges": len(graph.get("edges") or []) if graph is not None else prior.get("graph_edges", 0),
+    "retrieval": "progressive_rooted_navigation",
+    "recent": _compact_recent_audits(sorted(rows, key=lambda row: str(row.get("at") or ""))),
+  }
+  return stats
+
+
 def _record_recall_audits(
   run_id: str,
   read_audits: list[dict],
@@ -3178,31 +3340,14 @@ def _record_recall_audits(
     if isinstance(item, dict) and isinstance(item.get("read_id"), str)
   }
   prior = _recall_stats()
-  recent = prior.get("recent") if isinstance(prior.get("recent"), list) else []
   records = []
-  missed_count = 0
-  overreach_count = 0
-  no_memory_count = 0
-  route_miss_count = 0
-  continuation_miss_count = 0
-  selection_miss_count = 0
-  override_count = 0
-  prior_usefulness = prior.get("usefulness_counts")
-  if not isinstance(prior_usefulness, dict):
-    prior_usefulness = {}
-  usefulness_counts = {
-    key: int(prior_usefulness.get(key, 0) or 0)
-    for key in ("helpful", "mixed", "unused", "harmful", "unknown")
-  }
   for audit in read_audits:
     read_id = str(audit["read_id"])
     verdict = verdicts[read_id]
     outcome = verdict.get("outcome")
     missed = outcome == "miss"
     overreach = verdict.get("overreach") is True
-    no_memory = outcome == "no_memory"
     if missed:
-      missed_count += 1
       live_opened_paths = {
         item.get("path") for item in audit.get("live", {}).get("opened", [])
         if isinstance(item, dict) and isinstance(item.get("path"), str)
@@ -3216,26 +3361,16 @@ def _record_recall_audits(
       }
       missed_nodes = list(verdict.get("missed_nodes") or [])
       if any(path in live_opened_paths for path in missed_nodes):
-        selection_miss_count += 1
         miss_class = "selection"
       elif any(path in live_frontier_paths for path in missed_nodes):
-        continuation_miss_count += 1
         miss_class = "continuation"
       else:
-        route_miss_count += 1
         miss_class = "route"
     else:
       miss_class = None
-    if overreach:
-      overreach_count += 1
-    if no_memory:
-      no_memory_count += 1
-    if audit.get("live", {}).get("host_selection_override") is True:
-      override_count += 1
     usefulness = str(verdict.get("usefulness") or "unknown")
-    if usefulness not in usefulness_counts:
+    if usefulness not in {"helpful", "mixed", "unused", "harmful", "unknown"}:
       usefulness = "unknown"
-    usefulness_counts[usefulness] += 1
     record = {
       "schema": 4,
       "run_id": run_id,
@@ -3259,50 +3394,11 @@ def _record_recall_audits(
       "usefulness": usefulness,
       "hindsight_reason": str(verdict.get("hindsight_reason") or ""),
       "verdict_source": str(verdict.get("verdict_source") or "writer"),
+      "deep_reason": str(audit.get("deep", {}).get("reason") or ""),
+      "deep_revision": audit.get("deep", {}).get("revision"),
       **_deep_agreement(audit),
     }
     records.append(record)
-  total = int(prior.get("reads_audited", 0) or 0) + len(records)
-  missed_total = int(prior.get("misses", prior.get("important_misses", 0)) or 0) + missed_count
-  overreach_total = int(prior.get("overreaches", 0) or 0) + overreach_count
-  no_memory_total = int(prior.get("no_memory", 0) or 0) + no_memory_count
-  route_miss_total = int(prior.get("route_misses", 0) or 0) + route_miss_count
-  continuation_miss_total = (
-    int(prior.get("continuation_misses", 0) or 0) + continuation_miss_count
-  )
-  selection_miss_total = int(prior.get("selection_misses", 0) or 0) + selection_miss_count
-  override_total = int(prior.get("host_selection_overrides", 0) or 0) + override_count
-  stats = {
-    "schema": 4,
-    "updated_at": datetime.now(UTC).isoformat(),
-    "last_audited_at": max(str(item["at"]) for item in read_audits),
-    "reads_audited": total,
-    "usefulness_counts": usefulness_counts,
-    "hindsight_assessed": sum(
-      usefulness_counts[key]
-      for key in ("helpful", "mixed", "unused", "harmful")
-    ),
-    "misses": missed_total,
-    "miss_rate": missed_total / total if total else 0.0,
-    "overreaches": overreach_total,
-    "overreach_rate": overreach_total / total if total else 0.0,
-    "no_memory": no_memory_total,
-    "no_memory_rate": no_memory_total / total if total else 0.0,
-    "route_misses": route_miss_total,
-    "route_miss_rate": route_miss_total / total if total else 0.0,
-    "continuation_misses": continuation_miss_total,
-    "continuation_miss_rate": continuation_miss_total / total if total else 0.0,
-    "selection_misses": selection_miss_total,
-    "selection_miss_rate": selection_miss_total / total if total else 0.0,
-    "host_selection_overrides": override_total,
-    "model_to_host_selection_override_rate": override_total / total if total else 0.0,
-    "graph_nodes": len(graph.get("nodes") or []),
-    "graph_edges": len(graph.get("edges") or []),
-    "retrieval": "progressive_rooted_navigation",
-    # Full traversal/frontier evidence is append-only in recall-audit/*.jsonl.
-    # The hot status file keeps only bounded verdicts used by dashboards.
-    "recent": _compact_recent_audits(recent + records),
-  }
   log = STATE / "recall-audit" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
   log.parent.mkdir(parents=True, exist_ok=True)
   with log.open("a", encoding="utf-8") as handle:
@@ -3310,7 +3406,7 @@ def _record_recall_audits(
       handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
-  _write_json_atomic(_RECALL_STATS, stats)
+  _write_json_atomic(_RECALL_STATS, _recall_stats_from_log(prior, graph))
 
 
 def _record_run_status(record: dict) -> None:
@@ -3572,6 +3668,13 @@ def _consolidate_batches(
     candidate_outcome = _proposal(
       app_id, staging, batch, batch_audits, providers, deadline,
       **({"consolidation": consolidation} if consolidation is not None else {}),
+      current_recall_guidance=(
+        {"instruction": staged["instruction"] if staged["action"] == "replace" else "",
+         "reason": staged["reason"],
+         "evidence_read_ids": staged["evidence_read_ids"]}
+        if (staged := _combined_proposal(proposals).get("recall_guidance"))
+        else None
+      ),
     )
     rejection_reason = None
     rejection_detail = None
@@ -3638,7 +3741,8 @@ def _consolidate_batches(
     consecutive_rejections[work_kind] = 0
     batches[work_kind] += 1
     if work_kind == "audit":
-      accepted_audits.extend(batch_audits)
+      if all(item.get("outcome") != "defer" for item in proposal.get("read_audits", [])):
+        accepted_audits.extend(batch_audits)
       remaining_audits = remaining_audits[len(batch_audits):]
     elif work_kind == "chat":
       accepted_chats.extend(batch)
@@ -3850,6 +3954,9 @@ async def run() -> int:
     pending_read_traces = _pending_read_traces()
     pending_read_audit_count = len(pending_read_traces)
     read_traces = list(pending_read_traces)
+    # Capture older replay provenance before _deep_replays may discard a
+    # stale-commit cache. The append-only audit log remains the primary owner.
+    recovered_backlog = _unreviewed_read_audits()
     providers = ProviderPool.for_app(app_id)
     # Replays may use half of the remaining window; the writer keeps the rest.
     replay_deadline = time.monotonic() + max(
@@ -3870,8 +3977,16 @@ async def run() -> int:
     ]
     # Only disagreements need the writer's judgment and a graph repair; the
     # largest ones first, since the work window may end before the last.
+    fresh_disagreements = [
+      audit for audit in replayed_audits if audit["read_id"] not in agreed_ids
+    ]
+    replayed_ids = {audit["read_id"] for audit in replayed_audits}
+    backlog_audits = [
+      audit for audit in recovered_backlog
+      if audit["read_id"] not in replayed_ids
+    ]
     read_audits = sorted(
-      (audit for audit in replayed_audits if audit["read_id"] not in agreed_ids),
+      [*backlog_audits, *fresh_disagreements],
       key=lambda audit: -sum(
         len(audit["deep"].get(key) or ()) for key in ("missed", "overreach")
       ),
@@ -3929,7 +4044,7 @@ async def run() -> int:
       try:
         # Replay metrics do not depend on the writer; keep them.
         _record_recall_audits(run_id, replayed_audits, {"read_audits": [
-          *agreed_verdicts, *map(_unreviewed_verdict, read_audits),
+          *agreed_verdicts, *map(_unreviewed_verdict, fresh_disagreements),
         ]}, prepared)
       except OSError as exc:
         _log(f"WARN replay metrics not recorded: {exc!r}")
@@ -3940,7 +4055,7 @@ async def run() -> int:
       return 2
     reviewed_ids = {audit["read_id"] for audit in proposal_audits}
     unreviewed_audits = [
-      audit for audit in read_audits if audit["read_id"] not in reviewed_ids
+      audit for audit in fresh_disagreements if audit["read_id"] not in reviewed_ids
     ]
     deferred_read_audit_count = max(
       0, pending_read_audit_count - len(replayed_audits),
@@ -4043,7 +4158,7 @@ async def run() -> int:
       "read_audit_count": len(replayed_audits),
       "agreed_read_audit_count": len(agreed_audits),
       "writer_reviewed_read_audit_count": len(proposal_audits),
-      "deferred_read_audit_count": deferred_read_audit_count,
+      "deferred_read_audit_count": deferred_read_audit_count + len(read_audits) - len(proposal_audits),
       "proposal_batch_count": len(proposals),
       "audit_proposal_batch_count": audit_proposal_count,
       "chat_proposal_batch_count": chat_proposal_count,
@@ -4107,7 +4222,7 @@ async def run() -> int:
       _mark_consolidated_through_publication(list(consolidation.accepted_mocs))
       _record_recall_audits(
         run_id,
-        replayed_audits,
+        [*replayed_audits, *(audit for audit in backlog_audits if audit["read_id"] in reviewed_ids)],
         {
           **proposal,
           "read_audits": [
@@ -4116,6 +4231,7 @@ async def run() -> int:
             *(
               {**verdict, "verdict_source": "writer"}
               for verdict in proposal.get("read_audits") or []
+              if verdict.get("outcome") != "defer"
             ),
           ],
         },
