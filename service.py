@@ -83,7 +83,16 @@ def dispatch(request: dict) -> dict:
     os.environ["MOBIUS_RUN_TOKEN"] = call["run_id"]
   else:
     os.environ.pop("MOBIUS_RUN_TOKEN", None)
-  return handler(arguments, chat_id)
+  # Only the platform's envelope supplies availability, never tool arguments.
+  # Each service request is forked; clearing also keeps direct invocations safe.
+  capacity = body.get("provider_capacity")
+  os.environ["MOBIUS_PROVIDER_CAPACITY"] = json.dumps(
+    capacity if isinstance(capacity, dict) else {},
+  )
+  try:
+    return handler(arguments, chat_id)
+  finally:
+    os.environ.pop("MOBIUS_PROVIDER_CAPACITY", None)
 
 
 # Möbius may run everything above once and fork each request from it,
