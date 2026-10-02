@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 import memory_search
 from memory_text_provider import ProviderFailure, TextResult
@@ -534,38 +535,29 @@ def test_live_usage_snapshot_is_fresh_for_each_recall(monkeypatch):
   assert checks == [["codex"], ["codex"]]
 
 
-def test_usage_snapshot_only_blocks_provider_wide_allowance_windows(monkeypatch):
-  snapshots = iter([
-    {
-      "state": "ready",
-      "windows": [{"id": "seven_day_opus", "used_percent": 100}],
-    },
-    {
-      "state": "ready",
-      "windows": [{"id": "seven_day", "used_percent": 100}],
-    },
-  ])
+def test_host_capacity_hint_works_without_owner_credentials(monkeypatch):
+  monkeypatch.delenv("AGENT_TOKEN", raising=False)
+  monkeypatch.setattr(memory_search.time, "time", lambda: 1000)
+  monkeypatch.setenv("MOBIUS_PROVIDER_CAPACITY", json.dumps({
+    "claude": {"state": "exhausted", "expires_at": 1010},
+  }))
+  available, attempts = memory_search._live_capacity(["claude", "codex"])
+  assert available == ["codex"]
+  assert attempts == [{"provider": "claude", "outcome": "usage_snapshot_exhausted",
+                       "skipped": True, "elapsed_ms": 0}]
 
-  class Response:
-    def __enter__(self):
-      return self
 
-    def __exit__(self, *_args):
-      return False
-
-    def read(self):
-      return json.dumps(next(snapshots)).encode()
-
-  monkeypatch.setattr(
-    memory_search.urllib.request,
-    "urlopen",
-    lambda *_args, **_kwargs: Response(),
-  )
-  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
-  monkeypatch.setenv("AGENT_TOKEN", "owner-token")
-
-  assert memory_search._provider_usage_state("claude")[0] == "ready"
-  assert memory_search._provider_usage_state("claude")[0] == "exhausted"
+@pytest.mark.parametrize("hints", [
+  "", "garbage", "[]", "null", "{}",
+  '{"claude":{"state":"exhausted","expires_at":999}}',
+  '{"claude":{"state":"exhausted","expires_at":true}}',
+  '{"claude":{"state":"exhausted","expires_at":Infinity}}',
+  '{"claude":{"state":"unknown","expires_at":1010}}',
+])
+def test_missing_expired_or_unknown_capacity_preserves_provider_order(monkeypatch, hints):
+  monkeypatch.setattr(memory_search.time, "time", lambda: 1000)
+  monkeypatch.setenv("MOBIUS_PROVIDER_CAPACITY", hints)
+  assert memory_search._live_capacity(["claude", "codex"]) == (["claude", "codex"], [])
 
 
 def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
@@ -692,3 +684,37 @@ def test_empty_receipt_is_an_explicit_no_relevant_result():
     "reason": memory_search.RESULT_REASON_NO_RELEVANT_RESULT,
     "discovery_complete": True,
   }
+
+
+def test_quota_hint_removes_only_failed_attempt_and_preserves_navigation(monkeypatch):
+  monkeypatch.setenv("MEMORY_READER_PROVIDER", "auto")
+  monkeypatch.setattr(memory_search, "available_provider", lambda _: "claude")
+  monkeypatch.setattr(memory_search.time, "time", lambda: 1000)
+  bodies = _revision()
+  monkeypatch.setattr(memory_search, "read_revision_file", lambda _commit, path: bodies[path])
+  outputs = [
+    {"finish": False, "expand": [{"from": "index", "nodes": ["a"]}]},
+    {"finish": False, "expand": [{"from": "a", "nodes": ["b"]}]},
+    {"finish": True, "expand": [], "selected": ["b"]},
+  ]
+  results, runs, prompts = [], [], []
+  for capacity in ({}, {"claude": {"state": "exhausted", "expires_at": 1010}}):
+    monkeypatch.setenv("MOBIUS_PROVIDER_CAPACITY", json.dumps(capacity))
+    actions = iter(outputs)
+    calls, navigation_prompts = [], []
+
+    def read(provider, prompt, **kwargs):
+      calls.append(provider)
+      if provider == "claude":
+        return TextResult(None, ProviderFailure("usage_limit", terminal=True, scope="provider"))
+      navigation_prompts.append(prompt)
+      return TextResult(json.dumps(next(actions)))
+
+    monkeypatch.setattr(memory_search, "run_text", read)
+    result = memory_search.traverse("The A detail", "0" * 40, text_call=memory_search._live_text_call())
+    results.append(([node.id for node in result.opened], [node.id for node in result.selected], result.stop_reason))
+    runs.append(calls)
+    prompts.append(navigation_prompts)
+  assert results[0] == results[1]
+  assert prompts[0] == prompts[1]
+  assert runs == [["claude", "codex", "codex", "codex"], ["codex", "codex", "codex"]]

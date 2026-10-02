@@ -121,3 +121,26 @@ def test_tools_need_the_platforms_chat_identity(recorded):
 def test_malformed_arguments_are_tool_errors(recorded, path, arguments):
   assert service.dispatch(_request(path, arguments))["status"] == 422
   assert recorded == []
+
+
+def test_search_receives_only_host_hint_and_clears_between_requests(monkeypatch):
+  import os
+  import memory_search
+  monkeypatch.delenv("AGENT_TOKEN", raising=False)
+  monkeypatch.setattr(memory_search.time, "time", lambda: 1000)
+  seen = []
+
+  def run(args):
+    seen.append(memory_search._live_capacity(["claude", "codex"]))
+    return 0
+
+  monkeypatch.setattr(memory_search, "run", run)
+  request = _request("/tools/search", {"query": "prefs"})
+  hint = {"claude": {"state": "exhausted", "expires_at": 1010}}
+  request["body"]["provider_capacity"] = hint
+  assert service.dispatch(request)["status"] == 200
+  assert seen[0][0] == ["codex"]
+  assert "MOBIUS_PROVIDER_CAPACITY" not in os.environ
+  spoof = _request("/tools/search", {"query": "prefs", "provider_capacity": hint})
+  assert service.dispatch(spoof)["status"] == 200
+  assert seen[1] == (["claude", "codex"], [])
