@@ -154,7 +154,7 @@ def test_usage_evidence_counts_needed_overreach_and_lookups_since_creation(
 
   assert usage["notes/old.md"]["needed"] == 0
   assert usage["notes/old.md"]["overreach"] == 1
-  assert usage["notes/old.md"]["lookups_since_created"] == 3
-  assert usage["notes/new.md"]["needed"] == 2
-  assert usage["notes/new.md"]["lookups_since_created"] == 2
-  assert usage["notes/new.md"]["last_needed_at"] == "2026-09-22T00:00:00+00:00"
+  assert usage["notes/old.md"]["lookups_since_created"] == 2
+  assert usage["notes/new.md"]["needed"] == 1
+  assert usage["notes/new.md"]["lookups_since_created"] == 1
+  assert usage["notes/new.md"]["last_needed_at"] == "2026-09-21T00:00:00+00:00"
