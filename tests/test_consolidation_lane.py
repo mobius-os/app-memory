@@ -93,7 +93,7 @@ def test_consolidation_item_carries_whole_neighborhood_and_own_leads(
     encoding="utf-8",
   )
 
-  item = memory_runner._consolidation_item(staging, "mocs/projects.md")
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
 
   assert item["moc"]["path"] == "mocs/projects.md"
   assert item["member_paths"] == ["notes/alpha-fact.md", "notes/beta-fact.md"]
@@ -128,7 +128,7 @@ def test_oversized_neighborhood_visits_every_member_before_repeating(state, tmp_
 
   passes = []
   for _ in range(6):
-    item = memory_runner._consolidation_item(staging, "mocs/projects.md")
+    item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
     passes.append([Path(path).stem for path in item["member_paths"]])
     memory_runner._record_consolidation_attempt(
       "mocs/projects.md", omitted=item["omitted_member_paths"],
@@ -145,7 +145,7 @@ def test_member_rotation_keeps_waiting_order_when_members_change(state, tmp_path
     omitted=["notes/deleted.md", "notes/c.md", "notes/b.md"],
   )
 
-  item = memory_runner._consolidation_item(staging, "mocs/projects.md")
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
 
   assert item["member_paths"] == [
     "notes/c.md", "notes/b.md", "notes/a.md", "notes/new.md",
@@ -185,6 +185,9 @@ def test_lanes_rotate_and_a_rejected_item_defers_without_blocking(
     return value, [], [], graph
 
   monkeypatch.setattr(memory_runner, "_apply_validated_proposal", apply)
+  usage_reads = []
+  monkeypatch.setattr(memory_runner, "note_usage_evidence",
+                      lambda: usage_reads.append(1) or {})
 
   result = memory_runner._consolidate_batches(
     57, staging, graph, chats, audits, memory_runner.ProviderPool([]),
@@ -203,6 +206,8 @@ def test_lanes_rotate_and_a_rejected_item_defers_without_blocking(
   assert result.rejected_chat_count == 1
   assert result.accepted_mocs == ["mocs/people.md", "mocs/projects.md"]
   assert result.consolidation_batch_count == 2
+  # The whole audit history is read once per run, not once per map.
+  assert usage_reads == [1]
   assert result.deferred_reason == "topology_regression"
   cursor = json.loads((state / "consolidation-cursor.json").read_text())
   assert set(cursor["attempted"]) == {"mocs/people.md", "mocs/projects.md"}
@@ -305,7 +310,7 @@ def _map_rewrite(members: list[str], extra: str = "") -> str:
 def test_consolidation_item_may_rewrite_its_own_map(state, tmp_path):
   staging = tmp_path / "staging"
   _graph(staging, {"projects": ["alpha-fact", "beta-fact"]})
-  item = memory_runner._consolidation_item(staging, "mocs/projects.md")
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
   editable = memory_runner._editable_map(item)
   assert editable == {"path": "mocs/projects.md", "members": {"alpha-fact", "beta-fact"}}
 
@@ -327,7 +332,7 @@ def test_map_rewrite_keeps_every_member_it_did_not_decide_about(state, tmp_path)
   staging = tmp_path / "staging"
   _graph(staging, {"projects": ["alpha-fact", "beta-fact", "gamma-fact"]})
   editable = memory_runner._editable_map(
-    memory_runner._consolidation_item(staging, "mocs/projects.md"),
+    memory_runner._consolidation_item(staging, "mocs/projects.md", {}),
   )
 
   silently_dropped = _reviewed({
@@ -354,7 +359,7 @@ def test_only_the_supplied_map_becomes_writable(state, tmp_path):
   staging = tmp_path / "staging"
   _graph(staging, {"projects": ["alpha-fact"], "people": ["gamma"]})
   editable = memory_runner._editable_map(
-    memory_runner._consolidation_item(staging, "mocs/projects.md"),
+    memory_runner._consolidation_item(staging, "mocs/projects.md", {}),
   )
 
   other_map = _reviewed({

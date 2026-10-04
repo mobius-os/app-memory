@@ -838,16 +838,31 @@ def read_jsonl(path: Path) -> list[dict]:
   return rows
 
 
+# The recall-audit fields any reader of `latest_audit_rows` uses. Rows are
+# trimmed to these while the whole history is held in memory: the live
+# frontier at stop and stop reason stay in the logs as evidence but are the
+# bulk of each row, and no rate, retention or re-queue decision reads them.
+AUDIT_ROW_FIELDS = frozenset({
+  "schema", "run_id", "read_id", "at", "question_sha256", "outcome",
+  "overreach", "miss_class", "reason", "host_selection_override",
+  "usefulness", "hindsight_reason", "verdict_source",
+  "live_selected", "missed_nodes", "overselected_nodes",
+  "deep_selected", "deep_reason", "deep_revision", "deep_recall", "deep_noise",
+})
+
+
 def latest_audit_rows(state: Path = STATE) -> list[dict]:
   """Return the latest recall-audit row per read, oldest log first.
 
   A later row supersedes an earlier one for the same read, except that a
   provisional row never replaces a judged one (a replayed read must not undo a
-  writer verdict); rows without a read id each stand alone.
+  writer verdict); rows without a read id each stand alone. Each row keeps
+  only `AUDIT_ROW_FIELDS`.
   """
   latest: dict[object, dict] = {}
   for log in sorted((state / "recall-audit").glob("*.jsonl")):
-    for index, row in enumerate(read_jsonl(log)):
+    for index, full_row in enumerate(read_jsonl(log)):
+      row = {key: full_row[key] for key in AUDIT_ROW_FIELDS if key in full_row}
       read_id = row.get("read_id")
       key = read_id if isinstance(read_id, str) else (log.name, index)
       prior = latest.get(key)

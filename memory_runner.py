@@ -1404,8 +1404,13 @@ def _consolidation_leads(ids: list[str], since: str = "") -> list[str]:
   return leads[:_MAX_CONSOLIDATION_LEADS]
 
 
-def _consolidation_item(staging: Path, moc_path: str) -> dict | None:
-  """Build one map neighborhood: the map, every member body, and open leads."""
+def _consolidation_item(
+  staging: Path, moc_path: str, usage: dict[str, dict],
+) -> dict | None:
+  """Build one map neighborhood: the map, every member body, and open leads.
+
+  `usage` is `note_usage_evidence()`, read once per run by the caller.
+  """
   try:
     graph = json.loads((staging / "graph.json").read_text(encoding="utf-8"))
   except (OSError, ValueError):
@@ -1458,7 +1463,6 @@ def _consolidation_item(staging: Path, moc_path: str) -> dict | None:
   except (OSError, UnicodeError):
     moc_text = ""
   member_ids = [Path(path).stem for path in members]
-  usage = note_usage_evidence()
   return {
     "moc": {
       "path": moc_path,
@@ -3576,6 +3580,9 @@ def _consolidate_batches(
   accepted_chats: list[dict] = []
   deferred_chats: list[dict] = []
   remaining_mocs = _consolidation_candidates(staging)
+  # Audits are recorded and notes published only after this loop, so one
+  # reading of the evidence serves every consolidation item.
+  usage = note_usage_evidence() if remaining_mocs else {}
   accepted_mocs: list[str] = []
   proposals: list[dict] = []
   provider_outcomes: list[ProposalOutcome] = []
@@ -3624,7 +3631,7 @@ def _consolidate_batches(
       batch = _proposal_batch(remaining_chats)
     else:
       moc_path = remaining_mocs.pop(0)
-      consolidation = _consolidation_item(staging, moc_path)
+      consolidation = _consolidation_item(staging, moc_path, usage)
       _record_consolidation_attempt(
         moc_path,
         omitted=(consolidation or {}).get("omitted_member_paths"),
