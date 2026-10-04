@@ -124,8 +124,8 @@ _FINISH_RESERVE_SECONDS = 60
 # Consolidation rotates through maps one neighborhood per work item. The cursor
 # only orders that rotation; losing it costs nothing but a repeated pass.
 _CONSOLIDATION_CURSOR = STATE / "consolidation-cursor.json"
-# A lane stops for the night only after several consecutive rejected items, so
-# one malformed analyst answer defers one item instead of the whole lane.
+# A lane stops for the night only after several consecutive failed items, so
+# one malformed analyst answer costs one item instead of the whole lane.
 _LANE_REJECTION_LIMIT = 3
 # Unreviewed disagreements kept queued for a later writer review; the writer
 # reaches only a few audit items per night.
@@ -904,8 +904,9 @@ def _agreed_verdict(audit: dict) -> dict | None:
 def _unreviewed_verdict(audit: dict) -> dict:
   """The deep replay's own reading of a disagreement the writer did not reach.
 
-  It keeps tonight's metrics complete and lets the audit cursor move on; the
-  `verdict_source` marks it as unjudged so no expectation is learned from it.
+  It lets the audit cursor move on, and the reading may come back for a later
+  writer review; the `verdict_source` marks it as unjudged, so it is left out
+  of recall metrics and no expectation is learned from it.
   """
   deep = audit.get("deep") or {}
   missed = list(deep.get("missed") or [])
@@ -2253,6 +2254,9 @@ def _proposal(
       attempt["usage_receipt"] = result.receipt
     if result.failure is not None:
       attempt["failure_code"] = result.failure.code
+      if result.failure.code == "timeout" and remaining < TIMEOUT:
+        # Cut short by the closing work window, not by the item itself.
+        attempt["failure_code"] = "work_window_elapsed"
       if result.failure.detail:
         attempt["failure_detail"] = result.failure.detail
       if providers.health.observe(provider, model, result.failure):
@@ -3732,9 +3736,15 @@ def _consolidate_batches(
 
 
 def _model_ran(attempts: list[dict]) -> bool:
-  """Whether any provider was actually called, not skipped or out of time."""
+  """Whether any model actually worked on the item.
+
+  Skipped providers, the closing work window, and failures that disable a
+  provider for the run (missing CLI, usage limit, logged out, model
+  unavailable) all mean no model did.
+  """
   return any(
     "skipped_reason" not in attempt
+    and not attempt.get("disabled_for_run")
     and attempt.get("failure_code") != "work_window_elapsed"
     for attempt in attempts
   )

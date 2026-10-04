@@ -1042,6 +1042,9 @@ def test_failed_audit_items_do_not_requeue_and_starve_fresh_reads(
    {"provider": "claude", "skipped_reason": "provider_unavailable"}],
   [{"provider": "codex", "skipped_reason": "provider_unavailable"},
    {"provider": "claude", "failure_code": "work_window_elapsed"}],
+  # out of quota, logged out, missing CLI: the provider is disabled for the run
+  [{"provider": "codex", "failure_code": "usage_limit", "disabled_for_run": True},
+   {"provider": "claude", "failure_code": "authentication", "disabled_for_run": True}],
 ])
 def test_audits_no_model_ran_on_stay_queued(monkeypatch, tmp_path, attempts):
   graph = {"nodes": [], "edges": [], "problems": []}
@@ -1267,6 +1270,33 @@ def test_transient_provider_failure_is_retried_on_the_next_batch(
   memory_runner._proposal(57, tmp_path, [], [], providers)
 
   assert calls == ["claude", "codex", "claude", "codex"]
+
+
+def test_timeout_cut_short_by_the_work_window_is_not_the_items_fault(
+  monkeypatch, tmp_path,
+):
+  providers = memory_runner.ProviderPool([
+    {"provider": "codex", "model": "gpt-test", "effort": None},
+  ])
+  timeouts = []
+  monkeypatch.setattr(memory_runner, "_proposal_prompt", lambda *_args, **_kwargs: "prompt")
+  monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
+  def text(_provider, _prompt, *, timeout, **_kwargs):
+    timeouts.append(timeout)
+    return TextResult(None, memory_runner.ProviderFailure("timeout"))
+
+  monkeypatch.setattr(memory_runner, "run_text", text)
+
+  short = memory_runner._proposal(
+    57, tmp_path, [], [], providers, memory_runner.time.monotonic() + 30,
+  )
+  full = memory_runner._proposal(57, tmp_path, [], [], providers)
+
+  assert timeouts[0] < memory_runner.TIMEOUT == timeouts[1]
+  assert short.attempted_agents[0]["failure_code"] == "work_window_elapsed"
+  assert not memory_runner._model_ran(short.attempted_agents)
+  assert full.attempted_agents[0]["failure_code"] == "timeout"
+  assert memory_runner._model_ran(full.attempted_agents)
 
 
 def test_batch_coordinator_combines_terminal_fallback_and_topology_rollback(

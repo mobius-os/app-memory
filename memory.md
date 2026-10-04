@@ -174,7 +174,8 @@ the queue and its nightly cost stay bounded. A disagreement a model ran on
 without an accepted verdict (a rejected or unreadable answer, a timeout, a
 crash) is recorded as a final provisional reading and never re-queued, so an
 item that always fails is tried once and cannot crowd out fresh reads; one no
-model ran on (no provider available, the window closed first) stays queued. A
+model ran on (no provider available, out of quota, logged out or missing,
+the window closed first or cut the call short) stays queued. A
 later verdict supersedes the provisional reading once per read. Every log
 reader skips a torn or undecodable line instead of failing the run.
 Consolidation takes only maps with something new to act on: the map or a note

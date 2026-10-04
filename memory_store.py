@@ -812,7 +812,7 @@ def _note_creation_times() -> dict[str, str]:
 
 # Verdict sources for readings no writer judged: excluded from rates and from
 # note retention evidence. An unreviewed reading may come back for review; a
-# rejected one was attempted and is final, so it never re-queues.
+# writer_failed one was attempted by a model and is final, so it never re-queues.
 PROVISIONAL_VERDICT_SOURCES = frozenset({"deep_replay_unreviewed", "writer_failed"})
 
 
@@ -857,7 +857,7 @@ def note_usage_evidence() -> dict[str, dict]:
   Built fresh from the append-only recall-audit log, so it needs no counters
   of its own. A lookup `needed` a note when a judged verdict kept or missed it
   (writer review, or full live/deep agreement). Provisional readings (not
-  reviewed, or rejected when reviewed) cannot justify retaining or retiring a
+  reviewed, or writer_failed when a review failed) cannot justify retaining or retiring a
   note.
   """
   created = _note_creation_times()
