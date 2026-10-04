@@ -640,7 +640,7 @@ def _unreviewed_read_audits() -> list[dict]:
   replay chose. Older rows cannot show those bodies, a reading a model ran on
   without an accepted verdict is final (`writer_failed`), and only the newest
   `_AUDIT_BACKLOG_LIMIT` readings are kept queued; every other one stays
-  provisional for good (excluded from rates and note retention evidence), so
+  provisional for good (excluded from rates; see `note_usage_evidence`), so
   the queue, its nightly cost and the age of its evidence stay bounded.
   """
   pending = [
@@ -1915,6 +1915,18 @@ def _proposal_batch(chats: list[dict]) -> list[dict]:
   return []
 
 
+def _recall_guidance_change(proposal: dict) -> dict | None:
+  """The proposal's intentional coaching change, if any.
+
+  The last accepted replace/clear wins; chat and maintenance items normalize
+  the field to None and cannot overwrite an earlier change.
+  """
+  guidance = proposal.get("recall_guidance")
+  if isinstance(guidance, dict) and guidance.get("action") in {"replace", "clear"}:
+    return guidance
+  return None
+
+
 def _combined_proposal(proposals: list[dict]) -> dict:
   """Join per-context reporting fields for one atomic multi-batch publication."""
   summaries = []
@@ -1937,11 +1949,7 @@ def _combined_proposal(proposals: list[dict]) -> dict:
     self_review = proposal.get("self_review")
     if isinstance(self_review, dict):
       self_reviews.append(self_review)
-    batch_guidance = proposal.get("recall_guidance")
-    if isinstance(batch_guidance, dict) and batch_guidance.get("action") in {"replace", "clear"}:
-      # The last accepted intentional change wins. Chat/maintenance batches normalize
-      # this field to None and cannot overwrite it.
-      recall_guidance = batch_guidance
+    recall_guidance = _recall_guidance_change(proposal) or recall_guidance
   return {
     "summary": " ".join(summaries)[:1000],
     "followups": list(dict.fromkeys(followups))[:100],
@@ -3693,8 +3701,8 @@ def _consolidate_batches(
     deleted.extend(proposed_deleted)
     proposals.append(proposal)
     provider_outcomes.append(candidate_outcome)
-    guidance = proposal.get("recall_guidance")
-    if isinstance(guidance, dict) and guidance.get("action") in {"replace", "clear"}:
+    guidance = _recall_guidance_change(proposal)
+    if guidance is not None:
       staged_guidance = {
         "instruction": guidance.get("instruction") if guidance["action"] == "replace" else "",
         "reason": guidance.get("reason"),

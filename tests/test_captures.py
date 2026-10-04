@@ -154,9 +154,11 @@ def test_usage_evidence_counts_needed_overreach_and_lookups_since_creation(
 
   assert usage["notes/old.md"]["needed"] == 0
   assert usage["notes/old.md"]["overreach"] == 1
-  assert usage["notes/old.md"]["lookups_since_created"] == 2
+  # The provisional row is a lookup, but live and deep disagreed on both
+  # notes, so it credits neither.
+  assert usage["notes/old.md"]["lookups_since_created"] == 3
   assert usage["notes/new.md"]["needed"] == 1
-  assert usage["notes/new.md"]["lookups_since_created"] == 1
+  assert usage["notes/new.md"]["lookups_since_created"] == 2
   assert usage["notes/new.md"]["last_needed_at"] == "2026-09-21T00:00:00+00:00"
 
 
@@ -188,6 +190,65 @@ def test_usage_evidence_uses_latest_judged_row_and_skips_torn_lines(
 
   assert set(usage) == {"notes/c.md"}
   assert usage["notes/c.md"]["needed"] == 1
+
+
+def test_usage_evidence_credits_notes_both_readers_picked_in_unreviewed_reads(
+  monkeypatch, tmp_path,
+):
+  # A note live recall often misses, whose disagreements the writer never
+  # reached, must not look unused just because those reads are unreviewed.
+  monkeypatch.setattr(memory_store, "STATE", tmp_path)
+  monkeypatch.setattr(memory_store, "_note_creation_times", lambda: {
+    "notes/x.md": "2026-08-01T00:00:00+00:00",
+  })
+  log = tmp_path / "recall-audit" / "x.jsonl"
+  log.parent.mkdir()
+  rows = [
+    {"read_id": f"u{i}", "at": f"2026-09-01T00:00:{i:02d}+00:00",
+     "verdict_source": "deep_replay_unreviewed",
+     "live_selected": ["notes/x.md"] if i < 3 else [],
+     "deep_selected": ["notes/x.md"], "missed_nodes": [],
+     "overselected_nodes": []}
+    for i in range(8)
+  ] + [
+    {"read_id": f"a{i}", "at": f"2026-09-02T00:00:{i:02d}+00:00",
+     "verdict_source": "deep_replay", "live_selected": ["notes/y.md"],
+     "deep_selected": ["notes/y.md"], "missed_nodes": [],
+     "overselected_nodes": []}
+    for i in range(20)
+  ]
+  log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+  usage = memory_store.note_usage_evidence()
+
+  assert usage["notes/x.md"]["needed"] == 3
+  assert usage["notes/x.md"]["overreach"] == 0
+  assert usage["notes/x.md"]["lookups_since_created"] == 28
+  assert usage["notes/x.md"]["last_needed_at"] == "2026-09-01T00:00:02+00:00"
+
+
+def test_latest_audit_rows_never_lets_a_provisional_row_replace_a_verdict(
+  tmp_path,
+):
+  # A lost stats cursor can replay a read the writer already judged.
+  log = tmp_path / "recall-audit" / "x.jsonl"
+  log.parent.mkdir()
+  rows = [
+    {"read_id": "one", "verdict_source": "deep_replay_unreviewed"},
+    {"read_id": "one", "verdict_source": "writer"},
+    {"read_id": "one", "verdict_source": "deep_replay_unreviewed"},
+    {"read_id": "two", "verdict_source": "deep_replay"},
+    {"read_id": "two", "verdict_source": "writer_failed"},
+    {"read_id": "three", "verdict_source": "deep_replay_unreviewed"},
+    {"read_id": "three", "verdict_source": "writer_failed"},
+  ]
+  log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+  sources = {row["read_id"]: row["verdict_source"]
+             for row in memory_store.latest_audit_rows(tmp_path)}
+
+  assert sources == {"one": "writer", "two": "deep_replay",
+                     "three": "writer_failed"}
 
 
 def test_captures_skip_a_torn_multibyte_line(state):

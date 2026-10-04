@@ -810,9 +810,10 @@ def _note_creation_times() -> dict[str, str]:
   return created
 
 
-# Verdict sources for readings no writer judged: excluded from rates and from
-# note retention evidence. An unreviewed reading may come back for review; a
-# writer_failed one was attempted by a model and is final, so it never re-queues.
+# Verdict sources for readings no writer judged: excluded from rates, and in
+# note retention evidence they credit only what live and deep agreed on. An
+# unreviewed reading may come back for review; a writer_failed one was
+# attempted by a model and is final, so it never re-queues.
 PROVISIONAL_VERDICT_SOURCES = frozenset({"deep_replay_unreviewed", "writer_failed"})
 
 
@@ -840,14 +841,23 @@ def read_jsonl(path: Path) -> list[dict]:
 def latest_audit_rows(state: Path = STATE) -> list[dict]:
   """Return the latest recall-audit row per read, oldest log first.
 
-  A later writer verdict supersedes an earlier provisional row for the same
-  read; rows without a read id each stand alone.
+  A later row supersedes an earlier one for the same read, except that a
+  provisional row never replaces a judged one (a replayed read must not undo a
+  writer verdict); rows without a read id each stand alone.
   """
   latest: dict[object, dict] = {}
   for log in sorted((state / "recall-audit").glob("*.jsonl")):
     for index, row in enumerate(read_jsonl(log)):
       read_id = row.get("read_id")
-      latest[read_id if isinstance(read_id, str) else (log.name, index)] = row
+      key = read_id if isinstance(read_id, str) else (log.name, index)
+      prior = latest.get(key)
+      if (
+        prior is not None
+        and prior.get("verdict_source") not in PROVISIONAL_VERDICT_SOURCES
+        and row.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES
+      ):
+        continue
+      latest[key] = row
   return list(latest.values())
 
 
@@ -855,10 +865,12 @@ def note_usage_evidence() -> dict[str, dict]:
   """How each note has fared in audited lookups since it was written.
 
   Built fresh from the append-only recall-audit log, so it needs no counters
-  of its own. A lookup `needed` a note when a judged verdict kept or missed it
-  (writer review, or full live/deep agreement). Provisional readings (not
-  reviewed, or writer_failed when a review failed) cannot justify retaining or retiring a
-  note.
+  of its own. Every audited reading is a lookup. A judged reading (writer
+  review, or full live/deep agreement) `needed` a note it kept or missed. A
+  provisional reading (not reviewed, or writer_failed) credits only the notes
+  both live recall and the deep replay selected, and judges no overreach: its
+  disagreements are unresolved, but what both readers agree on still keeps a
+  note from looking unused.
   """
   created = _note_creation_times()
   usage: dict[str, dict] = {}
@@ -871,15 +883,16 @@ def note_usage_evidence() -> dict[str, dict]:
   lookups: list[str] = []
   for record in latest_audit_rows(STATE):
     at = record.get("at")
-    if (
-      not isinstance(at, str)
-      or record.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES
-    ):
+    if not isinstance(at, str):
       continue
     lookups.append(at)
     live = set(record.get("live_selected") or ())
-    over = set(record.get("overselected_nodes") or ())
-    needed = (live - over) | set(record.get("missed_nodes") or ())
+    if record.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES:
+      over: set = set()
+      needed = live & set(record.get("deep_selected") or ())
+    else:
+      over = set(record.get("overselected_nodes") or ())
+      needed = (live - over) | set(record.get("missed_nodes") or ())
     for path in needed:
       item = entry(path)
       item["needed"] += 1

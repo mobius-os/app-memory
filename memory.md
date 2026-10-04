@@ -165,8 +165,8 @@ saved facts, one map neighborhood to consolidate — until the real scheduled-ru
 deadline approaches, then publishes once. The largest disagreements go first;
 any the writer does not reach are recorded as unreviewed replay readings.
 Those readings are provisional, not judged misses: they do not count in
-recall rates, and a note picked only by an unreviewed replay does not count as
-needed when deciding which notes to retire. The ten newest readings that
+recall rates, and when deciding which notes to retire they count a note as
+needed only when live recall and the replay both picked it. The ten newest readings that
 recorded their deep replay revision stay queued for later writer review
 without another deep replay, behind tonight's reads of equal size; older
 readings, and readings without that revision, stay provisional for good, so
