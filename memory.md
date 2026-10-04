@@ -164,9 +164,11 @@ staging graph — one disagreement between live recall and its replay, one chat'
 saved facts, one map neighborhood to consolidate — until the real scheduled-run
 deadline approaches, then publishes once. The largest disagreements go first;
 any the writer does not reach are recorded as unreviewed replay readings.
-Those readings are provisional, not judged misses or retention evidence; their
-append-only records keep them queued for later writer review without another
-deep replay. A later verdict supersedes the provisional reading once per read.
+Those readings are provisional, not judged misses or retention evidence. A
+reading that recorded its deep replay revision stays queued for later writer
+review without another deep replay, behind tonight's reads of equal size;
+older readings without that revision stay provisional. A later verdict
+supersedes the provisional reading once per read.
 Consolidation takes only maps with something new to act on: the map or a note
 filed under it changed since the writer last consolidated it (a filed saved
 fact, an audit repair, a deletion), or a follow-up naming it was written since.

@@ -731,57 +731,64 @@ def test_keep_does_not_erase_accepted_coaching_change():
   ])["recall_guidance"]["action"] == "clear"
 
 
-def test_unreviewed_log_recovers_writer_work_without_replay(monkeypatch, tmp_path):
+def test_unreviewed_log_requeues_only_revisioned_rows_until_reviewed(monkeypatch, tmp_path):
   state = tmp_path / "app-state"
   (state / "read-log").mkdir(parents=True)
-  (state / "recall-audit").mkdir()
-  trace = {"schema": 4, "read_id": "pending", "at": "2026-09-01T00:00:00+00:00",
-           "question": "Relevant fact?", "commit": "a" * 40, "files": []}
-  (state / "read-log" / "2026-09-01.jsonl").write_text(json.dumps(trace) + "\n")
-  provisional = {"read_id": "pending", "at": trace["at"],
-                 "verdict_source": "deep_replay_unreviewed",
-                 "deep_selected": ["notes/answer.md"]}
-  audit_log = state / "recall-audit" / "2026-09-01.jsonl"
-  audit_log.write_text(json.dumps(provisional) + "\n")
   monkeypatch.setattr(memory_runner, "STATE", state)
-  monkeypatch.setattr(memory_runner, "_REPLAY_CACHE", state / "replay-cache.jsonl")
-  def revision_body(commit, _path):
-    if not commit:
-      raise ValueError("unverified historical revision")
-    return "body"
-  monkeypatch.setattr(memory_runner, "read_revision_file", revision_body)
-  recovered = memory_runner._unreviewed_read_audits()
-  assert [item["read_id"] for item in recovered] == ["pending"]
-  assert recovered[0]["deep"]["missed"] == ["notes/answer.md"]
-  assert recovered[0]["deep"]["missed_nodes"] == []
-  assert recovered[0]["deep"]["body_revision_status"] == "historical_revision_unavailable"
-  (state / "replay-cache.jsonl").write_text(json.dumps({
-    "read_id": "pending", "commit": "c" * 40,
-    "selected": ["notes/different.md"],
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
+  monkeypatch.setattr(memory_runner, "read_revision_file",
+                      lambda commit, path: f"{path}@{commit}")
+  traces = [
+    {"schema": 4, "read_id": read_id, "at": "2026-09-01T00:00:00+00:00",
+     "question": "Relevant fact?", "commit": "a" * 40, "files": []}
+    for read_id in ("legacy", "pending")
+  ]
+  (state / "read-log" / "2026-09-01.jsonl").write_text(
+    "".join(json.dumps(trace) + "\n" for trace in traces),
+  )
+  graph = {"nodes": [], "edges": []}
+  # A row from before deep revisions were recorded can never show the writer
+  # the replay's historical bodies; it must stay provisional, not re-queue.
+  (state / "recall-audit").mkdir()
+  (state / "recall-audit" / "2026-09-01.jsonl").write_text(json.dumps({
+    "read_id": "legacy", "at": traces[0]["at"],
+    "verdict_source": "deep_replay_unreviewed",
+    "deep_selected": ["notes/answer.md"],
   }) + "\n")
-  assert memory_runner._unreviewed_read_audits()[0]["deep"]["missed_nodes"] == []
-  (state / "replay-cache.jsonl").write_text(json.dumps({
-    "read_id": "pending", "commit": "c" * 40,
-    "selected": ["notes/answer.md"],
-  }) + "\n")
-  assert memory_runner._unreviewed_read_audits()[0]["deep"]["body_revision_status"] == "verified"
-  audit_log.write_text(json.dumps({
-    **provisional, "deep_selected": ["notes/answer.md", "notes/second.md"],
-  }) + "\n")
-  (state / "replay-cache.jsonl").write_text(json.dumps({
-    "read_id": "pending", "commit": "c" * 40,
-    "selected": ["notes/second.md", "notes/answer.md"],
-  }) + "\n")
-  assert memory_runner._unreviewed_read_audits()[0]["deep"]["body_revision_status"] == "verified"
-  (state / "replay-cache.jsonl").unlink()
-  audit_log.write_text(json.dumps({**provisional, "deep_revision": "b" * 40}) + "\n")
-  verified = memory_runner._unreviewed_read_audits()
-  assert verified[0]["deep"]["missed_nodes"][0]["content"] == "body"
-  assert verified[0]["deep"]["body_revision_status"] == "verified"
-  audit_log.write_text(audit_log.read_text() + json.dumps({
-    "read_id": "pending", "at": trace["at"], "verdict_source": "writer",
-  }) + "\n")
+  # The unreachable disagreement is recorded exactly as run() records it.
+  audit = memory_runner._audit_reads("b" * 40, [traces[1]], [{
+    "read_id": "pending", "selected": ["notes/answer.md"], "reason": "fact",
+  }])[0]
+  memory_runner._record_recall_audits("run-1", [audit], {"read_audits": [
+    memory_runner._unreviewed_verdict(audit),
+  ]}, graph)
+
+  for _night in range(2):
+    recovered = memory_runner._unreviewed_read_audits()
+    assert [item["read_id"] for item in recovered] == ["pending"]
+    assert recovered[0]["deep"]["revision"] == "b" * 40
+    assert recovered[0]["deep"]["missed_nodes"][0]["content"] == (
+      "notes/answer.md@" + "b" * 40
+    )
+
+  memory_runner._record_recall_audits("run-2", recovered, {"read_audits": [{
+    "read_id": "pending", "outcome": "miss", "overreach": False,
+    "missed_nodes": ["notes/answer.md"], "overselected_nodes": [],
+    "reason": "fact existed", "verdict_source": "writer",
+  }]}, graph)
   assert memory_runner._unreviewed_read_audits() == []
+  stats = json.loads((state / "recall-stats.json").read_text())
+  assert (stats["reads_audited"], stats["reads_judged"],
+          stats["provisional_reads"]) == (2, 1, 1)
+
+
+def test_writer_cannot_defer_a_read_verdict():
+  audit = {"read_id": "old", "deep": {"missed": [], "overreach": []}}
+  with pytest.raises(memory_runner.ProposalValidationError):
+    memory_runner._normalize_audit_verdicts({"read_audits": [{
+      "read_id": "old", "outcome": "defer", "overreach": False,
+      "missed_nodes": [], "overselected_nodes": [], "reason": "Later",
+    }]}, [audit])
 
 
 def test_provisional_stats_are_not_judged_and_review_supersedes(monkeypatch, tmp_path):
@@ -842,22 +849,6 @@ def test_later_audit_item_sees_staged_coaching_without_publishing(monkeypatch, t
   assert writes == []
 
 
-def test_defer_keeps_unverifiable_historical_read_provisional():
-  audit = {"read_id": "old", "deep": {
-    "body_revision_status": "historical_revision_unavailable",
-  }}
-  deferred = {"read_id": "old", "outcome": "defer", "overreach": False,
-              "missed_nodes": [], "overselected_nodes": [],
-              "reason": "Original deep body cannot be verified."}
-  normalized = memory_runner._normalize_audit_verdicts({
-    "read_audits": [deferred],
-    "recall_guidance": {"action": "replace", "instruction": "Do more",
-                        "reason": "Unverified", "evidence_read_ids": ["old"]},
-  }, [audit])
-  assert normalized["read_audits"][0]["outcome"] == "defer"
-  assert normalized["recall_guidance"] is None
-
-
 def test_legacy_stats_migration_with_no_valid_audit_rows_keeps_cursor(monkeypatch, tmp_path):
   state = tmp_path / "app-state"
   log = state / "recall-audit" / "old.jsonl"
@@ -882,10 +873,7 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   verdict = {"read_id": "old", "outcome": "miss", "overreach": False,
              "missed_nodes": ["notes/fact.md"], "overselected_nodes": []}
   fresh = {**audit, "read_id": "fresh", "at": "2026-09-02T00:00:00+00:00"}
-  deferred = {"read_id": "fresh", "outcome": "defer", "overreach": False,
-              "missed_nodes": [], "overselected_nodes": [],
-              "reason": "Original body unavailable"}
-  proposal = {"read_audits": [verdict, deferred], "updates": [], "deletes": [],
+  proposal = {"read_audits": [verdict], "updates": [], "deletes": [],
               "recall_guidance": {"action": "replace", "instruction": "Find facts",
                                   "reason": "Reviewed", "evidence_read_ids": ["old"]}}
   outcome = memory_runner.ProposalOutcome("ok", proposal, "codex", "test", [])
@@ -917,7 +905,11 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   monkeypatch.setattr(memory_runner, "_unreviewed_read_audits", lambda: [audit])
   monkeypatch.setattr(memory_runner, "_deep_replays", lambda *_a: [])
   monkeypatch.setattr(memory_runner, "_audit_reads", lambda *_a: [fresh])
-  monkeypatch.setattr(memory_runner, "_consolidate_batches", lambda *_a: consolidation)
+  queued = []
+  def consolidate(*args):
+    queued.append([item["read_id"] for item in args[4]])
+    return consolidation
+  monkeypatch.setattr(memory_runner, "_consolidate_batches", consolidate)
   monkeypatch.setattr(memory_runner, "_repair_orphans", lambda *_a: [])
   monkeypatch.setattr(memory_runner, "_record_run_status", lambda *_a: None)
   monkeypatch.setattr(memory_runner, "_apply_recall_guidance", lambda *_a: applied.append(1))
@@ -938,20 +930,8 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   assert [(item["read_id"], item["verdict_source"]) for item in final_verdicts] == [
     ("fresh", "deep_replay_unreviewed"), ("old", "writer"),
   ]
-  recorded.clear()
-  deferred_old = {**deferred, "read_id": "old"}
-  all_deferred = {**proposal, "read_audits": [deferred_old, deferred],
-                  "recall_guidance": None}
-  monkeypatch.setattr(memory_runner, "_consolidate_batches", lambda *_a:
-    memory_runner.BatchConsolidation(
-      [all_deferred], [outcome], graph, [], [], [], [], [], [], None, None,
-      0, 0, 1, 0,
-    ))
-  assert asyncio.run(memory_runner.run()) == 0
-  assert [(item["read_id"], item["verdict_source"])
-          for item in recorded[0][2]["read_audits"]] == [
-    ("fresh", "deep_replay_unreviewed"),
-  ]
+  # Equal-size disagreements: tonight's read goes ahead of the backlog.
+  assert queued == [["fresh", "old"], ["fresh", "old"]]
 
 
 def test_updated_note_text_preserves_updates_from_every_batch():
