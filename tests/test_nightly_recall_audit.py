@@ -10,6 +10,7 @@ import pytest
 
 import memory_graph
 import memory_runner
+import memory_store
 from memory_text_provider import TextResult, classify_process_failure
 
 
@@ -804,6 +805,72 @@ def test_provisional_stats_are_not_judged_and_review_supersedes(monkeypatch, tmp
   second = json.loads((state / "recall-stats.json").read_text())
   assert (second["reads_audited"], second["reads_judged"],
           second["provisional_reads"], second["misses"]) == (1, 1, 0, 0)
+
+
+def test_audit_rows_drop_the_live_frontier_without_changing_any_result(
+  monkeypatch, tmp_path,
+):
+  # The live frontier is most of each logged row; holding the whole history
+  # of it in memory grew every nightly run with no reader needing it.
+  state = tmp_path / "app-state"
+  (state / "read-log").mkdir(parents=True)
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_store, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
+  monkeypatch.setattr(memory_runner, "read_revision_file",
+                      lambda commit, path: f"{path}@{commit}")
+  monkeypatch.setattr(memory_store, "_note_creation_times",
+                      lambda: {"notes/answer.md": "2026-08-01T00:00:00+00:00"})
+  frontier = [{"path": "mocs/big.md", "nodes": [
+    {"path": f"notes/n{index}.md", "title": "x" * 200} for index in range(50)
+  ]}]
+  traces = [
+    {"schema": 4, "read_id": read_id, "at": f"2026-09-01T00:00:0{index}+00:00",
+     "question": "Relevant fact?", "commit": "a" * 40, "files": [],
+     "frontier_at_stop": frontier}
+    for index, read_id in enumerate(("judged", "pending"))
+  ]
+  (state / "read-log" / "2026-09-01.jsonl").write_text(
+    "".join(json.dumps(trace) + "\n" for trace in traces),
+  )
+  graph = {"nodes": [], "edges": []}
+  audits = memory_runner._audit_reads("b" * 40, traces, [
+    {"read_id": trace["read_id"], "selected": ["notes/answer.md"], "reason": "fact"}
+    for trace in traces
+  ])
+  for audit in audits:
+    audit["live"]["frontier_at_stop"] = frontier
+  memory_runner._record_recall_audits("run-1", audits, {"read_audits": [
+    {"read_id": "judged", "outcome": "miss", "overreach": True,
+     "missed_nodes": ["notes/answer.md"], "overselected_nodes": ["notes/n1.md"],
+     "reason": "fact existed", "usefulness": "mixed", "verdict_source": "writer"},
+    memory_runner._unreviewed_verdict(audits[1]),
+  ]}, graph)
+
+  logged = memory_store.read_jsonl(state / "recall-audit" / next(
+    path.name for path in (state / "recall-audit").glob("*.jsonl")
+  ))
+  assert {key for row in logged for key in row} - memory_store.AUDIT_ROW_FIELDS == {
+    "live_frontier_at_stop", "live_stop_reason",
+  }
+  assert all("live_frontier_at_stop" not in row
+             for row in memory_store.latest_audit_rows(state))
+
+  def results() -> dict:
+    stats = memory_runner._recall_stats_from_log({}, graph)
+    stats.pop("updated_at")
+    return {
+      "usage": memory_store.note_usage_evidence(),
+      "stats": stats,
+      "requeued": memory_runner._unreviewed_read_audits(),
+    }
+
+  trimmed = results()
+  monkeypatch.setattr(memory_store, "AUDIT_ROW_FIELDS",
+                      frozenset(key for row in logged for key in row))
+  assert results() == trimmed
+  assert trimmed["usage"]["notes/answer.md"]["needed"] == 2
+  assert [item["read_id"] for item in trimmed["requeued"]] == ["pending"]
 
 
 def test_later_audit_item_sees_staged_coaching_without_publishing(monkeypatch, tmp_path):
