@@ -810,13 +810,55 @@ def _note_creation_times() -> dict[str, str]:
   return created
 
 
+# Verdict sources for readings no writer judged: excluded from rates and from
+# note retention evidence. An unreviewed reading may come back for review; a
+# rejected one was attempted and is final, so it never re-queues.
+PROVISIONAL_VERDICT_SOURCES = frozenset({"deep_replay_unreviewed", "writer_rejected"})
+
+
+def read_jsonl(path: Path) -> list[dict]:
+  """Return the decodable JSON object lines of one append-only log.
+
+  An append cut short can leave a torn line, even mid-character; it is skipped
+  so one bad line never hides the rest of the log or fails a nightly run.
+  """
+  try:
+    data = path.read_bytes()
+  except OSError:
+    return []
+  rows = []
+  for line in data.splitlines():
+    try:
+      row = json.loads(line.decode("utf-8"))
+    except (UnicodeError, ValueError):
+      continue
+    if isinstance(row, dict):
+      rows.append(row)
+  return rows
+
+
+def latest_audit_rows(state: Path = STATE) -> list[dict]:
+  """Return the latest recall-audit row per read, oldest log first.
+
+  A later writer verdict supersedes an earlier provisional row for the same
+  read; rows without a read id each stand alone.
+  """
+  latest: dict[object, dict] = {}
+  for log in sorted((state / "recall-audit").glob("*.jsonl")):
+    for index, row in enumerate(read_jsonl(log)):
+      read_id = row.get("read_id")
+      latest[read_id if isinstance(read_id, str) else (log.name, index)] = row
+  return list(latest.values())
+
+
 def note_usage_evidence() -> dict[str, dict]:
   """How each note has fared in audited lookups since it was written.
 
   Built fresh from the append-only recall-audit log, so it needs no counters
   of its own. A lookup `needed` a note when a judged verdict kept or missed it
-  (writer review, or full live/deep agreement). Unreviewed replay readings
-  are provisional and cannot justify retaining or retiring a note.
+  (writer review, or full live/deep agreement). Provisional readings (not
+  reviewed, or rejected when reviewed) cannot justify retaining or retiring a
+  note.
   """
   created = _note_creation_times()
   usage: dict[str, dict] = {}
@@ -826,22 +868,14 @@ def note_usage_evidence() -> dict[str, dict]:
       "needed": 0, "overreach": 0, "last_needed_at": None,
     })
 
-  latest: dict[str, dict] = {}
-  for log in sorted((STATE / "recall-audit").glob("*.jsonl")):
-    for index, line in enumerate(log.read_text(encoding="utf-8").splitlines()):
-      try:
-        record = json.loads(line)
-      except ValueError:
-        continue
-      if not isinstance(record, dict) or not isinstance(record.get("at"), str):
-        continue
-      read_id = record.get("read_id")
-      latest[read_id if isinstance(read_id, str) else f"{log.name}:{index}"] = record
   lookups: list[str] = []
-  for record in latest.values():
-    if record.get("verdict_source") == "deep_replay_unreviewed":
+  for record in latest_audit_rows(STATE):
+    at = record.get("at")
+    if (
+      not isinstance(at, str)
+      or record.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES
+    ):
       continue
-    at = record["at"]
     lookups.append(at)
     live = set(record.get("live_selected") or ())
     over = set(record.get("overselected_nodes") or ())

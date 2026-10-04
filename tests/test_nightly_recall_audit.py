@@ -782,15 +782,6 @@ def test_unreviewed_log_requeues_only_revisioned_rows_until_reviewed(monkeypatch
           stats["provisional_reads"]) == (2, 1, 1)
 
 
-def test_writer_cannot_defer_a_read_verdict():
-  audit = {"read_id": "old", "deep": {"missed": [], "overreach": []}}
-  with pytest.raises(memory_runner.ProposalValidationError):
-    memory_runner._normalize_audit_verdicts({"read_audits": [{
-      "read_id": "old", "outcome": "defer", "overreach": False,
-      "missed_nodes": [], "overselected_nodes": [], "reason": "Later",
-    }]}, [audit])
-
-
 def test_provisional_stats_are_not_judged_and_review_supersedes(monkeypatch, tmp_path):
   state = tmp_path / "app-state"
   monkeypatch.setattr(memory_runner, "STATE", state)
@@ -879,7 +870,7 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   outcome = memory_runner.ProposalOutcome("ok", proposal, "codex", "test", [])
   consolidation = memory_runner.BatchConsolidation(
     [proposal], [outcome], graph, [], [], [], [audit], [], [], None, None,
-    0, 0, 1, 0,
+    0, [], 1, 0,
   )
   applied = []
   recorded = []
@@ -932,6 +923,137 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   ]
   # Equal-size disagreements: tonight's read goes ahead of the backlog.
   assert queued == [["fresh", "old"], ["fresh", "old"]]
+
+
+def test_rejected_audit_items_do_not_requeue_and_starve_fresh_reads(monkeypatch, tmp_path):
+  # Three large carried-over disagreements always fail writer validation. They
+  # must be settled on the night they fail, or they reach the lane rejection
+  # limit first every night and the fresh read is never reviewed.
+  state = tmp_path / "app-state"
+  (state / "read-log").mkdir(parents=True)
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
+  monkeypatch.setattr(memory_runner, "read_revision_file",
+                      lambda commit, path: f"{path}@{commit}")
+  graph = {"nodes": [], "edges": [], "problems": []}
+
+  def trace(read_id):
+    return {"schema": 4, "read_id": read_id, "at": "2026-09-01T00:00:00+00:00",
+            "question": "Relevant fact?", "commit": "a" * 40, "files": []}
+
+  def replay(read_id, size):
+    return {"read_id": read_id, "reason": "fact", "attempts": [],
+            "selected": [f"notes/{read_id}-{index}.md" for index in range(size)]}
+
+  sizes = {"poison1": 5, "poison2": 4, "poison3": 3, "poison4": 2, "fresh": 1}
+  (state / "read-log" / "2026-09-01.jsonl").write_text(
+    "".join(json.dumps(trace(read_id)) + "\n" for read_id in sizes),
+  )
+  backlog = memory_runner._audit_reads(
+    "b" * 40, [trace(f"poison{index}") for index in (1, 2, 3)],
+    [replay(f"poison{index}", sizes[f"poison{index}"]) for index in (1, 2, 3)],
+  )
+  memory_runner._record_recall_audits("run-0", backlog, {"read_audits": [
+    *map(memory_runner._unreviewed_verdict, backlog),
+  ]}, graph)
+
+  nights = [["fresh"], ["poison4"]]
+  calls = []
+  statuses = []
+  def propose(_app, _path, _chats, audits, _providers, _deadline, **_kwargs):
+    read_id = audits[0]["read_id"]
+    calls[-1].append(read_id)
+    if read_id.startswith("poison"):
+      return memory_runner.ProposalOutcome(
+        "degraded", None, None, None, [{"provider": "x", "failure_code": "invalid_json"}],
+      )
+    return memory_runner.ProposalOutcome("ok", {
+      "updates": [], "deletes": [], "recall_guidance": None,
+      "read_audits": [{"read_id": read_id, "outcome": "miss", "overreach": False,
+                       "missed_nodes": ["notes/fresh-0.md"],
+                       "overselected_nodes": [], "reason": "fact existed"}],
+    }, "codex", "test", [])
+  monkeypatch.setattr(memory_runner, "_proposal", propose)
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+  monkeypatch.setattr(memory_runner, "_apply_validated_proposal",
+                      lambda _path, value, **_kwargs: (value, [], [], graph))
+  monkeypatch.setattr(memory_runner, "_pending_read_traces",
+                      lambda: [trace(read_id) for read_id in nights[len(calls) - 1]])
+  monkeypatch.setattr(memory_runner, "_deep_replays", lambda _commit, traces, _deadline: [
+    replay(item["read_id"], sizes[item["read_id"]]) for item in traces
+  ])
+  monkeypatch.setattr(memory_runner, "_app_id", lambda: 57)
+  monkeypatch.setattr(memory_runner, "APP_TOKEN", "scoped-token")
+  monkeypatch.setattr(memory_runner, "_app_active", lambda _app: True)
+  monkeypatch.setattr(memory_runner, "ready_pointer", lambda: {"commit": "c" * 40})
+  monkeypatch.setattr(memory_runner, "start_staging", lambda _seed: ("run", tmp_path))
+  monkeypatch.setattr(memory_runner, "discard_staging", lambda _path: None)
+  monkeypatch.setattr(memory_runner, "_migrate_recall_stats", lambda: False)
+  monkeypatch.setattr(memory_runner, "_migrate_source_records", lambda _path: [])
+  monkeypatch.setattr(memory_runner, "build_graph", lambda *_a, **_k: graph)
+  monkeypatch.setattr(memory_runner, "_reconcile_app_owned_docs", lambda *_a: ([], []))
+  monkeypatch.setattr(memory_runner, "_collect_capture_intake",
+                      lambda: memory_runner.CaptureIntake([]))
+  monkeypatch.setattr(memory_runner, "_known_chat_sources", lambda _path: set())
+  monkeypatch.setattr(memory_runner, "_archived_active_chat_ids", lambda _path: set())
+  monkeypatch.setattr(memory_runner, "_collect_archived_source_lifecycle",
+                      lambda *_a: ([], []))
+  monkeypatch.setattr(memory_runner, "_anonymize_deleted_chat_sources", lambda *_a: [])
+  monkeypatch.setattr(memory_runner, "_repair_orphans", lambda *_a: [])
+  monkeypatch.setattr(memory_runner, "_record_run_status", statuses.append)
+  monkeypatch.setattr(memory_runner, "_apply_recall_guidance", lambda *_a: {"status": "kept"})
+  monkeypatch.setattr(memory_runner, "publish", lambda _path: {"commit": "c" * 40, "changed": True})
+  monkeypatch.setattr(memory_runner, "refresh_profile", lambda **_kwargs: {})
+  monkeypatch.setattr(memory_runner, "consume_captures", lambda *_a: None)
+  monkeypatch.setattr(memory_runner, "_append_update_log", lambda *_a, **_k: None)
+  monkeypatch.setattr(memory_runner, "_mark_consolidated_through_publication", lambda *_a: None)
+
+  calls.append([])
+  assert asyncio.run(memory_runner.run()) == 2
+  assert calls[0] == ["poison1", "poison2", "poison3"]
+  calls.append([])
+  assert asyncio.run(memory_runner.run()) == 0
+  # Night two: the rejected backlog stays settled and the fresh read from
+  # night one is reviewed; tonight's failing read is attempted once.
+  assert calls[1] == ["poison4", "fresh"]
+  assert (statuses[-1]["writer_reviewed_read_audit_count"],
+          statuses[-1]["deferred_read_audit_count"]) == (1, 0)
+  assert memory_runner._unreviewed_read_audits() == []
+  sources = {row["read_id"]: row["verdict_source"]
+             for row in memory_runner.latest_audit_rows(state)}
+  assert sources == {"poison1": "writer_rejected", "poison2": "writer_rejected",
+                     "poison3": "writer_rejected", "poison4": "writer_rejected",
+                     "fresh": "writer"}
+  stats = json.loads((state / "recall-stats.json").read_text())
+  assert (stats["reads_judged"], stats["provisional_reads"]) == (1, 4)
+
+
+def test_log_scanners_skip_a_torn_multibyte_line(monkeypatch, tmp_path):
+  state = tmp_path / "app-state"
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
+  monkeypatch.setattr(memory_runner, "read_revision_file",
+                      lambda commit, path: f"{path}@{commit}")
+  trace = {"schema": 4, "read_id": "pending", "at": "2026-09-01T00:00:00+00:00",
+           "question": "Café fact?", "commit": "a" * 40, "files": []}
+  audit = memory_runner._audit_reads("b" * 40, [trace], [{
+    "read_id": "pending", "selected": ["notes/answer.md"], "reason": "fact",
+  }])[0]
+  memory_runner._record_recall_audits("run-1", [audit], {"read_audits": [
+    memory_runner._unreviewed_verdict(audit),
+  ]}, {"nodes": [], "edges": []})
+  # An append cut off inside a multibyte character is not valid UTF-8.
+  torn = json.dumps({"read_id": "torn", "reason": "naïve"}, ensure_ascii=False)
+  torn = torn.encode("utf-8")[:torn.index("ï") + 1] + b"\n"
+  read_log = state / "read-log" / "2026-09-01.jsonl"
+  read_log.parent.mkdir(parents=True)
+  read_log.write_bytes(torn + (json.dumps(trace, ensure_ascii=False) + "\n").encode())
+  audit_log = next((state / "recall-audit").glob("*.jsonl"))
+  audit_log.write_bytes(audit_log.read_bytes() + torn)
+
+  assert [item["read_id"] for item in memory_runner._unreviewed_read_audits()] == ["pending"]
+  stats = memory_runner._recall_stats_from_log({})
+  assert (stats["reads_audited"], stats["provisional_reads"]) == (1, 1)
 
 
 def test_updated_note_text_preserves_updates_from_every_batch():

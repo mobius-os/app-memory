@@ -34,14 +34,17 @@ from personalization_profile import refresh_profile
 from memory_store import (
   MAX_NOTE_BYTES,
   MAX_RECALL_GUIDANCE_CHARS,
+  PROVISIONAL_VERDICT_SOURCES,
   STATE,
   consume_captures,
   discard_staging,
+  latest_audit_rows,
   load_captures,
   load_recall_guidance,
   note_usage_evidence,
   load_usage,
   publish,
+  read_jsonl,
   read_revision_file,
   ready_pointer,
   start_staging,
@@ -169,7 +172,7 @@ class BatchConsolidation:
   deferred_reason: str | None
   deferred_detail: str | None
   rejected_chat_count: int
-  rejected_audit_count: int
+  rejected_audits: list[dict]
   audit_batch_count: int
   chat_batch_count: int
   accepted_mocs: list[str] = field(default_factory=list)
@@ -597,16 +600,8 @@ def _pending_read_traces() -> list[dict]:
     # events. Older immutable daily files cannot contain eligible records.
     if cursor_day and path.stem < cursor_day:
       continue
-    try:
-      lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-      continue
-    for line in lines:
-      try:
-        record = json.loads(line)
-      except ValueError:
-        continue
-      if not isinstance(record, dict) or record.get("schema") not in {3, 4}:
+    for record in read_jsonl(path):
+      if record.get("schema") not in {3, 4}:
         continue
       read_id = record.get("read_id")
       at = record.get("at")
@@ -631,34 +626,20 @@ def _pending_read_traces() -> list[dict]:
   return sorted(records, key=lambda item: (str(item["at"]), str(item["read_id"])))
 
 
-def _latest_audit_rows() -> dict[str, dict]:
-  """Return the latest append-only recall-audit row per read id.
-
-  A later writer verdict supersedes an earlier unreviewed row for the same read.
-  """
-  latest: dict[str, dict] = {}
-  for path in sorted((STATE / "recall-audit").glob("*.jsonl")):
-    for line in path.read_text(encoding="utf-8").splitlines():
-      try:
-        row = json.loads(line)
-      except ValueError:
-        continue
-      if isinstance(row, dict) and isinstance(row.get("read_id"), str):
-        latest[row["read_id"]] = row
-  return latest
-
-
 def _unreviewed_read_audits() -> list[dict]:
   """Re-queue unreviewed disagreements without buying another deep replay.
 
-  Only rows that recorded their deep replay revision come back: the writer
-  then sees the exact bodies the replay chose. Older rows cannot show those
-  bodies, so they stay provisional for good (excluded from rates and note
-  retention evidence) instead of returning every night.
+  Only readings the writer never reached come back, and only when they
+  recorded their deep replay revision: the writer then sees the exact bodies
+  the replay chose. Older rows cannot show those bodies, and a reading the
+  writer attempted but had rejected is final (`writer_rejected`); both stay
+  provisional for good (excluded from rates and note retention evidence)
+  instead of returning every night.
   """
   pending = {
-    read_id: row for read_id, row in _latest_audit_rows().items()
-    if row.get("verdict_source") == "deep_replay_unreviewed"
+    row["read_id"]: row for row in latest_audit_rows(STATE)
+    if isinstance(row.get("read_id"), str)
+    and row.get("verdict_source") == "deep_replay_unreviewed"
     and isinstance(row.get("deep_revision"), str) and row["deep_revision"]
     and isinstance(row.get("deep_selected"), list)
     and all(isinstance(path, str) for path in row["deep_selected"])
@@ -667,12 +648,8 @@ def _unreviewed_read_audits() -> list[dict]:
     return []
   traces: dict[str, dict] = {}
   for path in sorted((STATE / "read-log").glob("*.jsonl")):
-    for line in path.read_text(encoding="utf-8").splitlines():
-      try:
-        trace = json.loads(line)
-      except ValueError:
-        continue
-      if isinstance(trace, dict) and trace.get("read_id") in pending:
+    for trace in read_jsonl(path):
+      if trace.get("read_id") in pending:
         traces[trace["read_id"]] = trace
   result = []
   for read_id, row in pending.items():
@@ -778,20 +755,13 @@ def _deep_replays(
 
 
 def _load_replay_cache(commit: str) -> dict[str, dict]:
-  try:
-    lines = _REPLAY_CACHE.read_text(encoding="utf-8").splitlines()
-  except FileNotFoundError:
-    return {}
+  items = read_jsonl(_REPLAY_CACHE)
   cached = {}
-  for line in lines:
-    try:
-      item = json.loads(line)
-    except ValueError:
-      continue
-    if isinstance(item, dict) and item.get("commit") == commit:
+  for item in items:
+    if item.get("commit") == commit:
       # Already paid for by an earlier attempt; not this run's model work.
       cached[str(item.get("read_id"))] = {**item, "attempts": []}
-  if not cached and lines:
+  if not cached and items:
     _REPLAY_CACHE.unlink(missing_ok=True)
   return cached
 
@@ -939,6 +909,19 @@ def _unreviewed_verdict(audit: dict) -> dict:
     "overselected_nodes": overreach,
     "reason": "deep replay disagreement not reviewed by the writer",
     "verdict_source": "deep_replay_unreviewed",
+  }
+
+
+def _rejected_verdict(audit: dict) -> dict:
+  """The deep replay's reading of a disagreement whose writer review failed.
+
+  The writer attempted it and the result was rejected, so it is final rather
+  than re-queued: an item that always fails must not spend tomorrow's review.
+  """
+  return {
+    **_unreviewed_verdict(audit),
+    "reason": "writer review of this deep replay disagreement was rejected",
+    "verdict_source": "writer_rejected",
   }
 
 
@@ -1390,17 +1373,7 @@ def _consolidation_leads(ids: list[str], since: str = "") -> list[str]:
     return []
   leads: list[str] = []
   for path in reversed(files):
-    try:
-      lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-      continue
-    for line in reversed(lines):
-      try:
-        record = json.loads(line)
-      except ValueError:
-        continue
-      if not isinstance(record, dict):
-        continue
+    for record in reversed(read_jsonl(path)):
       if since and str(record.get("timestamp") or "") <= since:
         continue
       texts = [
@@ -2067,13 +2040,15 @@ Complete all four nightly duties in one coherent pass:
    or leave it out when it fails admission or contradicts the digest. A
    claimed success stays provisional under the testimony rule below. Cite the
    chat's source handle.
-2. Review EVERY `read_audits` entry. Each is a live lookup where tonight's
-   deep replay disagreed with what live recall selected (tonight or an earlier
-   night). `live` holds what the
+2. Review EVERY `read_audits` entry. Each is a live lookup where a
+   deep replay disagreed with what live recall selected; the replay ran
+   tonight or, for an item carried over, on an earlier night. `live` holds what the
    daytime reader opened and selected, with the complete selected bodies;
    `deep` holds the reference selection from a reader that saw every note
-   title, with `missed` (reference-only notes, bodies in `missed_nodes`) and
-   `overreach` (live-only notes). The reference is evidence, not truth: judge
+   title, with `missed` (reference-only notes, bodies in `missed_nodes` as of
+   `deep.revision`) and `overreach` (live-only notes). A carried-over note may
+   have changed or been retired since; check `existing_graph` before
+   restoring one. The reference is evidence, not truth: judge
    each disagreement yourself against the request. When a genuinely useful
    note was missed, repair the shortest useful route in the SAME proposal: add
    a better described cross-link, or move the important distinction into a
@@ -3236,8 +3211,11 @@ def _recall_stats_from_log(prior: dict, graph: dict | None = None) -> dict:
   # A later writer review is a new evidence row, not a second lookup. Rebuild
   # the hot counters from the latest row per id so old provisional misses are
   # removed from judged rates even across restarts and release upgrades.
-  rows = list(_latest_audit_rows().values())
-  judged = [row for row in rows if row.get("verdict_source") != "deep_replay_unreviewed"]
+  rows = latest_audit_rows(STATE)
+  judged = [
+    row for row in rows
+    if row.get("verdict_source") not in PROVISIONAL_VERDICT_SOURCES
+  ]
   provisional = len(rows) - len(judged)
   total = len(judged)
   def count(key: str, value: object) -> int:
@@ -3570,6 +3548,7 @@ def _consolidate_batches(
   accepted_graph = baseline
   remaining_audits = list(read_audits)
   accepted_audits: list[dict] = []
+  rejected_audits: list[dict] = []
   remaining_chats = list(chats)
   accepted_chats: list[dict] = []
   deferred_chats: list[dict] = []
@@ -3582,6 +3561,9 @@ def _consolidate_batches(
   deferred_attempts: list[dict] = []
   deferred_reason = None
   deferred_detail = None
+  # Later items see the last accepted coaching change; it is applied only
+  # after publication.
+  staged_guidance: dict | None = None
   lanes = ("audit", "chat", "consolidate")
   batches = dict.fromkeys(lanes, 0)
   rejected = dict.fromkeys(lanes, 0)
@@ -3630,13 +3612,7 @@ def _consolidate_batches(
     candidate_outcome = _proposal(
       app_id, staging, batch, batch_audits, providers, deadline,
       **({"consolidation": consolidation} if consolidation is not None else {}),
-      current_recall_guidance=(
-        {"instruction": staged["instruction"] if staged["action"] == "replace" else "",
-         "reason": staged["reason"],
-         "evidence_read_ids": staged["evidence_read_ids"]}
-        if (staged := _combined_proposal(proposals).get("recall_guidance"))
-        else None
-      ),
+      current_recall_guidance=staged_guidance,
     )
     rejection_reason = None
     rejection_detail = None
@@ -3685,7 +3661,7 @@ def _consolidate_batches(
       deferred_detail = rejection_detail
       consecutive_rejections[work_kind] += 1
       if work_kind == "audit":
-        rejected["audit"] += len(batch_audits)
+        rejected_audits.extend(batch_audits)
         remaining_audits = remaining_audits[len(batch_audits):]
       elif work_kind == "chat":
         rejected["chat"] += len(batch)
@@ -3699,6 +3675,13 @@ def _consolidate_batches(
     deleted.extend(proposed_deleted)
     proposals.append(proposal)
     provider_outcomes.append(candidate_outcome)
+    guidance = proposal.get("recall_guidance")
+    if isinstance(guidance, dict) and guidance.get("action") in {"replace", "clear"}:
+      staged_guidance = {
+        "instruction": guidance.get("instruction") if guidance["action"] == "replace" else "",
+        "reason": guidance.get("reason"),
+        "evidence_read_ids": guidance.get("evidence_read_ids"),
+      }
     accepted_graph = accepted_candidate
     consecutive_rejections[work_kind] = 0
     batches[work_kind] += 1
@@ -3725,7 +3708,7 @@ def _consolidate_batches(
     deferred_reason=deferred_reason,
     deferred_detail=deferred_detail,
     rejected_chat_count=rejected["chat"],
-    rejected_audit_count=rejected["audit"],
+    rejected_audits=rejected_audits,
     audit_batch_count=batches["audit"],
     chat_batch_count=batches["chat"],
     accepted_mocs=accepted_mocs,
@@ -3970,6 +3953,24 @@ async def run() -> int:
     deferred_detail = consolidation.deferred_detail
     audit_proposal_count = consolidation.audit_batch_count
     chat_proposal_count = consolidation.chat_batch_count
+    # Only disagreements the deadline kept from the writer stay queued. One
+    # it attempted and had rejected is recorded as final, so an item that
+    # always fails cannot close tomorrow's audit lane before fresh reads.
+    reviewed_ids = {audit["read_id"] for audit in proposal_audits}
+    rejected_ids = {audit["read_id"] for audit in consolidation.rejected_audits}
+    unreviewed_audits = [
+      audit for audit in fresh_disagreements
+      if audit["read_id"] not in reviewed_ids | rejected_ids
+    ]
+    settled_backlog = [
+      audit for audit in backlog_audits
+      if audit["read_id"] in reviewed_ids | rejected_ids
+    ]
+    unjudged_verdicts = [
+      *agreed_verdicts,
+      *map(_unreviewed_verdict, unreviewed_audits),
+      *map(_rejected_verdict, consolidation.rejected_audits),
+    ]
     if not proposals or not consolidation.provider_outcomes:
       degraded = {
         "schema": 1,
@@ -3985,7 +3986,7 @@ async def run() -> int:
         "reason": deferred_reason or "no_valid_text_only_proposal",
         "source_chat_count": 0,
         "attempted_chat_count": consolidation.rejected_chat_count,
-        "attempted_read_audit_count": consolidation.rejected_audit_count,
+        "attempted_read_audit_count": len(consolidation.rejected_audits),
         "queued_chat_count": len(chats),
         "chat_input_starved": bool(
           chats and not consolidation.rejected_chat_count
@@ -4003,9 +4004,10 @@ async def run() -> int:
       _record_run_status(degraded)
       try:
         # Replay metrics do not depend on the writer; keep them.
-        _record_recall_audits(run_id, replayed_audits, {"read_audits": [
-          *agreed_verdicts, *map(_unreviewed_verdict, fresh_disagreements),
-        ]}, prepared)
+        _record_recall_audits(
+          run_id, [*replayed_audits, *settled_backlog],
+          {"read_audits": unjudged_verdicts}, prepared,
+        )
       except OSError as exc:
         _log(f"WARN replay metrics not recorded: {exc!r}")
       _log(
@@ -4013,10 +4015,6 @@ async def run() -> int:
         f"{degraded['reason']}"
       )
       return 2
-    reviewed_ids = {audit["read_id"] for audit in proposal_audits}
-    unreviewed_audits = [
-      audit for audit in fresh_disagreements if audit["read_id"] not in reviewed_ids
-    ]
     deferred_read_audit_count = max(
       0, pending_read_audit_count - len(replayed_audits),
     )
@@ -4118,7 +4116,10 @@ async def run() -> int:
       "read_audit_count": len(replayed_audits),
       "agreed_read_audit_count": len(agreed_audits),
       "writer_reviewed_read_audit_count": len(proposal_audits),
-      "deferred_read_audit_count": deferred_read_audit_count + len(read_audits) - len(proposal_audits),
+      "deferred_read_audit_count": (
+        deferred_read_audit_count + len(read_audits) - len(proposal_audits)
+        - len(consolidation.rejected_audits)
+      ),
       "proposal_batch_count": len(proposals),
       "audit_proposal_batch_count": audit_proposal_count,
       "chat_proposal_batch_count": chat_proposal_count,
@@ -4182,12 +4183,11 @@ async def run() -> int:
       _mark_consolidated_through_publication(list(consolidation.accepted_mocs))
       _record_recall_audits(
         run_id,
-        [*replayed_audits, *(audit for audit in backlog_audits if audit["read_id"] in reviewed_ids)],
+        [*replayed_audits, *settled_backlog],
         {
           **proposal,
           "read_audits": [
-            *agreed_verdicts,
-            *map(_unreviewed_verdict, unreviewed_audits),
+            *unjudged_verdicts,
             *(
               {**verdict, "verdict_source": "writer"}
               for verdict in proposal.get("read_audits") or []

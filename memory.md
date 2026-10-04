@@ -167,8 +167,11 @@ any the writer does not reach are recorded as unreviewed replay readings.
 Those readings are provisional, not judged misses or retention evidence. A
 reading that recorded its deep replay revision stays queued for later writer
 review without another deep replay, behind tonight's reads of equal size;
-older readings without that revision stay provisional. A later verdict
-supersedes the provisional reading once per read.
+older readings without that revision stay provisional. A disagreement the
+writer attempted but had rejected is recorded as a final provisional reading
+and never re-queued, so an item that always fails cannot crowd out fresh
+reads. A later verdict supersedes the provisional reading once per read.
+Every log reader skips a torn or undecodable line instead of failing the run.
 Consolidation takes only maps with something new to act on: the map or a note
 filed under it changed since the writer last consolidated it (a filed saved
 fact, an audit repair, a deletion), or a follow-up naming it was written since.

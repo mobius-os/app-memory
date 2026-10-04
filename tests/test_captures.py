@@ -158,3 +158,33 @@ def test_usage_evidence_counts_needed_overreach_and_lookups_since_creation(
   assert usage["notes/new.md"]["needed"] == 1
   assert usage["notes/new.md"]["lookups_since_created"] == 1
   assert usage["notes/new.md"]["last_needed_at"] == "2026-09-21T00:00:00+00:00"
+
+
+def test_usage_evidence_uses_latest_judged_row_and_skips_torn_lines(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(memory_store, "STATE", tmp_path)
+  monkeypatch.setattr(memory_store, "_note_creation_times", lambda: {})
+  log = tmp_path / "recall-audit" / "x.jsonl"
+  log.parent.mkdir()
+  rows = [
+    {"read_id": "one", "at": "2026-09-01T00:00:00+00:00",
+     "verdict_source": "deep_replay_unreviewed", "live_selected": [],
+     "missed_nodes": ["notes/a.md"]},
+    {"read_id": "two", "at": "2026-09-01T00:00:00+00:00",
+     "verdict_source": "writer_rejected", "live_selected": [],
+     "missed_nodes": ["notes/b.md"]},
+    {"read_id": "one", "at": "2026-09-01T00:00:00+00:00",
+     "verdict_source": "writer", "live_selected": ["notes/c.md"],
+     "missed_nodes": []},
+  ]
+  torn = json.dumps({"read_id": "x", "reason": "café"}, ensure_ascii=False)
+  torn = torn.encode("utf-8")[:torn.index("é") + 1] + b"\n"
+  log.write_bytes(torn.join(
+    (json.dumps(row, ensure_ascii=False) + "\n").encode() for row in rows
+  ))
+
+  usage = memory_store.note_usage_evidence()
+
+  assert set(usage) == {"notes/c.md"}
+  assert usage["notes/c.md"]["needed"] == 1
