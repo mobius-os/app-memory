@@ -34,14 +34,17 @@ from personalization_profile import refresh_profile
 from memory_store import (
   MAX_NOTE_BYTES,
   MAX_RECALL_GUIDANCE_CHARS,
+  PROVISIONAL_VERDICT_SOURCES,
   STATE,
   consume_captures,
   discard_staging,
+  latest_audit_rows,
   load_captures,
   load_recall_guidance,
   note_usage_evidence,
   load_usage,
   publish,
+  read_jsonl,
   read_revision_file,
   ready_pointer,
   start_staging,
@@ -110,6 +113,7 @@ _RECENT_AUDIT_KEYS = (
   "schema", "run_id", "read_id", "at", "question_sha256", "outcome",
   "overreach", "miss_class", "reason", "host_selection_override",
   "usefulness", "hindsight_reason", "deep_recall", "deep_noise",
+  "verdict_source",
 )
 _RUN_TIMEOUT_SECONDS = int(os.environ.get("MEMORY_TIMEOUT", "3600"))
 # Lookups replayed per reference call. The catalogue dominates each call, so
@@ -120,9 +124,12 @@ _FINISH_RESERVE_SECONDS = 60
 # Consolidation rotates through maps one neighborhood per work item. The cursor
 # only orders that rotation; losing it costs nothing but a repeated pass.
 _CONSOLIDATION_CURSOR = STATE / "consolidation-cursor.json"
-# A lane stops for the night only after several consecutive rejected items, so
-# one malformed analyst answer defers one item instead of the whole lane.
+# A lane stops for the night only after several consecutive failed items, so
+# one malformed analyst answer costs one item instead of the whole lane.
 _LANE_REJECTION_LIMIT = 3
+# Unreviewed disagreements kept queued for a later writer review; the writer
+# reaches only a few audit items per night.
+_AUDIT_BACKLOG_LIMIT = 10
 _MAX_CONSOLIDATION_LEADS = 20
 @dataclass(frozen=True)
 class ProposalOutcome:
@@ -168,7 +175,7 @@ class BatchConsolidation:
   deferred_reason: str | None
   deferred_detail: str | None
   rejected_chat_count: int
-  rejected_audit_count: int
+  failed_audits: list[dict]
   audit_batch_count: int
   chat_batch_count: int
   accepted_mocs: list[str] = field(default_factory=list)
@@ -547,12 +554,18 @@ def _compact_recent_audits(records: list[dict]) -> list[dict]:
 
 
 def _migrate_recall_stats() -> bool:
-  """Compact legacy hot-status records; full evidence remains in JSONL logs."""
+  """Rebuild pre-provisional stats from the audit log, else compact `recent`.
+
+  Full evidence remains in the JSONL logs.
+  """
   stats = _recall_stats()
   recent = stats.get("recent")
   if not isinstance(recent, list):
     return False
   compact = _compact_recent_audits(recent)
+  if "reads_judged" not in stats and any((STATE / "recall-audit").glob("*.jsonl")):
+    _write_json_atomic(_RECALL_STATS, _recall_stats_from_log(stats))
+    return True
   if compact == recent:
     return False
   _write_json_atomic(_RECALL_STATS, {**stats, "recent": compact})
@@ -593,16 +606,8 @@ def _pending_read_traces() -> list[dict]:
     # events. Older immutable daily files cannot contain eligible records.
     if cursor_day and path.stem < cursor_day:
       continue
-    try:
-      lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-      continue
-    for line in lines:
-      try:
-        record = json.loads(line)
-      except ValueError:
-        continue
-      if not isinstance(record, dict) or record.get("schema") not in {3, 4}:
+    for record in read_jsonl(path):
+      if record.get("schema") not in {3, 4}:
         continue
       read_id = record.get("read_id")
       at = record.get("at")
@@ -625,6 +630,46 @@ def _pending_read_traces() -> list[dict]:
           logical_positions[logical_key] = len(records)
         records.append(record)
   return sorted(records, key=lambda item: (str(item["at"]), str(item["read_id"])))
+
+
+def _unreviewed_read_audits() -> list[dict]:
+  """Re-queue the newest unreviewed disagreements without another deep replay.
+
+  Only readings no model has run on come back, and only when they recorded
+  their deep replay revision: the writer then sees the exact bodies the
+  replay chose. Older rows cannot show those bodies, a reading a model ran on
+  without an accepted verdict is final (`writer_failed`), and only the newest
+  `_AUDIT_BACKLOG_LIMIT` readings are kept queued; every other one stays
+  provisional for good (excluded from rates; see `note_usage_evidence`), so
+  the queue, its nightly cost and the age of its evidence stay bounded.
+  """
+  pending = [
+    row for row in latest_audit_rows(STATE)
+    if isinstance(row.get("read_id"), str)
+    and isinstance(row.get("at"), str)
+    and row.get("verdict_source") == "deep_replay_unreviewed"
+    and isinstance(row.get("deep_revision"), str) and row["deep_revision"]
+    and isinstance(row.get("deep_selected"), list)
+    and all(isinstance(path, str) for path in row["deep_selected"])
+  ]
+  pending = {
+    row["read_id"]: row
+    for row in sorted(pending, key=lambda row: row["at"])[-_AUDIT_BACKLOG_LIMIT:]
+  }
+  # Read logs are daily files, so only the days of the queued reads are read.
+  traces: dict[str, dict] = {}
+  for day in sorted({row["at"][:10] for row in pending.values()}):
+    for trace in read_jsonl(STATE / "read-log" / f"{day}.jsonl"):
+      if trace.get("read_id") in pending:
+        traces[trace["read_id"]] = trace
+  result = []
+  for read_id, row in pending.items():
+    if read_id not in traces:
+      continue
+    replay = {"read_id": read_id, "selected": row["deep_selected"],
+              "reason": row.get("deep_reason") or "prior deep replay"}
+    result.extend(_audit_reads(row["deep_revision"], [traces[read_id]], [replay]))
+  return result
 
 
 def _audit_prompt_view(audit: dict) -> dict:
@@ -721,20 +766,13 @@ def _deep_replays(
 
 
 def _load_replay_cache(commit: str) -> dict[str, dict]:
-  try:
-    lines = _REPLAY_CACHE.read_text(encoding="utf-8").splitlines()
-  except FileNotFoundError:
-    return {}
+  items = read_jsonl(_REPLAY_CACHE)
   cached = {}
-  for line in lines:
-    try:
-      item = json.loads(line)
-    except ValueError:
-      continue
-    if isinstance(item, dict) and item.get("commit") == commit:
+  for item in items:
+    if item.get("commit") == commit:
       # Already paid for by an earlier attempt; not this run's model work.
       cached[str(item.get("read_id"))] = {**item, "attempts": []}
-  if not cached and lines:
+  if not cached and items:
     _REPLAY_CACHE.unlink(missing_ok=True)
   return cached
 
@@ -838,6 +876,7 @@ def _audit_reads(
       "deep": {
         "selected": deep,
         "reason": replay["reason"],
+        "revision": commit or None,
         "missed": missed,
         "missed_nodes": bodies(missed, commit),
         "overreach": overreach,
@@ -865,8 +904,9 @@ def _agreed_verdict(audit: dict) -> dict | None:
 def _unreviewed_verdict(audit: dict) -> dict:
   """The deep replay's own reading of a disagreement the writer did not reach.
 
-  It keeps tonight's metrics complete and lets the audit cursor move on; the
-  `verdict_source` marks it as unjudged so no expectation is learned from it.
+  It lets the audit cursor move on, and the reading may come back for a later
+  writer review; the `verdict_source` marks it as unjudged, so it is left out
+  of recall metrics and no expectation is learned from it.
   """
   deep = audit.get("deep") or {}
   missed = list(deep.get("missed") or [])
@@ -881,6 +921,19 @@ def _unreviewed_verdict(audit: dict) -> dict:
     "overselected_nodes": overreach,
     "reason": "deep replay disagreement not reviewed by the writer",
     "verdict_source": "deep_replay_unreviewed",
+  }
+
+
+def _failed_verdict(audit: dict) -> dict:
+  """The deep replay's reading of a disagreement whose writer review failed.
+
+  A model ran on it and produced no accepted verdict, so it is final rather
+  than re-queued: an item that always fails must not spend tomorrow's review.
+  """
+  return {
+    **_unreviewed_verdict(audit),
+    "reason": "writer review of this deep replay disagreement failed",
+    "verdict_source": "writer_failed",
   }
 
 
@@ -1332,17 +1385,7 @@ def _consolidation_leads(ids: list[str], since: str = "") -> list[str]:
     return []
   leads: list[str] = []
   for path in reversed(files):
-    try:
-      lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-      continue
-    for line in reversed(lines):
-      try:
-        record = json.loads(line)
-      except ValueError:
-        continue
-      if not isinstance(record, dict):
-        continue
+    for record in reversed(read_jsonl(path)):
       if since and str(record.get("timestamp") or "") <= since:
         continue
       texts = [
@@ -1788,6 +1831,7 @@ def _proposal_envelope(
   *,
   consolidation: dict | None = None,
   extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  current_recall_guidance: dict | None = None,
 ) -> tuple[str, list[dict]]:
   """Encode one focused work item without a graph-wide character envelope."""
   catalog = _graph_catalog(staging)
@@ -1796,7 +1840,10 @@ def _proposal_envelope(
   ]
   payload = {
     "maintenance_flags": _maintenance_flags(staging),
-    "current_recall_guidance": load_recall_guidance(),
+    "current_recall_guidance": (
+      current_recall_guidance if current_recall_guidance is not None
+      else load_recall_guidance()
+    ),
     "read_audits": [_audit_prompt_view(audit) for audit in audits],
     "existing_graph": _prompt_graph_index(catalog),
     "existing_note_contents": _work_item_note_contents(
@@ -1850,11 +1897,13 @@ def _proposal_data(
   *,
   consolidation: dict | None = None,
   extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  current_recall_guidance: dict | None = None,
 ) -> str:
   """Encode one focused, structurally valid JSON work item."""
   return _proposal_envelope(
     staging, chats, read_audits,
     consolidation=consolidation, extra_note_paths=extra_note_paths,
+    current_recall_guidance=current_recall_guidance,
   )[0]
 
 
@@ -1864,6 +1913,18 @@ def _proposal_batch(chats: list[dict]) -> list[dict]:
     if _redacted_chat(chat) is not None:
       return [chat]
   return []
+
+
+def _recall_guidance_change(proposal: dict) -> dict | None:
+  """The proposal's intentional coaching change, if any.
+
+  The last accepted replace/clear wins; chat and maintenance items normalize
+  the field to None and cannot overwrite an earlier change.
+  """
+  guidance = proposal.get("recall_guidance")
+  if isinstance(guidance, dict) and guidance.get("action") in {"replace", "clear"}:
+    return guidance
+  return None
 
 
 def _combined_proposal(proposals: list[dict]) -> dict:
@@ -1888,12 +1949,7 @@ def _combined_proposal(proposals: list[dict]) -> dict:
     self_review = proposal.get("self_review")
     if isinstance(self_review, dict):
       self_reviews.append(self_review)
-    batch_guidance = proposal.get("recall_guidance")
-    if isinstance(batch_guidance, dict):
-      # Audit batches are oldest-first, so the last accepted batch carries the
-      # freshest bounded coaching decision. Chat/maintenance batches normalize
-      # this field to None and cannot overwrite it.
-      recall_guidance = batch_guidance
+    recall_guidance = _recall_guidance_change(proposal) or recall_guidance
   return {
     "summary": " ".join(summaries)[:1000],
     "followups": list(dict.fromkeys(followups))[:100],
@@ -1921,6 +1977,7 @@ def _proposal_prompt(
   *,
   consolidation: dict | None = None,
   extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  current_recall_guidance: dict | None = None,
 ) -> str:
   try:
     rules = SKILL_PATH.read_text(encoding="utf-8")
@@ -1929,6 +1986,7 @@ def _proposal_prompt(
   payload = _proposal_data(
     staging, chats, read_audits,
     consolidation=consolidation, extra_note_paths=extra_note_paths,
+    current_recall_guidance=current_recall_guidance,
   )
   return f"""You are Memory's confined consolidation analyst.
 
@@ -2002,12 +2060,15 @@ Complete all four nightly duties in one coherent pass:
    or leave it out when it fails admission or contradicts the digest. A
    claimed success stays provisional under the testimony rule below. Cite the
    chat's source handle.
-2. Review EVERY `read_audits` entry. Each is a live lookup where tonight's
-   deep replay disagreed with what live recall selected. `live` holds what the
+2. Review EVERY `read_audits` entry. Each is a live lookup where a
+   deep replay disagreed with what live recall selected; the replay ran
+   tonight or, for an item carried over, on an earlier night. `live` holds what the
    daytime reader opened and selected, with the complete selected bodies;
    `deep` holds the reference selection from a reader that saw every note
-   title, with `missed` (reference-only notes, bodies in `missed_nodes`) and
-   `overreach` (live-only notes). The reference is evidence, not truth: judge
+   title, with `missed` (reference-only notes, bodies in `missed_nodes` as of
+   `deep.revision`) and `overreach` (live-only notes). A carried-over note may
+   have changed or been retired since; check `existing_graph` before
+   restoring one. The reference is evidence, not truth: judge
    each disagreement yourself against the request. When a genuinely useful
    note was missed, repair the shortest useful route in the SAME proposal: add
    a better described cross-link, or move the important distinction into a
@@ -2122,6 +2183,7 @@ def _proposal(
   deadline: float | None = None,
   *,
   consolidation: dict | None = None,
+  current_recall_guidance: dict | None = None,
 ) -> ProposalOutcome:
   catalog = _graph_catalog(staging)
   existing_note_paths = {
@@ -2141,6 +2203,7 @@ def _proposal(
     return _proposal_prompt(
       staging, chats, read_audits,
       consolidation=consolidation, extra_note_paths=extra_note_paths,
+      current_recall_guidance=current_recall_guidance,
     ), editable
 
   supplied_note_paths: set[str] = set()
@@ -2199,6 +2262,9 @@ def _proposal(
       attempt["usage_receipt"] = result.receipt
     if result.failure is not None:
       attempt["failure_code"] = result.failure.code
+      if result.failure.code == "timeout" and remaining < TIMEOUT:
+        # Cut short by the closing work window, not by the item itself.
+        attempt["failure_code"] = "work_window_elapsed"
       if result.failure.detail:
         attempt["failure_detail"] = result.failure.detail
       if providers.health.observe(provider, model, result.failure):
@@ -3164,6 +3230,65 @@ def _deep_agreement(audit: dict) -> dict:
   }
 
 
+def _recall_stats_from_log(prior: dict, graph: dict | None = None) -> dict:
+  # A later writer review is a new evidence row, not a second lookup. Rebuild
+  # the hot counters from the latest row per id so old provisional misses are
+  # removed from judged rates even across restarts and release upgrades.
+  rows = latest_audit_rows(STATE)
+  judged = [
+    row for row in rows
+    if row.get("verdict_source") not in PROVISIONAL_VERDICT_SOURCES
+  ]
+  provisional = len(rows) - len(judged)
+  total = len(judged)
+  def count(key: str, value: object) -> int:
+    return sum(row.get(key) == value for row in judged)
+  misses = count("outcome", "miss")
+  overreaches = count("overreach", True)
+  no_memory = count("outcome", "no_memory")
+  route_misses = count("miss_class", "route")
+  continuation_misses = count("miss_class", "continuation")
+  selection_misses = count("miss_class", "selection")
+  overrides = count("host_selection_override", True)
+  usefulness_counts = {
+    key: count("usefulness", key)
+    for key in ("helpful", "mixed", "unused", "harmful", "unknown")
+  }
+  stats = {
+    "schema": 4,
+    "updated_at": datetime.now(UTC).isoformat(),
+    "last_audited_at": max(
+      [str(prior.get("last_audited_at") or ""),
+       *(str(row.get("at") or "") for row in rows)],
+      default="",
+    ),
+    "reads_audited": len(rows),
+    "reads_judged": total,
+    "provisional_reads": provisional,
+    "usefulness_counts": usefulness_counts,
+    "hindsight_assessed": sum(usefulness_counts[key] for key in ("helpful", "mixed", "unused", "harmful")),
+    "misses": misses,
+    "miss_rate": misses / total if total else 0.0,
+    "overreaches": overreaches,
+    "overreach_rate": overreaches / total if total else 0.0,
+    "no_memory": no_memory,
+    "no_memory_rate": no_memory / total if total else 0.0,
+    "route_misses": route_misses,
+    "route_miss_rate": route_misses / total if total else 0.0,
+    "continuation_misses": continuation_misses,
+    "continuation_miss_rate": continuation_misses / total if total else 0.0,
+    "selection_misses": selection_misses,
+    "selection_miss_rate": selection_misses / total if total else 0.0,
+    "host_selection_overrides": overrides,
+    "model_to_host_selection_override_rate": overrides / total if total else 0.0,
+    "graph_nodes": len(graph.get("nodes") or []) if graph is not None else prior.get("graph_nodes", 0),
+    "graph_edges": len(graph.get("edges") or []) if graph is not None else prior.get("graph_edges", 0),
+    "retrieval": "progressive_rooted_navigation",
+    "recent": _compact_recent_audits(sorted(rows, key=lambda row: str(row.get("at") or ""))),
+  }
+  return stats
+
+
 def _record_recall_audits(
   run_id: str,
   read_audits: list[dict],
@@ -3178,31 +3303,14 @@ def _record_recall_audits(
     if isinstance(item, dict) and isinstance(item.get("read_id"), str)
   }
   prior = _recall_stats()
-  recent = prior.get("recent") if isinstance(prior.get("recent"), list) else []
   records = []
-  missed_count = 0
-  overreach_count = 0
-  no_memory_count = 0
-  route_miss_count = 0
-  continuation_miss_count = 0
-  selection_miss_count = 0
-  override_count = 0
-  prior_usefulness = prior.get("usefulness_counts")
-  if not isinstance(prior_usefulness, dict):
-    prior_usefulness = {}
-  usefulness_counts = {
-    key: int(prior_usefulness.get(key, 0) or 0)
-    for key in ("helpful", "mixed", "unused", "harmful", "unknown")
-  }
   for audit in read_audits:
     read_id = str(audit["read_id"])
     verdict = verdicts[read_id]
     outcome = verdict.get("outcome")
     missed = outcome == "miss"
     overreach = verdict.get("overreach") is True
-    no_memory = outcome == "no_memory"
     if missed:
-      missed_count += 1
       live_opened_paths = {
         item.get("path") for item in audit.get("live", {}).get("opened", [])
         if isinstance(item, dict) and isinstance(item.get("path"), str)
@@ -3216,26 +3324,16 @@ def _record_recall_audits(
       }
       missed_nodes = list(verdict.get("missed_nodes") or [])
       if any(path in live_opened_paths for path in missed_nodes):
-        selection_miss_count += 1
         miss_class = "selection"
       elif any(path in live_frontier_paths for path in missed_nodes):
-        continuation_miss_count += 1
         miss_class = "continuation"
       else:
-        route_miss_count += 1
         miss_class = "route"
     else:
       miss_class = None
-    if overreach:
-      overreach_count += 1
-    if no_memory:
-      no_memory_count += 1
-    if audit.get("live", {}).get("host_selection_override") is True:
-      override_count += 1
     usefulness = str(verdict.get("usefulness") or "unknown")
-    if usefulness not in usefulness_counts:
+    if usefulness not in {"helpful", "mixed", "unused", "harmful", "unknown"}:
       usefulness = "unknown"
-    usefulness_counts[usefulness] += 1
     record = {
       "schema": 4,
       "run_id": run_id,
@@ -3259,50 +3357,11 @@ def _record_recall_audits(
       "usefulness": usefulness,
       "hindsight_reason": str(verdict.get("hindsight_reason") or ""),
       "verdict_source": str(verdict.get("verdict_source") or "writer"),
+      "deep_reason": str(audit.get("deep", {}).get("reason") or ""),
+      "deep_revision": audit.get("deep", {}).get("revision"),
       **_deep_agreement(audit),
     }
     records.append(record)
-  total = int(prior.get("reads_audited", 0) or 0) + len(records)
-  missed_total = int(prior.get("misses", prior.get("important_misses", 0)) or 0) + missed_count
-  overreach_total = int(prior.get("overreaches", 0) or 0) + overreach_count
-  no_memory_total = int(prior.get("no_memory", 0) or 0) + no_memory_count
-  route_miss_total = int(prior.get("route_misses", 0) or 0) + route_miss_count
-  continuation_miss_total = (
-    int(prior.get("continuation_misses", 0) or 0) + continuation_miss_count
-  )
-  selection_miss_total = int(prior.get("selection_misses", 0) or 0) + selection_miss_count
-  override_total = int(prior.get("host_selection_overrides", 0) or 0) + override_count
-  stats = {
-    "schema": 4,
-    "updated_at": datetime.now(UTC).isoformat(),
-    "last_audited_at": max(str(item["at"]) for item in read_audits),
-    "reads_audited": total,
-    "usefulness_counts": usefulness_counts,
-    "hindsight_assessed": sum(
-      usefulness_counts[key]
-      for key in ("helpful", "mixed", "unused", "harmful")
-    ),
-    "misses": missed_total,
-    "miss_rate": missed_total / total if total else 0.0,
-    "overreaches": overreach_total,
-    "overreach_rate": overreach_total / total if total else 0.0,
-    "no_memory": no_memory_total,
-    "no_memory_rate": no_memory_total / total if total else 0.0,
-    "route_misses": route_miss_total,
-    "route_miss_rate": route_miss_total / total if total else 0.0,
-    "continuation_misses": continuation_miss_total,
-    "continuation_miss_rate": continuation_miss_total / total if total else 0.0,
-    "selection_misses": selection_miss_total,
-    "selection_miss_rate": selection_miss_total / total if total else 0.0,
-    "host_selection_overrides": override_total,
-    "model_to_host_selection_override_rate": override_total / total if total else 0.0,
-    "graph_nodes": len(graph.get("nodes") or []),
-    "graph_edges": len(graph.get("edges") or []),
-    "retrieval": "progressive_rooted_navigation",
-    # Full traversal/frontier evidence is append-only in recall-audit/*.jsonl.
-    # The hot status file keeps only bounded verdicts used by dashboards.
-    "recent": _compact_recent_audits(recent + records),
-  }
   log = STATE / "recall-audit" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
   log.parent.mkdir(parents=True, exist_ok=True)
   with log.open("a", encoding="utf-8") as handle:
@@ -3310,7 +3369,7 @@ def _record_recall_audits(
       handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
-  _write_json_atomic(_RECALL_STATS, stats)
+  _write_json_atomic(_RECALL_STATS, _recall_stats_from_log(prior, graph))
 
 
 def _record_run_status(record: dict) -> None:
@@ -3512,6 +3571,7 @@ def _consolidate_batches(
   accepted_graph = baseline
   remaining_audits = list(read_audits)
   accepted_audits: list[dict] = []
+  failed_audits: list[dict] = []
   remaining_chats = list(chats)
   accepted_chats: list[dict] = []
   deferred_chats: list[dict] = []
@@ -3524,9 +3584,12 @@ def _consolidate_batches(
   deferred_attempts: list[dict] = []
   deferred_reason = None
   deferred_detail = None
+  # Later items see the last accepted coaching change; it is applied only
+  # after publication.
+  staged_guidance: dict | None = None
   lanes = ("audit", "chat", "consolidate")
   batches = dict.fromkeys(lanes, 0)
-  rejected = dict.fromkeys(lanes, 0)
+  rejected = dict.fromkeys(("chat", "consolidate"), 0)
   consecutive_rejections = dict.fromkeys(lanes, 0)
 
   def lane_open(lane: str) -> bool:
@@ -3572,6 +3635,7 @@ def _consolidate_batches(
     candidate_outcome = _proposal(
       app_id, staging, batch, batch_audits, providers, deadline,
       **({"consolidation": consolidation} if consolidation is not None else {}),
+      current_recall_guidance=staged_guidance,
     )
     rejection_reason = None
     rejection_detail = None
@@ -3613,14 +3677,17 @@ def _consolidate_batches(
           candidate_outcome.attempted_agents[-1]["rejection_code"] = exc.code
 
     if rejection_reason is not None:
-      # One rejected item is deferred, not the lane: it stays queued for a
-      # later night while the rest of tonight's work continues.
+      # One failed item does not close the lane: tonight's other work
+      # continues. A chat stays queued for a later night. An audit a model
+      # ran on is settled however it failed, so one that always fails is
+      # tried once; one no model ran on (none available) stays queued.
       deferred_attempts.extend(candidate_outcome.attempted_agents)
       deferred_reason = rejection_reason
       deferred_detail = rejection_detail
       consecutive_rejections[work_kind] += 1
       if work_kind == "audit":
-        rejected["audit"] += len(batch_audits)
+        if _model_ran(candidate_outcome.attempted_agents):
+          failed_audits.extend(batch_audits)
         remaining_audits = remaining_audits[len(batch_audits):]
       elif work_kind == "chat":
         rejected["chat"] += len(batch)
@@ -3634,6 +3701,13 @@ def _consolidate_batches(
     deleted.extend(proposed_deleted)
     proposals.append(proposal)
     provider_outcomes.append(candidate_outcome)
+    guidance = _recall_guidance_change(proposal)
+    if guidance is not None:
+      staged_guidance = {
+        "instruction": guidance.get("instruction") if guidance["action"] == "replace" else "",
+        "reason": guidance.get("reason"),
+        "evidence_read_ids": guidance.get("evidence_read_ids"),
+      }
     accepted_graph = accepted_candidate
     consecutive_rejections[work_kind] = 0
     batches[work_kind] += 1
@@ -3660,12 +3734,27 @@ def _consolidate_batches(
     deferred_reason=deferred_reason,
     deferred_detail=deferred_detail,
     rejected_chat_count=rejected["chat"],
-    rejected_audit_count=rejected["audit"],
+    failed_audits=failed_audits,
     audit_batch_count=batches["audit"],
     chat_batch_count=batches["chat"],
     accepted_mocs=accepted_mocs,
     rejected_moc_count=rejected["consolidate"],
     consolidation_batch_count=batches["consolidate"],
+  )
+
+
+def _model_ran(attempts: list[dict]) -> bool:
+  """Whether any model actually worked on the item.
+
+  Skipped providers, the closing work window, and failures that disable a
+  provider for the run (missing CLI, usage limit, logged out, model
+  unavailable) all mean no model did.
+  """
+  return any(
+    "skipped_reason" not in attempt
+    and not attempt.get("disabled_for_run")
+    and attempt.get("failure_code") != "work_window_elapsed"
+    for attempt in attempts
   )
 
 
@@ -3850,6 +3939,7 @@ async def run() -> int:
     pending_read_traces = _pending_read_traces()
     pending_read_audit_count = len(pending_read_traces)
     read_traces = list(pending_read_traces)
+    recovered_backlog = _unreviewed_read_audits()
     providers = ProviderPool.for_app(app_id)
     # Replays may use half of the remaining window; the writer keeps the rest.
     replay_deadline = time.monotonic() + max(
@@ -3870,8 +3960,17 @@ async def run() -> int:
     ]
     # Only disagreements need the writer's judgment and a graph repair; the
     # largest ones first, since the work window may end before the last.
+    fresh_disagreements = [
+      audit for audit in replayed_audits if audit["read_id"] not in agreed_ids
+    ]
+    replayed_ids = {audit["read_id"] for audit in replayed_audits}
+    backlog_audits = [
+      audit for audit in recovered_backlog
+      if audit["read_id"] not in replayed_ids
+    ]
+    # Stable sort: on equal size tonight's reads go ahead of the backlog.
     read_audits = sorted(
-      (audit for audit in replayed_audits if audit["read_id"] not in agreed_ids),
+      [*fresh_disagreements, *backlog_audits],
       key=lambda audit: -sum(
         len(audit["deep"].get(key) or ()) for key in ("missed", "overreach")
       ),
@@ -3895,6 +3994,24 @@ async def run() -> int:
     deferred_detail = consolidation.deferred_detail
     audit_proposal_count = consolidation.audit_batch_count
     chat_proposal_count = consolidation.chat_batch_count
+    # Disagreements no model ran on (the deadline, no available provider)
+    # stay queued. One a model ran on without an accepted verdict is final,
+    # so an item that always fails cannot spend tomorrow's audit lane.
+    reviewed_ids = {audit["read_id"] for audit in proposal_audits}
+    rejected_ids = {audit["read_id"] for audit in consolidation.failed_audits}
+    unreviewed_audits = [
+      audit for audit in fresh_disagreements
+      if audit["read_id"] not in reviewed_ids | rejected_ids
+    ]
+    settled_backlog = [
+      audit for audit in backlog_audits
+      if audit["read_id"] in reviewed_ids | rejected_ids
+    ]
+    unjudged_verdicts = [
+      *agreed_verdicts,
+      *map(_unreviewed_verdict, unreviewed_audits),
+      *map(_failed_verdict, consolidation.failed_audits),
+    ]
     if not proposals or not consolidation.provider_outcomes:
       degraded = {
         "schema": 1,
@@ -3910,7 +4027,7 @@ async def run() -> int:
         "reason": deferred_reason or "no_valid_text_only_proposal",
         "source_chat_count": 0,
         "attempted_chat_count": consolidation.rejected_chat_count,
-        "attempted_read_audit_count": consolidation.rejected_audit_count,
+        "attempted_read_audit_count": len(consolidation.failed_audits),
         "queued_chat_count": len(chats),
         "chat_input_starved": bool(
           chats and not consolidation.rejected_chat_count
@@ -3928,9 +4045,10 @@ async def run() -> int:
       _record_run_status(degraded)
       try:
         # Replay metrics do not depend on the writer; keep them.
-        _record_recall_audits(run_id, replayed_audits, {"read_audits": [
-          *agreed_verdicts, *map(_unreviewed_verdict, read_audits),
-        ]}, prepared)
+        _record_recall_audits(
+          run_id, [*replayed_audits, *settled_backlog],
+          {"read_audits": unjudged_verdicts}, prepared,
+        )
       except OSError as exc:
         _log(f"WARN replay metrics not recorded: {exc!r}")
       _log(
@@ -3938,10 +4056,6 @@ async def run() -> int:
         f"{degraded['reason']}"
       )
       return 2
-    reviewed_ids = {audit["read_id"] for audit in proposal_audits}
-    unreviewed_audits = [
-      audit for audit in read_audits if audit["read_id"] not in reviewed_ids
-    ]
     deferred_read_audit_count = max(
       0, pending_read_audit_count - len(replayed_audits),
     )
@@ -4043,7 +4157,10 @@ async def run() -> int:
       "read_audit_count": len(replayed_audits),
       "agreed_read_audit_count": len(agreed_audits),
       "writer_reviewed_read_audit_count": len(proposal_audits),
-      "deferred_read_audit_count": deferred_read_audit_count,
+      "deferred_read_audit_count": (
+        deferred_read_audit_count + len(read_audits) - len(proposal_audits)
+        - len(consolidation.failed_audits)
+      ),
       "proposal_batch_count": len(proposals),
       "audit_proposal_batch_count": audit_proposal_count,
       "chat_proposal_batch_count": chat_proposal_count,
@@ -4107,12 +4224,11 @@ async def run() -> int:
       _mark_consolidated_through_publication(list(consolidation.accepted_mocs))
       _record_recall_audits(
         run_id,
-        replayed_audits,
+        [*replayed_audits, *settled_backlog],
         {
           **proposal,
           "read_audits": [
-            *agreed_verdicts,
-            *map(_unreviewed_verdict, unreviewed_audits),
+            *unjudged_verdicts,
             *(
               {**verdict, "verdict_source": "writer"}
               for verdict in proposal.get("read_audits") or []

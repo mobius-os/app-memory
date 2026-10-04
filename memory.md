@@ -164,6 +164,20 @@ staging graph — one disagreement between live recall and its replay, one chat'
 saved facts, one map neighborhood to consolidate — until the real scheduled-run
 deadline approaches, then publishes once. The largest disagreements go first;
 any the writer does not reach are recorded as unreviewed replay readings.
+Those readings are provisional, not judged misses: they do not count in
+recall rates, and when deciding which notes to retire a note the replay
+picked still counts as needed. The ten newest readings that
+recorded their deep replay revision stay queued for later writer review
+without another deep replay, behind tonight's reads of equal size; older
+readings, and readings without that revision, stay provisional for good, so
+the queue and its nightly cost stay bounded. A disagreement a model ran on
+without an accepted verdict (a rejected or unreadable answer, a timeout, a
+crash) is recorded as a final provisional reading and never re-queued, so an
+item that always fails is tried once and cannot crowd out fresh reads; one no
+model ran on (no provider available, out of quota, logged out or missing,
+the window closed first or cut the call short) stays queued. A
+later verdict supersedes the provisional reading once per read. Every log
+reader skips a torn or undecodable line instead of failing the run.
 Consolidation takes only maps with something new to act on: the map or a note
 filed under it changed since the writer last consolidated it (a filed saved
 fact, an audit repair, a deletion), or a follow-up naming it was written since.
@@ -207,6 +221,9 @@ Every successful night completes four duties across those proposals:
    relevance, but it never changes when recall fires, weakens catalog
    confinement, or turns transport pagination into a relevance target. Prefer
    no change when the evidence is mixed or fits only one title collision.
+   Later audit items in the same staging run see the last accepted coaching
+   change; `keep` does not undo a prior `replace` or `clear`. Only the final
+   intentional change is applied after publication.
 4. **Consolidate and forget.** In a map-neighborhood item the writer holds
    every member note in full and does the cleanup as its primary work: merge
    duplicates into one clear claim, update superseded claims in place and

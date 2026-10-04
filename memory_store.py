@@ -810,13 +810,66 @@ def _note_creation_times() -> dict[str, str]:
   return created
 
 
+# Verdict sources for readings no writer judged: excluded from rates, and in
+# note retention evidence they credit only what live and deep agreed on. An
+# unreviewed reading may come back for review; a writer_failed one was
+# attempted by a model and is final, so it never re-queues.
+PROVISIONAL_VERDICT_SOURCES = frozenset({"deep_replay_unreviewed", "writer_failed"})
+
+
+def read_jsonl(path: Path) -> list[dict]:
+  """Return the decodable JSON object lines of one append-only log.
+
+  An append cut short can leave a torn line, even mid-character; it is skipped
+  so one bad line never hides the rest of the log or fails a nightly run.
+  """
+  try:
+    data = path.read_bytes()
+  except FileNotFoundError:
+    return []
+  rows = []
+  for line in data.splitlines():
+    try:
+      row = json.loads(line.decode("utf-8"))
+    except (UnicodeError, ValueError):
+      continue
+    if isinstance(row, dict):
+      rows.append(row)
+  return rows
+
+
+def latest_audit_rows(state: Path = STATE) -> list[dict]:
+  """Return the latest recall-audit row per read, oldest log first.
+
+  A later row supersedes an earlier one for the same read, except that a
+  provisional row never replaces a judged one (a replayed read must not undo a
+  writer verdict); rows without a read id each stand alone.
+  """
+  latest: dict[object, dict] = {}
+  for log in sorted((state / "recall-audit").glob("*.jsonl")):
+    for index, row in enumerate(read_jsonl(log)):
+      read_id = row.get("read_id")
+      key = read_id if isinstance(read_id, str) else (log.name, index)
+      prior = latest.get(key)
+      if (
+        prior is not None
+        and prior.get("verdict_source") not in PROVISIONAL_VERDICT_SOURCES
+        and row.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES
+      ):
+        continue
+      latest[key] = row
+  return list(latest.values())
+
+
 def note_usage_evidence() -> dict[str, dict]:
   """How each note has fared in audited lookups since it was written.
 
   Built fresh from the append-only recall-audit log, so it needs no counters
-  of its own. A lookup `needed` a note when a judged verdict kept or missed it
-  (writer review, or full live/deep agreement); an unreviewed replay counts
-  the deep reference's choice. `overreach` counts selections judged unneeded.
+  of its own. Every audited reading is a lookup. A judged reading (writer
+  review, or full live/deep agreement) `needed` a note it kept or missed. A
+  provisional reading (not reviewed, or writer_failed) credits the notes the
+  deep replay selected, as before, and judges no overreach: an unresolved
+  disagreement leans towards keeping a note rather than retiring it.
   """
   created = _note_creation_times()
   usage: dict[str, dict] = {}
@@ -827,30 +880,25 @@ def note_usage_evidence() -> dict[str, dict]:
     })
 
   lookups: list[str] = []
-  for log in sorted((STATE / "recall-audit").glob("*.jsonl")):
-    for line in log.read_text(encoding="utf-8").splitlines():
-      try:
-        record = json.loads(line)
-      except ValueError:
-        continue
-      if not isinstance(record, dict) or not isinstance(record.get("at"), str):
-        continue
-      at = record["at"]
-      lookups.append(at)
-      live = set(record.get("live_selected") or ())
+  for record in latest_audit_rows(STATE):
+    at = record.get("at")
+    if not isinstance(at, str):
+      continue
+    lookups.append(at)
+    live = set(record.get("live_selected") or ())
+    if record.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES:
+      over: set = set()
+      needed = set(record.get("deep_selected") or ())
+    else:
       over = set(record.get("overselected_nodes") or ())
-      source = record.get("verdict_source", "writer")
-      if source == "deep_replay_unreviewed":
-        needed = set(record.get("deep_selected") or ())
-      else:
-        needed = (live - over) | set(record.get("missed_nodes") or ())
-      for path in needed:
-        item = entry(path)
-        item["needed"] += 1
-        if (item["last_needed_at"] or "") < at:
-          item["last_needed_at"] = at
-      for path in over:
-        entry(path)["overreach"] += 1
+      needed = (live - over) | set(record.get("missed_nodes") or ())
+    for path in needed:
+      item = entry(path)
+      item["needed"] += 1
+      if (item["last_needed_at"] or "") < at:
+        item["last_needed_at"] = at
+    for path in over:
+      entry(path)["overreach"] += 1
   lookups.sort()
   for path, stamp in created.items():
     item = entry(path)
@@ -896,19 +944,10 @@ def append_capture(chat_id: str, text: str) -> dict:
 
 
 def _read_captures() -> list[dict]:
-  try:
-    lines = CAPTURES.read_text(encoding="utf-8").splitlines()
-  except FileNotFoundError:
-    return []
   captures = []
-  for line in lines:
-    try:
-      item = json.loads(line)
-    except ValueError:
-      continue
+  for item in read_jsonl(CAPTURES):
     if (
-      isinstance(item, dict)
-      and isinstance(item.get("id"), str)
+      isinstance(item.get("id"), str)
       and isinstance(item.get("chat_id"), str)
       and isinstance(item.get("text"), str)
     ):
