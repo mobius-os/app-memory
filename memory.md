@@ -164,17 +164,19 @@ staging graph — one disagreement between live recall and its replay, one chat'
 saved facts, one map neighborhood to consolidate — until the real scheduled-run
 deadline approaches, then publishes once. The largest disagreements go first;
 any the writer does not reach are recorded as unreviewed replay readings.
-Those readings are provisional, not judged misses or retention evidence. The
-ten newest readings that recorded their deep replay revision stay queued for
-later writer review without another deep replay, behind tonight's reads of
-equal size; older readings, and readings without that revision, stay
-provisional for good, so the queue and its nightly cost stay bounded. A
-disagreement whose analyst answer was rejected is recorded as a final
-provisional reading and never re-queued, so an item that always fails cannot
-crowd out fresh reads; one no analyst answered (an outage, a call cut short)
-stays queued. A later verdict supersedes the provisional reading once per
-read. Every log reader skips a torn or undecodable line instead of failing the
-run.
+Those readings are provisional, not judged misses: they do not count in
+recall rates, and a note picked only by an unreviewed replay does not count as
+needed when deciding which notes to retire. The ten newest readings that
+recorded their deep replay revision stay queued for later writer review
+without another deep replay, behind tonight's reads of equal size; older
+readings, and readings without that revision, stay provisional for good, so
+the queue and its nightly cost stay bounded. A disagreement a model ran on
+without an accepted verdict (a rejected or unreadable answer, a timeout, a
+crash) is recorded as a final provisional reading and never re-queued, so an
+item that always fails is tried once and cannot crowd out fresh reads; one no
+model ran on (no provider available, the window closed first) stays queued. A
+later verdict supersedes the provisional reading once per read. Every log
+reader skips a torn or undecodable line instead of failing the run.
 Consolidation takes only maps with something new to act on: the map or a note
 filed under it changed since the writer last consolidated it (a filed saved
 fact, an audit repair, a deletion), or a follow-up naming it was written since.

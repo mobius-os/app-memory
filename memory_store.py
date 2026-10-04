@@ -813,7 +813,7 @@ def _note_creation_times() -> dict[str, str]:
 # Verdict sources for readings no writer judged: excluded from rates and from
 # note retention evidence. An unreviewed reading may come back for review; a
 # rejected one was attempted and is final, so it never re-queues.
-PROVISIONAL_VERDICT_SOURCES = frozenset({"deep_replay_unreviewed", "writer_rejected"})
+PROVISIONAL_VERDICT_SOURCES = frozenset({"deep_replay_unreviewed", "writer_failed"})
 
 
 def read_jsonl(path: Path) -> list[dict]:

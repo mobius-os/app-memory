@@ -925,10 +925,17 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   assert queued == [["fresh", "old"], ["fresh", "old"]]
 
 
-def test_rejected_audit_items_do_not_requeue_and_starve_fresh_reads(monkeypatch, tmp_path):
-  # Three large carried-over disagreements always fail writer validation. They
-  # must be settled on the night they fail, or they reach the lane rejection
-  # limit first every night and the fresh read is never reviewed.
+@pytest.mark.parametrize("failure", [
+  {"provider": "x", "rejection_code": "unknown_read_audit"},
+  {"provider": "codex", "failure_code": "invalid_output"},
+  {"provider": "codex", "failure_code": "timeout"},
+])
+def test_failed_audit_items_do_not_requeue_and_starve_fresh_reads(
+  monkeypatch, tmp_path, failure,
+):
+  # Three large carried-over disagreements always fail writer review, however
+  # they fail. They must be settled on the night they fail, or they reach the
+  # lane rejection limit first every night and the fresh read is never reviewed.
   state = tmp_path / "app-state"
   (state / "read-log").mkdir(parents=True)
   monkeypatch.setattr(memory_runner, "STATE", state)
@@ -966,7 +973,7 @@ def test_rejected_audit_items_do_not_requeue_and_starve_fresh_reads(monkeypatch,
     if read_id.startswith("poison"):
       return memory_runner.ProposalOutcome(
         "degraded", None, None, None,
-        [{"provider": "x", "rejection_code": "unknown_read_audit"}],
+        [dict(failure)],
       )
     return memory_runner.ProposalOutcome("ok", {
       "updates": [], "deletes": [], "recall_guidance": None,
@@ -1014,7 +1021,7 @@ def test_rejected_audit_items_do_not_requeue_and_starve_fresh_reads(monkeypatch,
   assert calls[0] == ["poison1", "poison2", "poison3"]
   calls.append([])
   assert asyncio.run(memory_runner.run()) == 0
-  # Night two: the rejected backlog stays settled and the fresh read from
+  # Night two: the failed backlog stays settled and the fresh read from
   # night one is reviewed; tonight's failing read is attempted once.
   assert calls[1] == ["poison4", "fresh"]
   assert (statuses[-1]["writer_reviewed_read_audit_count"],
@@ -1022,8 +1029,8 @@ def test_rejected_audit_items_do_not_requeue_and_starve_fresh_reads(monkeypatch,
   assert memory_runner._unreviewed_read_audits() == []
   sources = {row["read_id"]: row["verdict_source"]
              for row in memory_runner.latest_audit_rows(state)}
-  assert sources == {"poison1": "writer_rejected", "poison2": "writer_rejected",
-                     "poison3": "writer_rejected", "poison4": "writer_rejected",
+  assert sources == {"poison1": "writer_failed", "poison2": "writer_failed",
+                     "poison3": "writer_failed", "poison4": "writer_failed",
                      "fresh": "writer"}
   stats = json.loads((state / "recall-stats.json").read_text())
   assert (stats["reads_judged"], stats["provisional_reads"]) == (1, 4)
@@ -1033,11 +1040,10 @@ def test_rejected_audit_items_do_not_requeue_and_starve_fresh_reads(monkeypatch,
   [],  # no provider configured
   [{"provider": "codex", "skipped_reason": "provider_unavailable"},
    {"provider": "claude", "skipped_reason": "provider_unavailable"}],
-  [{"provider": "codex", "failure_code": "timeout"}],  # cut short by the deadline
-  [{"provider": "codex", "failure_code": "process_exit_1"},
+  [{"provider": "codex", "skipped_reason": "provider_unavailable"},
    {"provider": "claude", "failure_code": "work_window_elapsed"}],
 ])
-def test_outage_does_not_finalize_audits_no_analyst_judged(monkeypatch, tmp_path, attempts):
+def test_audits_no_model_ran_on_stay_queued(monkeypatch, tmp_path, attempts):
   graph = {"nodes": [], "edges": [], "problems": []}
   monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
   monkeypatch.setattr(memory_runner, "_proposal", lambda *_a, **_k: (
@@ -1047,20 +1053,24 @@ def test_outage_does_not_finalize_audits_no_analyst_judged(monkeypatch, tmp_path
     57, tmp_path, graph, [], [{"read_id": read_id} for read_id in ("a", "b", "c", "d")],
     memory_runner.ProviderPool([]),
   )
-  assert result.rejected_audits == []
+  assert result.failed_audits == []
   assert result.accepted_audits == []
 
 
-def test_rejected_answer_or_graph_finalizes_the_audit(monkeypatch, tmp_path):
+def test_any_failure_a_model_ran_on_settles_the_audit(monkeypatch, tmp_path):
   graph = {"nodes": [], "edges": [], "problems": []}
   monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+  failures = {
+    "unparseable": [{"provider": "codex", "failure_code": "invalid_output"}],
+    "crashed": [{"provider": "codex", "failure_code": "process_exit_1"},
+                {"provider": "claude", "failure_code": "work_window_elapsed"}],
+  }
 
   def propose(_app, _path, _chats, audits, *_a, **_k):
-    if audits[0]["read_id"] == "invalid":
-      return memory_runner.ProposalOutcome("degraded", None, None, None, [
-        {"provider": "codex", "failure_code": "timeout"},
-        {"provider": "claude", "rejection_code": "unknown_read_audit"},
-      ])
+    if audits[0]["read_id"] in failures:
+      return memory_runner.ProposalOutcome(
+        "degraded", None, None, None, failures[audits[0]["read_id"]],
+      )
     return memory_runner.ProposalOutcome("ok", {
       "updates": [], "deletes": [], "read_audits": [{"read_id": audits[0]["read_id"]}],
     }, "codex", "test", [{"provider": "codex"}])
@@ -1071,11 +1081,12 @@ def test_rejected_answer_or_graph_finalizes_the_audit(monkeypatch, tmp_path):
   monkeypatch.setattr(memory_runner, "_proposal", propose)
   monkeypatch.setattr(memory_runner, "_apply_validated_proposal", apply)
   result = memory_runner._consolidate_batches(
-    57, tmp_path, graph, [], [{"read_id": "invalid"}, {"read_id": "regression"}],
+    57, tmp_path, graph, [],
+    [{"read_id": read_id} for read_id in ("unparseable", "regression", "crashed")],
     memory_runner.ProviderPool([]),
   )
-  assert [audit["read_id"] for audit in result.rejected_audits] == [
-    "invalid", "regression",
+  assert [audit["read_id"] for audit in result.failed_audits] == [
+    "unparseable", "regression", "crashed",
   ]
 
 

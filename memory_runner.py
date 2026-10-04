@@ -175,7 +175,7 @@ class BatchConsolidation:
   deferred_reason: str | None
   deferred_detail: str | None
   rejected_chat_count: int
-  rejected_audits: list[dict]
+  failed_audits: list[dict]
   audit_batch_count: int
   chat_batch_count: int
   accepted_mocs: list[str] = field(default_factory=list)
@@ -635,10 +635,10 @@ def _pending_read_traces() -> list[dict]:
 def _unreviewed_read_audits() -> list[dict]:
   """Re-queue the newest unreviewed disagreements without another deep replay.
 
-  Only readings no analyst judged come back, and only when they recorded
+  Only readings no model has run on come back, and only when they recorded
   their deep replay revision: the writer then sees the exact bodies the
-  replay chose. Older rows cannot show those bodies, a reading whose analyst
-  answer was rejected is final (`writer_rejected`), and only the newest
+  replay chose. Older rows cannot show those bodies, a reading a model ran on
+  without an accepted verdict is final (`writer_failed`), and only the newest
   `_AUDIT_BACKLOG_LIMIT` readings are kept queued; every other one stays
   provisional for good (excluded from rates and note retention evidence), so
   the queue, its nightly cost and the age of its evidence stay bounded.
@@ -923,16 +923,16 @@ def _unreviewed_verdict(audit: dict) -> dict:
   }
 
 
-def _rejected_verdict(audit: dict) -> dict:
+def _failed_verdict(audit: dict) -> dict:
   """The deep replay's reading of a disagreement whose writer review failed.
 
-  The writer attempted it and the result was rejected, so it is final rather
+  A model ran on it and produced no accepted verdict, so it is final rather
   than re-queued: an item that always fails must not spend tomorrow's review.
   """
   return {
     **_unreviewed_verdict(audit),
-    "reason": "writer review of this deep replay disagreement was rejected",
-    "verdict_source": "writer_rejected",
+    "reason": "writer review of this deep replay disagreement failed",
+    "verdict_source": "writer_failed",
   }
 
 
@@ -3559,7 +3559,7 @@ def _consolidate_batches(
   accepted_graph = baseline
   remaining_audits = list(read_audits)
   accepted_audits: list[dict] = []
-  rejected_audits: list[dict] = []
+  failed_audits: list[dict] = []
   remaining_chats = list(chats)
   accepted_chats: list[dict] = []
   deferred_chats: list[dict] = []
@@ -3627,7 +3627,6 @@ def _consolidate_batches(
     )
     rejection_reason = None
     rejection_detail = None
-    answer_rejected = False
     if candidate_outcome.status == "degraded":
       attempts = candidate_outcome.attempted_agents
       if attempts and all(
@@ -3645,9 +3644,6 @@ def _consolidate_batches(
           remaining_chats = _without_chats(remaining_chats, batch)
         break
       rejection_reason = "no_valid_text_only_proposal"
-      # Only an analyst answer that validation refused judges the item itself;
-      # skipped, unavailable or cut-short providers say nothing about it.
-      answer_rejected = any("rejection_code" in attempt for attempt in attempts)
     else:
       proposal = candidate_outcome.proposal
       if not isinstance(proposal, dict):
@@ -3665,22 +3661,21 @@ def _consolidate_batches(
           raise
         rejection_reason = exc.code
         rejection_detail = str(exc)
-        answer_rejected = True
         if candidate_outcome.attempted_agents:
           candidate_outcome.attempted_agents[-1]["rejection_code"] = exc.code
 
     if rejection_reason is not None:
       # One failed item does not close the lane: tonight's other work
-      # continues. A chat stays queued for a later night; an audit whose
-      # answer was rejected is final, so one that always fails cannot spend
-      # every night's review. Any other failed audit stays queued.
+      # continues. A chat stays queued for a later night. An audit a model
+      # ran on is settled however it failed, so one that always fails is
+      # tried once; one no model ran on (none available) stays queued.
       deferred_attempts.extend(candidate_outcome.attempted_agents)
       deferred_reason = rejection_reason
       deferred_detail = rejection_detail
       consecutive_rejections[work_kind] += 1
       if work_kind == "audit":
-        if answer_rejected:
-          rejected_audits.extend(batch_audits)
+        if _model_ran(candidate_outcome.attempted_agents):
+          failed_audits.extend(batch_audits)
         remaining_audits = remaining_audits[len(batch_audits):]
       elif work_kind == "chat":
         rejected["chat"] += len(batch)
@@ -3727,12 +3722,21 @@ def _consolidate_batches(
     deferred_reason=deferred_reason,
     deferred_detail=deferred_detail,
     rejected_chat_count=rejected["chat"],
-    rejected_audits=rejected_audits,
+    failed_audits=failed_audits,
     audit_batch_count=batches["audit"],
     chat_batch_count=batches["chat"],
     accepted_mocs=accepted_mocs,
     rejected_moc_count=rejected["consolidate"],
     consolidation_batch_count=batches["consolidate"],
+  )
+
+
+def _model_ran(attempts: list[dict]) -> bool:
+  """Whether any provider was actually called, not skipped or out of time."""
+  return any(
+    "skipped_reason" not in attempt
+    and attempt.get("failure_code") != "work_window_elapsed"
+    for attempt in attempts
   )
 
 
@@ -3972,11 +3976,11 @@ async def run() -> int:
     deferred_detail = consolidation.deferred_detail
     audit_proposal_count = consolidation.audit_batch_count
     chat_proposal_count = consolidation.chat_batch_count
-    # Disagreements no analyst judged (the deadline, an outage) stay queued.
-    # One whose analyst answer was rejected is recorded as final, so an item
-    # that always fails cannot close tomorrow's audit lane before fresh reads.
+    # Disagreements no model ran on (the deadline, no available provider)
+    # stay queued. One a model ran on without an accepted verdict is final,
+    # so an item that always fails cannot spend tomorrow's audit lane.
     reviewed_ids = {audit["read_id"] for audit in proposal_audits}
-    rejected_ids = {audit["read_id"] for audit in consolidation.rejected_audits}
+    rejected_ids = {audit["read_id"] for audit in consolidation.failed_audits}
     unreviewed_audits = [
       audit for audit in fresh_disagreements
       if audit["read_id"] not in reviewed_ids | rejected_ids
@@ -3988,7 +3992,7 @@ async def run() -> int:
     unjudged_verdicts = [
       *agreed_verdicts,
       *map(_unreviewed_verdict, unreviewed_audits),
-      *map(_rejected_verdict, consolidation.rejected_audits),
+      *map(_failed_verdict, consolidation.failed_audits),
     ]
     if not proposals or not consolidation.provider_outcomes:
       degraded = {
@@ -4005,7 +4009,7 @@ async def run() -> int:
         "reason": deferred_reason or "no_valid_text_only_proposal",
         "source_chat_count": 0,
         "attempted_chat_count": consolidation.rejected_chat_count,
-        "attempted_read_audit_count": len(consolidation.rejected_audits),
+        "attempted_read_audit_count": len(consolidation.failed_audits),
         "queued_chat_count": len(chats),
         "chat_input_starved": bool(
           chats and not consolidation.rejected_chat_count
@@ -4137,7 +4141,7 @@ async def run() -> int:
       "writer_reviewed_read_audit_count": len(proposal_audits),
       "deferred_read_audit_count": (
         deferred_read_audit_count + len(read_audits) - len(proposal_audits)
-        - len(consolidation.rejected_audits)
+        - len(consolidation.failed_audits)
       ),
       "proposal_batch_count": len(proposals),
       "audit_proposal_batch_count": audit_proposal_count,

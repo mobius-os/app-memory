@@ -172,7 +172,7 @@ def test_usage_evidence_uses_latest_judged_row_and_skips_torn_lines(
      "verdict_source": "deep_replay_unreviewed", "live_selected": [],
      "missed_nodes": ["notes/a.md"]},
     {"read_id": "two", "at": "2026-09-01T00:00:00+00:00",
-     "verdict_source": "writer_rejected", "live_selected": [],
+     "verdict_source": "writer_failed", "live_selected": [],
      "missed_nodes": ["notes/b.md"]},
     {"read_id": "one", "at": "2026-09-01T00:00:00+00:00",
      "verdict_source": "writer", "live_selected": ["notes/c.md"],
