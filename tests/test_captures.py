@@ -154,12 +154,12 @@ def test_usage_evidence_counts_needed_overreach_and_lookups_since_creation(
 
   assert usage["notes/old.md"]["needed"] == 0
   assert usage["notes/old.md"]["overreach"] == 1
-  # The provisional row is a lookup, but live and deep disagreed on both
-  # notes, so it credits neither.
+  # The provisional row is a lookup and credits what the deep replay picked,
+  # never overreach: an unresolved disagreement leans towards keeping a note.
   assert usage["notes/old.md"]["lookups_since_created"] == 3
-  assert usage["notes/new.md"]["needed"] == 1
+  assert usage["notes/new.md"]["needed"] == 2
   assert usage["notes/new.md"]["lookups_since_created"] == 2
-  assert usage["notes/new.md"]["last_needed_at"] == "2026-09-21T00:00:00+00:00"
+  assert usage["notes/new.md"]["last_needed_at"] == "2026-09-22T00:00:00+00:00"
 
 
 def test_usage_evidence_uses_latest_judged_row_and_skips_torn_lines(
@@ -192,7 +192,7 @@ def test_usage_evidence_uses_latest_judged_row_and_skips_torn_lines(
   assert usage["notes/c.md"]["needed"] == 1
 
 
-def test_usage_evidence_credits_notes_both_readers_picked_in_unreviewed_reads(
+def test_usage_evidence_credits_deep_replay_picks_in_unreviewed_reads(
   monkeypatch, tmp_path,
 ):
   # A note live recall often misses, whose disagreements the writer never
@@ -221,10 +221,12 @@ def test_usage_evidence_credits_notes_both_readers_picked_in_unreviewed_reads(
 
   usage = memory_store.note_usage_evidence()
 
-  assert usage["notes/x.md"]["needed"] == 3
+  # Live recall missed x in five of these reads; the replay's pick still
+  # counts, as it did before audits were queued for review.
+  assert usage["notes/x.md"]["needed"] == 8
   assert usage["notes/x.md"]["overreach"] == 0
   assert usage["notes/x.md"]["lookups_since_created"] == 28
-  assert usage["notes/x.md"]["last_needed_at"] == "2026-09-01T00:00:02+00:00"
+  assert usage["notes/x.md"]["last_needed_at"] == "2026-09-01T00:00:07+00:00"
 
 
 def test_latest_audit_rows_never_lets_a_provisional_row_replace_a_verdict(

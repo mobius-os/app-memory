@@ -867,10 +867,9 @@ def note_usage_evidence() -> dict[str, dict]:
   Built fresh from the append-only recall-audit log, so it needs no counters
   of its own. Every audited reading is a lookup. A judged reading (writer
   review, or full live/deep agreement) `needed` a note it kept or missed. A
-  provisional reading (not reviewed, or writer_failed) credits only the notes
-  both live recall and the deep replay selected, and judges no overreach: its
-  disagreements are unresolved, but what both readers agree on still keeps a
-  note from looking unused.
+  provisional reading (not reviewed, or writer_failed) credits the notes the
+  deep replay selected, as before, and judges no overreach: an unresolved
+  disagreement leans towards keeping a note rather than retiring it.
   """
   created = _note_creation_times()
   usage: dict[str, dict] = {}
@@ -889,7 +888,7 @@ def note_usage_evidence() -> dict[str, dict]:
     live = set(record.get("live_selected") or ())
     if record.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES:
       over: set = set()
-      needed = live & set(record.get("deep_selected") or ())
+      needed = set(record.get("deep_selected") or ())
     else:
       over = set(record.get("overselected_nodes") or ())
       needed = (live - over) | set(record.get("missed_nodes") or ())
