@@ -824,7 +824,7 @@ def read_jsonl(path: Path) -> list[dict]:
   """
   try:
     data = path.read_bytes()
-  except OSError:
+  except FileNotFoundError:
     return []
   rows = []
   for line in data.splitlines():
@@ -932,19 +932,10 @@ def append_capture(chat_id: str, text: str) -> dict:
 
 
 def _read_captures() -> list[dict]:
-  try:
-    lines = CAPTURES.read_text(encoding="utf-8").splitlines()
-  except FileNotFoundError:
-    return []
   captures = []
-  for line in lines:
-    try:
-      item = json.loads(line)
-    except ValueError:
-      continue
+  for item in read_jsonl(CAPTURES):
     if (
-      isinstance(item, dict)
-      and isinstance(item.get("id"), str)
+      isinstance(item.get("id"), str)
       and isinstance(item.get("chat_id"), str)
       and isinstance(item.get("text"), str)
     ):

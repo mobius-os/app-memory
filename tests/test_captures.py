@@ -188,3 +188,14 @@ def test_usage_evidence_uses_latest_judged_row_and_skips_torn_lines(
 
   assert set(usage) == {"notes/c.md"}
   assert usage["notes/c.md"]["needed"] == 1
+
+
+def test_captures_skip_a_torn_multibyte_line(state):
+  kept = memory_store.append_capture("chat-1", "Prefers tea")
+  torn = json.dumps({"id": "torn", "chat_id": "chat-1", "text": "naïve"},
+                    ensure_ascii=False)
+  torn = torn.encode("utf-8")[:torn.index("ï") + 1] + b"\n"
+  state.joinpath("captures.jsonl").write_bytes(
+    torn + state.joinpath("captures.jsonl").read_bytes(),
+  )
+  assert [item["id"] for item in memory_store.load_captures()] == [kept["id"]]

@@ -965,7 +965,8 @@ def test_rejected_audit_items_do_not_requeue_and_starve_fresh_reads(monkeypatch,
     calls[-1].append(read_id)
     if read_id.startswith("poison"):
       return memory_runner.ProposalOutcome(
-        "degraded", None, None, None, [{"provider": "x", "failure_code": "invalid_json"}],
+        "degraded", None, None, None,
+        [{"provider": "x", "rejection_code": "unknown_read_audit"}],
       )
     return memory_runner.ProposalOutcome("ok", {
       "updates": [], "deletes": [], "recall_guidance": None,
@@ -1026,6 +1027,94 @@ def test_rejected_audit_items_do_not_requeue_and_starve_fresh_reads(monkeypatch,
                      "fresh": "writer"}
   stats = json.loads((state / "recall-stats.json").read_text())
   assert (stats["reads_judged"], stats["provisional_reads"]) == (1, 4)
+
+
+@pytest.mark.parametrize("attempts", [
+  [],  # no provider configured
+  [{"provider": "codex", "skipped_reason": "provider_unavailable"},
+   {"provider": "claude", "skipped_reason": "provider_unavailable"}],
+  [{"provider": "codex", "failure_code": "timeout"}],  # cut short by the deadline
+  [{"provider": "codex", "failure_code": "process_exit_1"},
+   {"provider": "claude", "failure_code": "work_window_elapsed"}],
+])
+def test_outage_does_not_finalize_audits_no_analyst_judged(monkeypatch, tmp_path, attempts):
+  graph = {"nodes": [], "edges": [], "problems": []}
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+  monkeypatch.setattr(memory_runner, "_proposal", lambda *_a, **_k: (
+    memory_runner.ProposalOutcome("degraded", None, None, None, list(attempts))
+  ))
+  result = memory_runner._consolidate_batches(
+    57, tmp_path, graph, [], [{"read_id": read_id} for read_id in ("a", "b", "c", "d")],
+    memory_runner.ProviderPool([]),
+  )
+  assert result.rejected_audits == []
+  assert result.accepted_audits == []
+
+
+def test_rejected_answer_or_graph_finalizes_the_audit(monkeypatch, tmp_path):
+  graph = {"nodes": [], "edges": [], "problems": []}
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+
+  def propose(_app, _path, _chats, audits, *_a, **_k):
+    if audits[0]["read_id"] == "invalid":
+      return memory_runner.ProposalOutcome("degraded", None, None, None, [
+        {"provider": "codex", "failure_code": "timeout"},
+        {"provider": "claude", "rejection_code": "unknown_read_audit"},
+      ])
+    return memory_runner.ProposalOutcome("ok", {
+      "updates": [], "deletes": [], "read_audits": [{"read_id": audits[0]["read_id"]}],
+    }, "codex", "test", [{"provider": "codex"}])
+
+  def apply(_path, _value, **_kwargs):
+    raise memory_runner.ProposalValidationError("topology_regression", "demoted")
+
+  monkeypatch.setattr(memory_runner, "_proposal", propose)
+  monkeypatch.setattr(memory_runner, "_apply_validated_proposal", apply)
+  result = memory_runner._consolidate_batches(
+    57, tmp_path, graph, [], [{"read_id": "invalid"}, {"read_id": "regression"}],
+    memory_runner.ProviderPool([]),
+  )
+  assert [audit["read_id"] for audit in result.rejected_audits] == [
+    "invalid", "regression",
+  ]
+
+
+def test_unreviewed_backlog_keeps_only_the_newest_readings(monkeypatch, tmp_path):
+  state = tmp_path / "app-state"
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
+  monkeypatch.setattr(memory_runner, "_AUDIT_BACKLOG_LIMIT", 2)
+  revisions = []
+  monkeypatch.setattr(memory_runner, "read_revision_file",
+                      lambda commit, path: revisions.append(path) or f"{path}@{commit}")
+  days = ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04"]
+  traces = [
+    {"schema": 4, "read_id": f"read-{day}", "at": f"{day}T00:00:00+00:00",
+     "question": "Relevant fact?", "commit": "a" * 40, "files": []}
+    for day in days
+  ]
+  (state / "read-log").mkdir(parents=True)
+  for trace in traces:
+    (state / "read-log" / f"{trace['at'][:10]}.jsonl").write_text(json.dumps(trace) + "\n")
+  audits = memory_runner._audit_reads("b" * 40, traces, [
+    {"read_id": trace["read_id"], "selected": [f"notes/{trace['read_id']}.md"],
+     "reason": "fact"} for trace in traces
+  ])
+  memory_runner._record_recall_audits("run-1", audits, {"read_audits": [
+    *map(memory_runner._unreviewed_verdict, audits),
+  ]}, {"nodes": [], "edges": []})
+  # Older days' logs are never read: an unreadable one would raise.
+  for day in days[:2]:
+    (state / "read-log" / f"{day}.jsonl").unlink()
+    (state / "read-log" / f"{day}.jsonl").mkdir()
+  revisions.clear()
+
+  recovered = memory_runner._unreviewed_read_audits()
+  assert [item["read_id"] for item in recovered] == [
+    "read-2026-09-03", "read-2026-09-04",
+  ]
+  # Only the queued readings' bodies are rebuilt.
+  assert sorted(revisions) == ["notes/read-2026-09-03.md", "notes/read-2026-09-04.md"]
 
 
 def test_log_scanners_skip_a_torn_multibyte_line(monkeypatch, tmp_path):

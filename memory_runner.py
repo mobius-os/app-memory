@@ -127,6 +127,9 @@ _CONSOLIDATION_CURSOR = STATE / "consolidation-cursor.json"
 # A lane stops for the night only after several consecutive rejected items, so
 # one malformed analyst answer defers one item instead of the whole lane.
 _LANE_REJECTION_LIMIT = 3
+# Unreviewed disagreements kept queued for a later writer review; the writer
+# reaches only a few audit items per night.
+_AUDIT_BACKLOG_LIMIT = 10
 _MAX_CONSOLIDATION_LEADS = 20
 @dataclass(frozen=True)
 class ProposalOutcome:
@@ -551,7 +554,10 @@ def _compact_recent_audits(records: list[dict]) -> list[dict]:
 
 
 def _migrate_recall_stats() -> bool:
-  """Compact legacy hot-status records; full evidence remains in JSONL logs."""
+  """Rebuild pre-provisional stats from the audit log, else compact `recent`.
+
+  Full evidence remains in the JSONL logs.
+  """
   stats = _recall_stats()
   recent = stats.get("recent")
   if not isinstance(recent, list):
@@ -627,28 +633,33 @@ def _pending_read_traces() -> list[dict]:
 
 
 def _unreviewed_read_audits() -> list[dict]:
-  """Re-queue unreviewed disagreements without buying another deep replay.
+  """Re-queue the newest unreviewed disagreements without another deep replay.
 
-  Only readings the writer never reached come back, and only when they
-  recorded their deep replay revision: the writer then sees the exact bodies
-  the replay chose. Older rows cannot show those bodies, and a reading the
-  writer attempted but had rejected is final (`writer_rejected`); both stay
-  provisional for good (excluded from rates and note retention evidence)
-  instead of returning every night.
+  Only readings no analyst judged come back, and only when they recorded
+  their deep replay revision: the writer then sees the exact bodies the
+  replay chose. Older rows cannot show those bodies, a reading whose analyst
+  answer was rejected is final (`writer_rejected`), and only the newest
+  `_AUDIT_BACKLOG_LIMIT` readings are kept queued; every other one stays
+  provisional for good (excluded from rates and note retention evidence), so
+  the queue, its nightly cost and the age of its evidence stay bounded.
   """
-  pending = {
-    row["read_id"]: row for row in latest_audit_rows(STATE)
+  pending = [
+    row for row in latest_audit_rows(STATE)
     if isinstance(row.get("read_id"), str)
+    and isinstance(row.get("at"), str)
     and row.get("verdict_source") == "deep_replay_unreviewed"
     and isinstance(row.get("deep_revision"), str) and row["deep_revision"]
     and isinstance(row.get("deep_selected"), list)
     and all(isinstance(path, str) for path in row["deep_selected"])
+  ]
+  pending = {
+    row["read_id"]: row
+    for row in sorted(pending, key=lambda row: row["at"])[-_AUDIT_BACKLOG_LIMIT:]
   }
-  if not pending:
-    return []
+  # Read logs are daily files, so only the days of the queued reads are read.
   traces: dict[str, dict] = {}
-  for path in sorted((STATE / "read-log").glob("*.jsonl")):
-    for trace in read_jsonl(path):
+  for day in sorted({row["at"][:10] for row in pending.values()}):
+    for trace in read_jsonl(STATE / "read-log" / f"{day}.jsonl"):
       if trace.get("read_id") in pending:
         traces[trace["read_id"]] = trace
   result = []
@@ -3566,7 +3577,7 @@ def _consolidate_batches(
   staged_guidance: dict | None = None
   lanes = ("audit", "chat", "consolidate")
   batches = dict.fromkeys(lanes, 0)
-  rejected = dict.fromkeys(lanes, 0)
+  rejected = dict.fromkeys(("chat", "consolidate"), 0)
   consecutive_rejections = dict.fromkeys(lanes, 0)
 
   def lane_open(lane: str) -> bool:
@@ -3616,6 +3627,7 @@ def _consolidate_batches(
     )
     rejection_reason = None
     rejection_detail = None
+    answer_rejected = False
     if candidate_outcome.status == "degraded":
       attempts = candidate_outcome.attempted_agents
       if attempts and all(
@@ -3633,6 +3645,9 @@ def _consolidate_batches(
           remaining_chats = _without_chats(remaining_chats, batch)
         break
       rejection_reason = "no_valid_text_only_proposal"
+      # Only an analyst answer that validation refused judges the item itself;
+      # skipped, unavailable or cut-short providers say nothing about it.
+      answer_rejected = any("rejection_code" in attempt for attempt in attempts)
     else:
       proposal = candidate_outcome.proposal
       if not isinstance(proposal, dict):
@@ -3650,18 +3665,22 @@ def _consolidate_batches(
           raise
         rejection_reason = exc.code
         rejection_detail = str(exc)
+        answer_rejected = True
         if candidate_outcome.attempted_agents:
           candidate_outcome.attempted_agents[-1]["rejection_code"] = exc.code
 
     if rejection_reason is not None:
-      # One rejected item is deferred, not the lane: it stays queued for a
-      # later night while the rest of tonight's work continues.
+      # One failed item does not close the lane: tonight's other work
+      # continues. A chat stays queued for a later night; an audit whose
+      # answer was rejected is final, so one that always fails cannot spend
+      # every night's review. Any other failed audit stays queued.
       deferred_attempts.extend(candidate_outcome.attempted_agents)
       deferred_reason = rejection_reason
       deferred_detail = rejection_detail
       consecutive_rejections[work_kind] += 1
       if work_kind == "audit":
-        rejected_audits.extend(batch_audits)
+        if answer_rejected:
+          rejected_audits.extend(batch_audits)
         remaining_audits = remaining_audits[len(batch_audits):]
       elif work_kind == "chat":
         rejected["chat"] += len(batch)
@@ -3953,9 +3972,9 @@ async def run() -> int:
     deferred_detail = consolidation.deferred_detail
     audit_proposal_count = consolidation.audit_batch_count
     chat_proposal_count = consolidation.chat_batch_count
-    # Only disagreements the deadline kept from the writer stay queued. One
-    # it attempted and had rejected is recorded as final, so an item that
-    # always fails cannot close tomorrow's audit lane before fresh reads.
+    # Disagreements no analyst judged (the deadline, an outage) stay queued.
+    # One whose analyst answer was rejected is recorded as final, so an item
+    # that always fails cannot close tomorrow's audit lane before fresh reads.
     reviewed_ids = {audit["read_id"] for audit in proposal_audits}
     rejected_ids = {audit["read_id"] for audit in consolidation.rejected_audits}
     unreviewed_audits = [
