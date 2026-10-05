@@ -3,7 +3,7 @@
 
 The model never receives filesystem, shell, network, or owner-token authority.
 Python gathers the facts agents saved with ``remember`` (with each chat's
-title and Digest as context) using a short-lived app token, passes bounded data
+title and chat summary as context) using a short-lived app token, passes bounded data
 to a tool-free text process, validates its proposed note upserts, and atomically
 advances a pointer after committing a complete graph.
 """
@@ -100,7 +100,7 @@ _GENERATED_DOCS = frozenset({"mocs/memory-unfiled.md"})
 _PROTECTED_DOCS = _MANAGED_DOCS | _GENERATED_DOCS
 _UNFILED_START = "<!-- memory-managed:unfiled:start -->"
 _UNFILED_END = "<!-- memory-managed:unfiled:end -->"
-# Each chat's platform-owned continuity note; its short Digest gives a saved
+# Each chat's platform-owned continuity note; its short Summary gives a saved
 # fact its context without sending the transcript to the writer.
 _CHAT_NOTES = STATE.parent / "chats"
 _SOURCE_ARCHIVE_KEY = STATE / "source-archive-key.json"
@@ -967,20 +967,23 @@ def _host_selection_override(traversal: object, selected_paths: list[str]) -> bo
   return list(dict.fromkeys(model_paths)) != list(dict.fromkeys(selected_paths))
 
 
-def _chat_digest(chat_id: str) -> str:
+def _chat_summary(chat_id: str) -> str:
   try:
     text = (_CHAT_NOTES / chat_id / "index.md").read_text(encoding="utf-8")
   except (OSError, UnicodeError):
     return ""
-  match = re.search(r"^## Digest\n(.*?)(?=^## |\Z)", text, re.M | re.S)
-  return match.group(1).strip()[:1200] if match else ""
+  # The short summary sits above ``## Digest``, whose prose may repeat the
+  # ``## Summary`` heading, so only the part above the digest is read.
+  head = re.split(r"^## Digest[ \t]*$", text, maxsplit=1, flags=re.M)[0]
+  match = re.search(r"^## Summary\n(.*?)(?=^## |\Z)", head, re.M | re.S)
+  return match.group(1).strip() if match else ""
 
 
 def _collect_capture_intake() -> CaptureIntake:
   """Group saved facts by chat, oldest capture first, without transcripts.
 
   Memory learns from what working agents chose to save, not from rereading
-  every chat. Each chat contributes its title and short Digest as context and
+  every chat. Each chat contributes its title and short summary as context and
   its canonical id as provenance. A capture whose chat has been purged cannot
   be cited, so it is dropped; a transient fetch failure keeps it queued.
   """
@@ -999,7 +1002,7 @@ def _collect_capture_intake() -> CaptureIntake:
         unreachable += 1
       continue
     chat["captures"] = captures
-    chat["digest"] = _chat_digest(chat_id)
+    chat["summary"] = _chat_summary(chat_id)
     chats.append(chat)
   if dropped:
     consume_captures(set(dropped))
@@ -1082,7 +1085,7 @@ def _work_text(
     if isinstance(chat, dict)
     for value in [
       chat.get("title") or "",
-      chat.get("digest") or "",
+      chat.get("summary") or "",
       *(capture.get("text") or "" for capture in chat.get("captures") or ()),
     ]
   ]
@@ -1588,8 +1591,8 @@ def _redacted_chat(chat: dict) -> dict | None:
     redacted["captured_by_agent"] = [
       str(capture.get("text") or "") for capture in captures
     ]
-  if chat.get("digest"):
-    redacted["digest"] = str(chat["digest"])
+  if chat.get("summary"):
+    redacted["summary"] = str(chat["summary"])
   return redacted
 
 
@@ -2058,10 +2061,10 @@ report corroborates it.
 
 Complete all four nightly duties in one coherent pass:
 1. Settle every fact the working agents saved. Each supplied chat carries its
-   `captured_by_agent` facts with only its title and short `digest` as context
+   `captured_by_agent` facts with only its title and short `summary` as context
    (no transcript). For each fact: admit it as an atomic note behind clear
    described links from the root, merge it into or supersede an existing note,
-   or leave it out when it fails admission or contradicts the digest. A
+   or leave it out when it fails admission or contradicts the summary. A
    claimed success stays provisional under the testimony rule below. Cite the
    chat's source handle.
 2. Review EVERY `read_audits` entry. Each is a live lookup where a

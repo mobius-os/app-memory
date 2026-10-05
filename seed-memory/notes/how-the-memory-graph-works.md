@@ -16,9 +16,9 @@ commit containing a root `index.md`, topic maps in `mocs/`, atomic facts in
 `notes/`, their supporting-chat metadata in `sources/`, and `graph.json`;
 `.ready` atomically names the commit readers pin.
 
-The base platform separately owns `chats/<id>/index.md`: a short name, bounded
-Digest, and cumulative Summary for each chat. A new chat receives only recent
-names + Digests. No graph router, MOC, or fact note is injected. While Memory is
+The base platform separately owns `chats/<id>/index.md`: a short name, short
+Summary, and cumulative Digest for each chat. A new chat receives only recent
+names + Summaries. No graph router, MOC, or fact note is injected. While Memory is
 installed, its system prompt tells the main agent to formulate a focused recall
 request. Memory's tool-free navigator starts at the root, reads each opened
 node completely, and repeatedly chooses which linked branches to open. Each

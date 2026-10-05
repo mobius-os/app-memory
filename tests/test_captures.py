@@ -61,8 +61,8 @@ def test_only_chats_with_saved_facts_are_read_and_never_their_transcript(
   fetched = _chat_api(monkeypatch)
   (state / "chats" / "busy").mkdir(parents=True)
   (state / "chats" / "busy" / "index.md").write_text(
-    "---\ndescription: x\n---\n## Digest\nPlanning a trip to Kyoto.\n\n"
-    "## Summary\nLong history.\n",
+    "---\ndescription: x\n---\n## Summary\nPlanning a trip to Kyoto.\n\n"
+    "## Digest\nLong history.\n\n## Summary\nA recap heading inside the history.\n",
   )
   memory_store.append_capture("busy", "Prefers Thai food.")
   memory_store.append_capture("fresh", "Partner's cousin is called Maya.")
@@ -74,11 +74,20 @@ def test_only_chats_with_saved_facts_are_read_and_never_their_transcript(
   assert [chat["id"] for chat in intake.chats] == ["busy", "fresh"]
   redacted = memory_runner._redacted_chat(intake.chats[0])
   assert "messages" not in redacted
-  assert redacted["digest"] == "Planning a trip to Kyoto."
+  assert redacted["summary"] == "Planning a trip to Kyoto."
   assert redacted["captured_by_agent"] == [
     "Prefers Thai food.", "Lives in Lisbon.",
   ]
   assert intake.capture_count == 3
+
+
+def test_a_note_without_a_short_summary_gives_no_context(state):
+  (state / "chats" / "history-only").mkdir(parents=True)
+  (state / "chats" / "history-only" / "index.md").write_text(
+    "---\ndescription: x\n---\n## Summary\n\n## Digest\nLong history.\n\n"
+    "## Summary\nA recap heading inside the history.\n",
+  )
+  assert memory_runner._chat_summary("history-only") == ""
 
 
 def test_only_captures_offered_to_the_writer_are_consumed(monkeypatch, state):

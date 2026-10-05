@@ -25,8 +25,8 @@ returned text and verified file pointers.
   *about the user and this instance* (preferences, interests, personality, or a
   hard-won local bug + root cause), with chat provenance. It defaults to no
   graph change.
-- **Keep continuity separate.** The base platform owns each chat's bounded
-  Digest and cumulative Summary. They remain available when Memory is removed
+- **Keep continuity separate.** The base platform owns each chat's short
+  Summary and cumulative Digest. They remain available when Memory is removed
   and are never graph startup context.
 - **Keep evidence inspectable.** For chats that support durable notes, Memory
   retains the bounded, structurally redacted source text its analyst reviewed.

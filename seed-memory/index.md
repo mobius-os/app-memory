@@ -41,7 +41,7 @@ graph has no dependency on any other app.
 ## Recent chats
 
 Each chat keeps its own platform-owned note (`chats/<id>/index.md`) with a
-one-line name, bounded Digest, and cumulative full Summary. The base platform
-injects only recent names + Digests. Those chat notes are continuity state, not
+one-line name, short Summary, and cumulative full Digest. The base platform
+injects only recent names + Summaries. Those chat notes are continuity state, not
 knowledge-graph nodes; the scheduled Memory app receives structurally redacted
 chat text through its reviewed capability and promotes only durable facts.
