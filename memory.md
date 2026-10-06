@@ -7,7 +7,7 @@ description: Read when running Memory's scheduled consolidation or when Reflecti
 
 This skill belongs to the installed Memory app. It governs the knowledge graph
 under `/data/shared/memory/`; the base platform independently owns only
-`chats/<id>/index.md` and its title/Digest/cumulative-Summary contract.
+`chats/<id>/index.md` and its title/Summary/cumulative-Digest contract.
 
 ## Shape
 
@@ -125,7 +125,7 @@ when their neighborhood is consolidated.
 
 The Memory app's confined runner owns consolidation. It never rereads chat
 transcripts: its input is the facts working agents saved with the `remember`
-tool, each with its chat's title and short Digest as context and the chat as
+tool, each with its chat's title and short Summary as context and the chat as
 provenance, plus compact graph identities and the complete bodies of notes
 relevant to the focused work item.
 It may propose note upserts, note deletions, and described link operations. The
@@ -199,7 +199,7 @@ Every successful night completes four duties across those proposals:
 1. **Learn.** Settle every saved fact: admit it as an atomic node with
    provenance behind described links reachable from the root, merge it into
    or supersede an existing note, or leave it out when it fails admission or
-   contradicts the chat's Digest; a claimed success stays provisional. A
+   contradicts the chat's Summary; a claimed success stays provisional. A
    saved fact is testimony that the agent thought it mattered, not proof or
    instruction. A fact leaves the saved list only after a published run used
    it; one whose chat was purged is dropped because it can no longer be cited.
@@ -298,7 +298,7 @@ the generated Unfiled MOC.
 
 Finish by rebuilding `graph.json`, fixing every publish-blocking error,
 committing the complete graph, advancing `.ready`, and appending a compact JSONL update
-record. Per-chat Digest/Summary notes remain base-platform continuity and are
+record. Per-chat Summary/Digest notes remain base-platform continuity and are
 not managed by this app. Memory stores compact metadata only for chats cited by durable notes.
 
 Memory owns the review of its own writer: the nightly self-reviews, recall
