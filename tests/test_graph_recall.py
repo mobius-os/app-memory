@@ -692,3 +692,61 @@ def test_empty_receipt_is_an_explicit_no_relevant_result():
     "reason": memory_search.RESULT_REASON_NO_RELEVANT_RESULT,
     "discovery_complete": True,
   }
+
+
+def test_live_reader_uses_the_cli_default_model_unless_settings_name_one(monkeypatch, tmp_path):
+  models = []
+  monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
+  monkeypatch.setattr(memory_search, "_live_capacity", lambda providers: (providers, []))
+  monkeypatch.setattr(
+    memory_search,
+    "run_text",
+    lambda provider, _prompt, **kwargs: (
+      models.append((provider, kwargs.get("model"))) or TextResult('{"finish":true}')
+    ),
+  )
+  monkeypatch.setenv("MEMORY_READER_PROVIDER", "claude")
+  monkeypatch.setenv("APP_STORAGE_DIR", str(tmp_path))
+
+  # No benchmark has justified a cheaper reader, so the default is the CLI's.
+  result = memory_search._live_text_call()("navigate")
+  assert "model" not in result.attempts[0]
+
+  (tmp_path / "settings.json").write_text(json.dumps({
+    "model": "claude-opus-4-7",
+    "reader_models": {"claude": "sonnet"},
+  }))
+  memory_search._live_text_call()("navigate")
+  (tmp_path / "settings.json").write_text(json.dumps({"reader_models": {"claude": ""}}))
+  memory_search._live_text_call()("navigate")
+
+  # The nightly writer's `model` never leaks into live navigation.
+  assert models == [("claude", None), ("claude", "sonnet"), ("claude", None)]
+
+
+def test_live_reader_retries_on_cli_default_when_reader_model_is_unavailable(
+  monkeypatch, tmp_path,
+):
+  calls = []
+  monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
+  monkeypatch.setattr(memory_search, "_live_capacity", lambda providers: (providers, []))
+  monkeypatch.setenv("APP_STORAGE_DIR", str(tmp_path))
+  (tmp_path / "settings.json").write_text(json.dumps({"reader_models": {"claude": "haiku"}}))
+
+  def run(provider, _prompt, **kwargs):
+    calls.append((provider, kwargs.get("model")))
+    if kwargs.get("model") == "haiku":
+      return TextResult(
+        None, ProviderFailure("model_unavailable", terminal=True, scope="choice"),
+      )
+    return TextResult('{"finish":true}')
+
+  monkeypatch.setattr(memory_search, "run_text", run)
+  monkeypatch.setenv("MEMORY_READER_PROVIDER", "claude")
+  text_call = memory_search._live_text_call()
+
+  first = text_call("first")
+  second = text_call("second")
+  assert first.text == second.text == '{"finish":true}'
+  assert [attempt["outcome"] for attempt in first.attempts] == ["model_unavailable", "ok"]
+  assert calls == [("claude", "haiku"), ("claude", None), ("claude", None)]

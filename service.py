@@ -17,6 +17,13 @@ import os
 import sys
 from collections.abc import Callable
 
+# Imported here, not per request: Möbius preloads this module and forks each
+# request from it, so these imports (about 50 ms) are paid once. They read only
+# per-installation environment values at import time and start no threads.
+import memory_read
+import memory_search
+import remember
+
 
 def _text_tool(run: Callable[[list[str]], int], args: list[str]) -> dict:
   output = io.StringIO()
@@ -29,17 +36,13 @@ def _text_tool(run: Callable[[list[str]], int], args: list[str]) -> dict:
 
 
 def _search(arguments: dict, chat_id: str) -> dict:
-  from memory_search import run
-
   query = arguments.get("query")
   if not isinstance(query, str) or not query.strip():
     return {"status": 422, "body": {"detail": "query must describe the context needed."}}
-  return _text_tool(run, [query, chat_id])
+  return _text_tool(memory_search.run, [query, chat_id])
 
 
 def _read(arguments: dict, chat_id: str) -> dict:
-  from memory_read import run
-
   lookup_id = arguments.get("lookup_id")
   selection = arguments.get("selection")
   cursor = arguments.get("cursor", "start")
@@ -49,16 +52,14 @@ def _read(arguments: dict, chat_id: str) -> dict:
     return {"status": 422, "body": {
       "detail": "read needs lookup_id, selection, and optionally cursor.",
     }}
-  return _text_tool(run, [lookup_id, selection, cursor, chat_id])
+  return _text_tool(memory_read.run, [lookup_id, selection, cursor, chat_id])
 
 
 def _remember(arguments: dict, chat_id: str) -> dict:
-  from remember import main
-
   fact = arguments.get("fact")
   if not isinstance(fact, str) or not fact.strip():
     return {"status": 422, "body": {"detail": "fact must be one self-contained fact."}}
-  return _text_tool(main, ["remember.py", fact, chat_id])
+  return _text_tool(remember.main, ["remember.py", fact, chat_id])
 
 
 TOOLS = {

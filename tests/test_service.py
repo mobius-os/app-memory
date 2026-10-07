@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import importlib
 import sys
 from pathlib import Path
 
@@ -41,12 +40,12 @@ def recorded(monkeypatch):
       return 0
     return run
 
-  import memory_read
-  import memory_search
-  import remember
-  monkeypatch.setattr(memory_search, "run", fake("search"))
-  monkeypatch.setattr(memory_read, "run", fake("read"))
-  monkeypatch.setattr(remember, "main", fake("remember"))
+  # Patch the module objects service.py bound at import. Other test files pop
+  # and re-import these modules, so a fresh `import` here can be a different
+  # object than the one service dispatches to.
+  monkeypatch.setattr(service.memory_search, "run", fake("search"))
+  monkeypatch.setattr(service.memory_read, "run", fake("read"))
+  monkeypatch.setattr(service.remember, "main", fake("remember"))
   return calls
 
 
@@ -89,7 +88,7 @@ def test_remember_saves_one_fact_for_this_chat(recorded):
 def test_nonzero_tool_exit_preserves_failure_text_and_activity_receipt(
   monkeypatch, path, module_name, function_name, arguments,
 ):
-  module = importlib.import_module(module_name)
+  module = getattr(service, module_name)
   output = 'Could not complete.\nMOBIUS_APP_ACTIVITY_V1:{"status":"failed","detail":"disk unavailable"}\n'
 
   def failed(_args):

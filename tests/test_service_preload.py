@@ -23,8 +23,10 @@ class ServicePreloadTests(unittest.TestCase):
       env.update(APP_ID="7", APP_SLUG="memory", APP_STORAGE_DIR=storage)
       probe = subprocess.run(
         [sys.executable, "-c",
-         "import threading, service; assert service.MOBIUS_PRELOAD is True; "
-         "assert threading.active_count() == 1, threading.enumerate()"],
+         "import sys, threading, service; assert service.MOBIUS_PRELOAD is True; "
+         "assert threading.active_count() == 1, threading.enumerate(); "
+         # Forked requests must not re-import the tool modules.
+         "assert {'memory_search', 'memory_read', 'remember'} <= set(sys.modules)"],
         cwd=ROOT, env=env, text=True, capture_output=True,
       )
     self.assertEqual(probe.returncode, 0, probe.stderr)
