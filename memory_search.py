@@ -809,6 +809,42 @@ def _live_capacity(
   return available, skipped
 
 
+# Live navigation runs on each provider CLI's own default model. A cheaper
+# reader model can cost recall, so change this default only after
+# `memory_benchmark.py run` shows recall is not lower (see memory.md: never
+# lower spend by recalling less). The owner can still choose per provider in
+# the app's settings.json, e.g. {"reader_models": {"claude": "haiku"}}; an
+# empty string selects that CLI's own default. These are not the background
+# agents' `model`/`fallback_model`, which pick the nightly writer.
+DEFAULT_READER_MODELS: dict[str, str] = {}
+
+
+def _app_settings_path() -> Path | None:
+  storage = os.environ.get("APP_STORAGE_DIR", "").strip()
+  if storage:
+    return Path(storage) / "settings.json"
+  app_id = os.environ.get("APP_ID", "").strip()
+  if app_id.isdigit():
+    return Path(os.environ.get("DATA_DIR", "/data")) / "apps" / app_id / "settings.json"
+  return None
+
+
+def reader_models() -> dict[str, str | None]:
+  """Return the live navigator's model per provider (None = CLI default)."""
+  models: dict[str, str | None] = dict(DEFAULT_READER_MODELS)
+  path = _app_settings_path()
+  try:
+    settings = json.loads(path.read_text(encoding="utf-8")) if path else {}
+  except (OSError, ValueError):
+    settings = {}
+  configured = settings.get("reader_models") if isinstance(settings, dict) else None
+  if isinstance(configured, dict):
+    for provider, model in configured.items():
+      if isinstance(provider, str) and isinstance(model, str):
+        models[provider.strip().lower()] = model.strip() or None
+  return models
+
+
 def _live_text_call() -> Callable[[str], NavigatorCall] | None:
   requested = os.environ.get("MEMORY_READER_PROVIDER", "auto")
   provider = available_provider(requested)
@@ -822,6 +858,7 @@ def _live_text_call() -> Callable[[str], NavigatorCall] | None:
     # back to lexical matching, whose semantic judgment is intentionally weak.
     providers.extend(name for name in ("claude", "codex") if name != provider)
   health = RunProviderHealth()
+  models = reader_models()
   prepared = False
   preflight_attempts: list[dict] = []
 
@@ -842,23 +879,35 @@ def _live_text_call() -> Callable[[str], NavigatorCall] | None:
           "elapsed_ms": 0,
         })
         continue
-      started = time.monotonic()
-      result = run_text(name, prompt, timeout=AGENT_TIMEOUT)
-      elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
-      health.observe(name, None, result.failure)
-      attempt = {
-        "provider": name,
-        "outcome": "ok" if result.text else (
-          result.failure.code if result.failure else "empty_output"
-        ),
-        "skipped": False,
-        "elapsed_ms": elapsed_ms,
-      }
-      if isinstance(result.receipt, dict):
-        attempt["usage_receipt"] = result.receipt
-      attempts.append(attempt)
-      if result.text:
-        return NavigatorCall(result.text, tuple(attempts))
+      model = models.get(name)
+      if model and health.unavailable(name, model) is not None:
+        model = None
+      while True:
+        started = time.monotonic()
+        result = run_text(name, prompt, model=model, timeout=AGENT_TIMEOUT)
+        elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+        health.observe(name, model, result.failure)
+        attempt = {
+          "provider": name,
+          "outcome": "ok" if result.text else (
+            result.failure.code if result.failure else "empty_output"
+          ),
+          "skipped": False,
+          "elapsed_ms": elapsed_ms,
+        }
+        if model:
+          attempt["model"] = model
+        if isinstance(result.receipt, dict):
+          attempt["usage_receipt"] = result.receipt
+        attempts.append(attempt)
+        if result.text:
+          return NavigatorCall(result.text, tuple(attempts))
+        # A retired or inaccessible reader model must not cost recall: retry
+        # this provider once on its CLI default, and remember the choice.
+        if model and result.failure and result.failure.code == "model_unavailable":
+          model = None
+          continue
+        break
     return NavigatorCall(None, tuple(attempts))
 
   return call

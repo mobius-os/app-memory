@@ -18,6 +18,15 @@ CODEX_DISABLED_FEATURES = (
   "multi_agent", "image_generation", "goals",
 )
 _ACTIVE_PROCESS_GROUPS: set[int] = set()
+# Every Memory prompt states its whole task and output contract in the user
+# message. Without this, Claude Code sends its multi-thousand-token coding-agent
+# system prompt, which each fresh `claude -p` process writes to the prompt cache
+# again; that dominated the cost of short navigator rounds.
+CONFINED_SYSTEM_PROMPT = (
+  "You are a text-only component of the Mobius Memory app and have no tools. "
+  "Follow the task in the user message exactly and reply with only the output "
+  "it asks for."
+)
 
 
 @dataclass(frozen=True)
@@ -244,7 +253,10 @@ def run_text(
       if key in ("PATH", "HOME", "LANG", "LC_ALL")
     }
     env["CLAUDE_CONFIG_DIR"] = _auth_dir("CLAUDE_CONFIG_DIR", "claude")
-    cmd = [executable, "-p", "--tools", "", "--output-format", "json"]
+    cmd = [
+      executable, "-p", "--tools", "", "--output-format", "json",
+      "--system-prompt", CONFINED_SYSTEM_PROMPT,
+    ]
     if model:
       cmd += ["--model", str(model)]
     normalized_effort = str(effort or "").strip().lower()

@@ -108,6 +108,13 @@ class MemoryTextProviderTests(unittest.TestCase):
     self.assertIn("--tools", command)
     self.assertEqual(command[command.index("--tools") + 1], "")
     self.assertIn("--effort", command)
+    # The short confined prompt replaces the CLI's coding-agent prompt, which
+    # every fresh process would otherwise re-cache.
+    self.assertEqual(
+      command[command.index("--system-prompt") + 1],
+      provider.CONFINED_SYSTEM_PROMPT,
+    )
+    self.assertLess(len(provider.CONFINED_SYSTEM_PROMPT), 400)
     self.assertNotIn("AGENT_TOKEN", captured["env"])
     self.assertNotIn("APP_TOKEN", captured["env"])
 
