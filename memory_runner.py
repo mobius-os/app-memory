@@ -127,9 +127,6 @@ _CONSOLIDATION_CURSOR = STATE / "consolidation-cursor.json"
 # A lane stops for the night only after several consecutive failed items, so
 # one malformed analyst answer costs one item instead of the whole lane.
 _LANE_REJECTION_LIMIT = 3
-# Unreviewed disagreements kept queued for a later writer review; the writer
-# reaches only a few audit items per night.
-_AUDIT_BACKLOG_LIMIT = 10
 _MAX_CONSOLIDATION_LEADS = 20
 @dataclass(frozen=True)
 class ProposalOutcome:
@@ -633,30 +630,18 @@ def _pending_read_traces() -> list[dict]:
 
 
 def _unreviewed_read_audits() -> list[dict]:
-  """Re-queue the newest unreviewed disagreements without another deep replay.
+  """Recover unresolved identities; historical bodies load only when selected.
 
-  Only readings no model has run on come back, and only when they recorded
-  their deep replay revision: the writer then sees the exact bodies the
-  replay chose. Older rows cannot show those bodies, a reading a model ran on
-  without an accepted verdict is final (`writer_failed`), and only the newest
-  `_AUDIT_BACKLOG_LIMIT` readings are kept queued; every other one stays
-  provisional for good (excluded from rates; see `note_usage_evidence`), so
-  the queue, its nightly cost and the age of its evidence stay bounded.
+  The append-only ledger owns progress. Failure is not a verdict, age does not
+  retire work, and a writer's explicit unresolved disposition is not a recall
+  judgment. Missing historical evidence is shown, never guessed or discarded.
   """
-  pending = [
-    row for row in latest_audit_rows(STATE)
+  pending = {
+    row["read_id"]: row for row in latest_audit_rows(STATE)
     if isinstance(row.get("read_id"), str)
     and isinstance(row.get("at"), str)
-    and row.get("verdict_source") == "deep_replay_unreviewed"
-    and isinstance(row.get("deep_revision"), str) and row["deep_revision"]
-    and isinstance(row.get("deep_selected"), list)
-    and all(isinstance(path, str) for path in row["deep_selected"])
-  ]
-  pending = {
-    row["read_id"]: row
-    for row in sorted(pending, key=lambda row: row["at"])[-_AUDIT_BACKLOG_LIMIT:]
+    and row.get("verdict_source") in {"deep_replay_unreviewed", "writer_failed"}
   }
-  # Read logs are daily files, so only the days of the queued reads are read.
   traces: dict[str, dict] = {}
   for day in sorted({row["at"][:10] for row in pending.values()}):
     for trace in read_jsonl(STATE / "read-log" / f"{day}.jsonl"):
@@ -664,11 +649,22 @@ def _unreviewed_read_audits() -> list[dict]:
         traces[trace["read_id"]] = trace
   result = []
   for read_id, row in pending.items():
-    if read_id not in traces:
-      continue
-    replay = {"read_id": read_id, "selected": row["deep_selected"],
+    trace = traces.get(read_id) or {
+      "read_id": read_id, "at": row["at"],
+      "question": "Historical question unavailable; do not infer its meaning.",
+      "files": row.get("live_selected") or [],
+    }
+    replay = {"read_id": read_id, "selected": row.get("deep_selected") or [],
               "reason": row.get("deep_reason") or "prior deep replay"}
-    result.extend(_audit_reads(row["deep_revision"], [traces[read_id]], [replay]))
+    audit = _audit_reads(row.get("deep_revision") or "", [trace], [replay])[0]
+    audit["question_sha256"] = row.get("question_sha256")
+    audit["last_attempt_at"] = row.get("last_attempt_at") or ""
+    audit["previous_review"] = {
+      "source": row.get("verdict_source"), "reason": row.get("reason"),
+      "failure": row.get("review_failure"),
+      "evidence_missing": read_id not in traces or not row.get("deep_revision"),
+    }
+    result.append(audit)
   return result
 
 
@@ -795,6 +791,7 @@ def _audit_reads(
 ) -> list[dict]:
   """Pair each replayed live read with its deep reference selection.
 
+  Bodies are loaded only when the writer selects this item.
   `deep.missed` are notes the reference chose that live recall did not;
   `deep.overreach` are live selections the reference left out. Both are
   evidence for the writer's verdict, not the verdict itself.
@@ -842,20 +839,6 @@ def _audit_reads(
     missed = [path for path in deep if path not in live]
     overreach = [path for path in candidate_files if path not in set(deep)]
 
-    def bodies(paths: list[str], revision: str) -> list[dict]:
-      result = []
-      for path in paths:
-        try:
-          content = read_revision_file(revision, path)
-        except (OSError, UnicodeError, ValueError):
-          continue
-        result.append({
-          "path": path,
-          "title": Path(path).stem.replace("-", " "),
-          "content": content,
-        })
-      return result
-
     audits.append({
       "read_id": str(trace["read_id"]),
       "at": str(trace["at"]),
@@ -863,7 +846,8 @@ def _audit_reads(
       "live": {
         "opened": live_opened,
         "selected": candidate_files,
-        "selected_nodes": bodies(candidate_files, str(trace.get("commit") or commit)),
+        "revision": str(trace.get("commit") or ""),
+        "selected_nodes": [],
         "stop_reason": (
           traversal.get("stop_reason") if isinstance(traversal, dict) else None
         ),
@@ -878,11 +862,34 @@ def _audit_reads(
         "reason": replay["reason"],
         "revision": commit or None,
         "missed": missed,
-        "missed_nodes": bodies(missed, commit),
+        "missed_nodes": [],
         "overreach": overreach,
       },
     })
   return audits
+
+
+def _hydrate_audit(audit: dict) -> dict:
+  """Load pinned evidence for one selected work item, never current substitutes."""
+  audit = copy.deepcopy(audit)
+  for section, paths, target in (("live", "selected", "selected_nodes"),
+                                  ("deep", "missed", "missed_nodes")):
+    value = audit.get(section) or {}
+    if value.get(target):
+      continue
+    bodies = []
+    for path in value.get(paths) or []:
+      try:
+        if not value.get("revision"):
+          raise ValueError("historical revision unavailable")
+        content = read_revision_file(value["revision"], path)
+      except (OSError, UnicodeError, ValueError):
+        audit.setdefault("unavailable_evidence", []).append(path)
+        continue
+      bodies.append({"path": path, "title": Path(path).stem.replace("-", " "),
+                     "content": content})
+    value[target] = bodies
+  return audit
 
 
 def _agreed_verdict(audit: dict) -> dict | None:
@@ -925,15 +932,12 @@ def _unreviewed_verdict(audit: dict) -> dict:
 
 
 def _failed_verdict(audit: dict) -> dict:
-  """The deep replay's reading of a disagreement whose writer review failed.
-
-  A model ran on it and produced no accepted verdict, so it is final rather
-  than re-queued: an item that always fails must not spend tomorrow's review.
-  """
+  """Retain a failed attempt as unfinished evidence, not a judgment."""
   return {
     **_unreviewed_verdict(audit),
     "reason": "writer review of this deep replay disagreement failed",
     "verdict_source": "writer_failed",
+    "review_failure": audit.get("review_failure"),
   }
 
 
@@ -1069,123 +1073,16 @@ def _prompt_graph_index(catalog: list[dict]) -> dict[str, list[list[str]]]:
   return {"mocs": mocs, "notes": notes}
 
 
-_RELEVANCE_TERM_RE = re.compile(r"[a-z0-9]{4,}")
-
-
-def _relevance_terms(value: str) -> set[str]:
-  return set(_RELEVANCE_TERM_RE.findall(value.lower()))
-
-
-def _work_text(
-  chats: list[dict], read_audits: list[dict],
-) -> str:
-  chat_text = [
-    str(value)
-    for chat in chats
-    if isinstance(chat, dict)
-    for value in [
-      chat.get("title") or "",
-      chat.get("summary") or "",
-      *(capture.get("text") or "" for capture in chat.get("captures") or ()),
-    ]
-  ]
-  audit_text = [
-    str(value)
+def _audit_note_paths(read_audits: list[dict]) -> set[str]:
+  """Current copies of the exact notes whose historical selection is judged."""
+  return {
+    path
     for audit in read_audits
-    if isinstance(audit, dict)
-    for value in [
-      audit.get("question") or "",
-      audit.get("reason") or "",
-    ]
-  ]
-  return " ".join(chat_text + audit_text)
-
-
-def _explicit_audit_paths(read_audits: list[dict]) -> set[str]:
-  """Collect selected and pruned candidate paths from original live traces."""
-  paths: set[str] = set()
-  for audit in read_audits:
-    if not isinstance(audit, dict):
-      continue
-    live = audit.get("live")
-    if not isinstance(live, dict):
-      continue
-    paths.update(
-      path for path in live.get("selected", []) if isinstance(path, str)
-    )
-    frontier = live.get("frontier_at_stop")
-    if not isinstance(frontier, list):
-      continue
-    for item in frontier:
-      if not isinstance(item, dict):
-        continue
-      if isinstance(item.get("path"), str):
-        paths.add(item["path"])
-      nodes = item.get("nodes")
-      if not isinstance(nodes, list):
-        continue
-      paths.update(
-        node["path"] for node in nodes
-        if isinstance(node, dict) and isinstance(node.get("path"), str)
-      )
-  return paths
-
-
-def _related_note_contents(
-  staging: Path,
-  catalog: list[dict],
-  chats: list[dict],
-  read_audits: list[dict],
-) -> list[dict]:
-  """Load complete bodies only for notes directly related to this work item."""
-  query_terms = _relevance_terms(_work_text(chats, read_audits))
-  explicit_paths = _explicit_audit_paths(read_audits)
-  candidates: list[tuple[str, set[str]]] = []
-  term_frequency: dict[str, int] = {}
-  for item in catalog:
-    path = str(item.get("path") or "")
-    if not path.startswith("notes/"):
-      continue
-    identity = " ".join(
-      str(item.get(key) or "") for key in ("id", "title", "description")
-    )
-    matches = query_terms & _relevance_terms(identity)
-    candidates.append((path, matches))
-    for term in matches:
-      term_frequency[term] = term_frequency.get(term, 0) + 1
-  rarest_frequency = min(term_frequency.values(), default=0)
-  discriminating_terms = {
-    term for term, frequency in term_frequency.items()
-    if frequency == rarest_frequency
+    for section in (audit.get("live"), audit.get("deep"))
+    if isinstance(section, dict)
+    for path in section.get("selected", [])
+    if isinstance(path, str) and _NOTE_PATH.fullmatch(path)
   }
-  ranked: list[tuple[float, str]] = []
-  for path, matches in candidates:
-    # Two independent matches are corroborating evidence. A single match also
-    # earns the complete body when it is among this graph's most discriminating
-    # query terms. This adapts to graph vocabulary without a fixed candidate or
-    # prompt-size quota.
-    if (
-      path in explicit_paths
-      or len(matches) > 1
-      or bool(matches & discriminating_terms)
-    ):
-      score = sum(1 / term_frequency[term] for term in matches)
-      ranked.append((score, path))
-  contents = []
-  content_chars = 0
-  for score, path in sorted(ranked, key=lambda item: (-item[0], item[1])):
-    source = staging / path
-    if source.is_symlink() or not source.is_file():
-      continue
-    try:
-      content = source.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-      continue
-    if content_chars + len(content) > _MAX_RELATED_NOTE_CONTENT_CHARS:
-      continue
-    contents.append({"path": path, "content": content})
-    content_chars += len(content)
-  return contents
 
 
 def _work_item_note_contents(
@@ -1199,17 +1096,18 @@ def _work_item_note_contents(
 ) -> list[dict]:
   """Return every complete note body the analyst may edit for this work item.
 
-  A consolidation item supplies its whole map neighborhood; chat and audit
-  items supply the notes related to their text. Either way, a note the analyst
-  asked for by path after a `note_body_not_supplied` rejection is added so the
-  same item can be finished instead of abandoned.
+  Consolidation supplies its map neighborhood; audits start with the exact
+  selections being judged. Other bodies are chosen explicitly by the analyst
+  from the complete identity catalogue, never by host keyword overlap.
   """
   if consolidation is not None:
     contents = list(consolidation.get("note_contents") or [])
   else:
-    contents = _related_note_contents(staging, catalog, chats, read_audits)
+    contents = []
   present = {str(item.get("path")) for item in contents}
-  for path in sorted(extra_note_paths):
+  known_paths = {item["path"] for item in catalog}
+  paths = _audit_note_paths(read_audits) | set(extra_note_paths)
+  for path in sorted(paths & known_paths):
     if path in present or not _NOTE_PATH.fullmatch(path):
       continue
     source = staging / path
@@ -1302,7 +1200,8 @@ def _map_members(staging: Path) -> dict[str, list[str]]:
   maps = {
     str(node.get("id")): str(node.get("path"))
     for node in nodes
-    if str(node.get("path") or "").startswith("mocs/")
+    if (str(node.get("path") or "").startswith("mocs/")
+        or node.get("path") == "index.md")
     and str(node.get("path")) not in _MANAGED_DOCS
   }
   members: dict[str, list[str]] = {path: [] for path in maps.values()}
@@ -1490,14 +1389,25 @@ def _editable_map(consolidation: dict | None) -> dict | None:
     return None
   moc = consolidation.get("moc") if isinstance(consolidation.get("moc"), dict) else {}
   path = str(moc.get("path") or "")
-  if not _ROUTE_PATH.fullmatch(path) or path == "index.md" or path in _PROTECTED_DOCS:
+  if (not _ROUTE_PATH.fullmatch(path) or path in _PROTECTED_DOCS
+      or not isinstance(moc.get("content"), str) or not moc["content"].strip()):
     return None
   members = {
     Path(str(item)).stem
     for item in list(consolidation.get("member_paths") or [])
     + list(consolidation.get("omitted_member_paths") or [])
   }
-  return {"path": path, "members": members}
+  result = {"path": path, "members": members}
+  if path == "index.md":
+    content = str(moc.get("content") or "")
+    # Root review changes prose and cues, not routing authority or host blocks.
+    result["members"] = {
+      Path(raw.strip()).stem for raw in _WIKILINK_TARGET.findall(content)
+    }
+    result["managed_blocks"] = re.findall(
+      re.escape(_UNFILED_START) + r".*?" + re.escape(_UNFILED_END), content, re.S,
+    )
+  return result
 
 
 def _graph_context_scale(staging: Path) -> dict[str, int]:
@@ -2007,12 +1917,20 @@ source: [deleted:d01]). A recoverable deleted chat uses a `deleted:dNN` handle;
 learn from it normally and cite that exact handle. The host expands it to an
 opaque retained-source marker that is deliberately not a chat backlink. The
 `existing_graph.mocs` rows are [path,title,description] for every current map;
-`existing_graph.notes` rows are [path,title] for every current note so obvious
-duplicates remain visible without resending every description.
-`existing_note_contents` contains complete text only for a bounded set of the
-existing notes directly related to this work item. Never replace an existing
-note unless its path and full current text are present there; leave a follow-up
-instead. `existing_note_routes` supplies current incoming map/root lines for
+`existing_graph.notes` rows are [path,title] for every current note. Use these
+identities to find plausible existing facts and potential duplicates, then
+request their complete bodies when the title is not enough. A title match is
+not proof of relevance; do not infer the claim or its provenance from a title. `existing_note_contents`
+contains complete current text for this work item's supplied notes. When more
+context is needed, return ONLY {{"request_note_bodies":["notes/slug.md"]}} with
+actual paths from the catalogue. Request the relevant bodies together; do not
+request everything or fill a quota. The host returns complete text and current
+routing lines, then you continue this same work item. A request is not a final
+proposal and must not include edits or verdicts. You may request more unseen
+notes after reading them. Never replace an existing note before its complete
+current text is supplied. Do not defer a correction merely to obtain a body;
+request it instead. Read an existing note before proposing its deletion as well.
+`existing_note_routes` supplies current incoming map/root lines for
 those notes. When correcting a claim, also correct contradicted routing cues
 in the SAME proposal using `links`. A links operation creates a missing link or
 updates the cue of an existing dedicated described-link bullet, preserving the
@@ -2044,7 +1962,9 @@ rules are absolute; follow them exactly:
   replace `consolidation.moc.path` with a complete rewrite of that map — keep
   its `type: moc` frontmatter, keep a described `[[link]]` to every member you
   are not deleting or re-filing in this same proposal, and use the rewrite to
-  repair stale cues, orphaned fragments, and dangling lines. For every other
+  repair stale cues, orphaned fragments, and dangling lines. Root index.md
+  review must preserve ALL existing outgoing links and the exact host-managed
+  Unfiled block; it cannot delete or reorganize root membership. For every other
   map use `links`: trusted host code adds or refreshes the described link from an existing
   root or MOC path without replacing unrelated map text.
 Delete only a
@@ -2088,7 +2008,14 @@ Complete all four nightly duties in one coherent pass:
    `overreach` true when any live-selected node was materially irrelevant or an
    unsupported substitute. Adjacent but useful context is not an error. A miss
    must list the relevant missed nodes; overreach must list only materially
-   overselected nodes.
+   overselected nodes. For a failed prior review, inspect `previous_review`
+   and its failure reason before trying again. If the historical evidence cannot
+   support any honest judgment, use `unresolved` with a specific reason, empty
+   missed/overselected lists and overreach=false. This explicitly closes review
+   without a recall verdict or benchmark expectation; do not use it merely to
+   save work, hide a repairable failure, or report success. Missing bodies appear
+   in `unavailable_evidence`; never substitute current content for historical
+   evidence. Unresolved cases cannot coach the selector.
 3. Coach the live selector from this batch as a whole. `recall_guidance`
    may `replace` the current bounded guidance with one concise, general lesson,
    `clear` guidance that the evidence shows is harmful or stale, or `keep` it
@@ -2134,7 +2061,7 @@ into its own later consolidation of the same neighborhood; they are not
 permission to weaken validation or publish uncertain facts.
 
 Return ONLY one JSON object with this shape:
-{{"summary":"...","self_review":{{"hardest_decision":"...","possibly_missed":"none | ...","prompt_change":"none | ...","next_experiment":"none | reversible change + expected evidence"}},"read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short graph-retrieval reason"}}],"recall_guidance":{{"action":"keep | replace | clear","instruction":"empty unless replacing | one concise general selector lesson","reason":"short evidence-based reason","evidence_read_ids":[]}},"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"links":[{{"from":"index.md | mocs/topic.md","to":"notes/slug.md | mocs/topic.md","cue":"why this target is useful"}}],"deletes":[]}}
+{{"summary":"...","self_review":{{"hardest_decision":"...","possibly_missed":"none | ...","prompt_change":"none | ...","next_experiment":"none | reversible change + expected evidence"}},"read_audits":[{{"read_id":"exact supplied id","outcome":"ok | miss | no_memory | unresolved","overreach":false,"missed_nodes":[],"overselected_nodes":[],"reason":"short graph-retrieval reason"}}],"recall_guidance":{{"action":"keep | replace | clear","instruction":"empty unless replacing | one concise general selector lesson","reason":"short evidence-based reason","evidence_read_ids":[]}},"followups":[],"updates":[{{"path":"notes/slug.md","content":"complete markdown"}}],"links":[{{"from":"index.md | mocs/topic.md","to":"notes/slug.md | mocs/topic.md","cue":"why this target is useful"}}],"deletes":[]}}
 Return exactly one verdict for every supplied read audit and no invented ids.
 Update paths may only be notes/<slug>.md, plus `consolidation.moc.path` when DATA carries a
 consolidation item. Link sources may be index.md or an existing
@@ -2236,7 +2163,6 @@ def _proposal(
   )
   attempted = []
   providers = providers or ProviderPool.for_app(app_id)
-  body_retry_used = False
   choice_index = 0
   while choice_index < len(providers.choices):
     choice = providers.choices[choice_index]
@@ -2279,6 +2205,39 @@ def _proposal(
     value = result.proposal
     if value is not None:
       try:
+        if "request_note_bodies" in value:
+          requested = value["request_note_bodies"]
+          if (
+            set(value) != {"request_note_bodies"}
+            or not isinstance(requested, list) or not requested
+            or any(not isinstance(path, str) or path not in existing_note_paths
+                   for path in requested)
+            or not (set(requested) - editable_note_paths)
+          ):
+            raise ProposalValidationError(
+              "invalid_note_body_request",
+              "request only existing, not-yet-supplied note bodies without edits",
+            )
+          requested_paths = supplied_note_paths | set(requested)
+          contents = _work_item_note_contents(
+            staging, catalog, chats, audits,
+            consolidation=consolidation, extra_note_paths=requested_paths,
+          )
+          delivered = {item["path"] for item in contents}
+          if not set(requested) <= delivered:
+            raise ProposalValidationError(
+              "note_body_unavailable", "requested complete note body is unavailable",
+            )
+          if sum(len(item["content"]) for item in contents) > _MAX_RELATED_NOTE_CONTENT_CHARS:
+            raise ProposalValidationError(
+              "note_context_limit", "requested complete bodies exceed the host safety ceiling",
+            )
+          supplied_note_paths = requested_paths
+          prompt, editable_note_paths = build_prompt(supplied_note_paths)
+          attempt["outcome"] = "context_requested"
+          attempt["requested_note_paths"] = sorted(set(requested))
+          choice_index -= 1
+          continue
         value = _normalize_proposal(
           value,
           allowed_chat_ids=allowed_chat_ids,
@@ -2297,21 +2256,6 @@ def _proposal(
         # analyst that returns syntactically-valid but unverifiable output must
         # not suppress the configured fallback agent for the whole night.
         attempted[-1]["rejection_code"] = exc.code
-        if (
-          exc.code == "note_body_not_supplied"
-          and not body_retry_used
-          and isinstance(exc.path, str)
-          and exc.path in existing_note_paths
-        ):
-          # The analyst wanted to edit a real note it never saw. Supply that
-          # body and let the same analyst finish the item, instead of spending
-          # the fallback provider on an identical blind prompt and leaving the
-          # missing context as a dead-letter follow-up.
-          body_retry_used = True
-          supplied_note_paths.add(exc.path)
-          prompt, editable_note_paths = build_prompt(supplied_note_paths)
-          attempted[-1]["retried_with_note_body"] = exc.path
-          choice_index -= 1
         continue
       attempt["outcome"] = "accepted"
       return ProposalOutcome(
@@ -2411,7 +2355,7 @@ def _normalize_audit_verdicts(
       not isinstance(read_id, str)
       or read_id not in expected
       or read_id in seen
-      or outcome not in {"ok", "miss", "no_memory"}
+      or outcome not in {"ok", "miss", "no_memory", "unresolved"}
       or not isinstance(missed_nodes, list)
       or any(not isinstance(path, str) for path in missed_nodes)
       or not isinstance(overreach, bool)
@@ -2422,6 +2366,7 @@ def _normalize_audit_verdicts(
       or (overreach and not overselected_nodes)
       or (not overreach and bool(overselected_nodes))
       or not isinstance(reason, str)
+      or (outcome == "unresolved" and (not reason.strip() or overreach))
       or usefulness not in {"helpful", "mixed", "unused", "harmful", "unknown"}
       or not isinstance(hindsight_reason, str)
     ):
@@ -2432,6 +2377,7 @@ def _normalize_audit_verdicts(
     normalized.append({
       "read_id": read_id,
       "outcome": outcome,
+      "verdict_source": "writer_unresolved" if outcome == "unresolved" else "writer",
       "overreach": overreach,
       "missed_nodes": list(dict.fromkeys(missed_nodes))[:100],
       "overselected_nodes": list(dict.fromkeys(overselected_nodes))[:100],
@@ -2448,7 +2394,8 @@ def _normalize_audit_verdicts(
     **proposal,
     "read_audits": normalized,
     "recall_guidance": _normalize_recall_guidance(
-      proposal.get("recall_guidance"), expected,
+      proposal.get("recall_guidance"),
+      {item["read_id"] for item in normalized if item["outcome"] != "unresolved"},
     ),
   }
 
@@ -2635,8 +2582,8 @@ def _normalize_proposal(
   """Validate analyst output and expand source handles without touching disk.
 
   ``editable_map`` names the one map a consolidation item may rewrite in full:
-  ``{"path": "mocs/<slug>.md", "members": {<note ids>}}``. Every other map is
-  reachable only through ``links``.
+  ``{"path": "index.md | mocs/<slug>.md", "members": {<linked ids>}}``.
+  Every other map is reachable only through ``links``.
   """
   if not isinstance(proposal, dict):
     raise ProposalValidationError(
@@ -2676,6 +2623,12 @@ def _normalize_proposal(
         path=rel if isinstance(rel, str) else None,
       )
     delete_paths.append(rel)
+    if rel in (existing_note_paths or set()) and rel not in (editable_note_paths or set()):
+      raise ProposalValidationError(
+        "note_body_not_supplied",
+        "an existing note can be deleted only when its complete body was supplied",
+        path=rel,
+      )
   update_paths = {
     update.get("path") for update in updates if isinstance(update, dict)
   }
@@ -2780,10 +2733,25 @@ def _normalize_proposal(
       content,
     )
     if rel == editable_map_path:
+      if rel == "index.md":
+        if any(link["from"] == rel for link in links):
+          raise ProposalValidationError(
+            "conflicting_root_edits", "use the complete root rewrite, not simultaneous root link edits", path=rel,
+          )
+        blocks = re.findall(
+          re.escape(_UNFILED_START) + r".*?" + re.escape(_UNFILED_END), content, re.S,
+        )
+        if blocks != editable_map.get("managed_blocks", []) or any(
+          content.count(marker) != len(blocks) for marker in (_UNFILED_START, _UNFILED_END)
+        ):
+          raise ProposalValidationError(
+            "managed_root_block_changed",
+            "root rewrite must preserve the managed Unfiled block", path=rel,
+          )
       _validate_map_rewrite(
         rel, content,
         members=set(editable_map.get("members") or ()),
-        touched_ids={
+        touched_ids=set() if rel == "index.md" else {
           Path(str(item.get("path") or "")).stem
           for item in updates if isinstance(item, dict)
         } | {Path(item).stem for item in delete_paths},
@@ -3345,8 +3313,14 @@ def _record_recall_audits(
       "schema": 4,
       "run_id": run_id,
       "read_id": read_id,
+      "last_attempt_at": (
+        datetime.now(UTC).isoformat()
+        if verdict.get("verdict_source") != "deep_replay_unreviewed"
+        else audit.get("last_attempt_at", "")
+      ),
+      "review_failure": verdict.get("review_failure"),
       "at": str(audit.get("at") or ""),
-      "question_sha256": hashlib.sha256(
+      "question_sha256": audit.get("question_sha256") or hashlib.sha256(
         str(audit.get("question") or "").encode("utf-8"),
       ).hexdigest(),
       "live_selected": list(audit.get("live", {}).get("selected") or []),
@@ -3629,7 +3603,7 @@ def _consolidate_batches(
     consolidation = None
     moc_path = None
     if work_kind == "audit":
-      batch_audits = remaining_audits[:1]
+      batch_audits = [_hydrate_audit(remaining_audits[0])]
     elif work_kind == "chat":
       batch = _proposal_batch(remaining_chats)
     else:
@@ -3652,7 +3626,9 @@ def _consolidate_batches(
     if candidate_outcome.status == "degraded":
       attempts = candidate_outcome.attempted_agents
       if attempts and all(
-        attempt.get("failure_code") == "work_window_elapsed" for attempt in attempts
+        attempt.get("failure_code") == "work_window_elapsed"
+        or attempt.get("outcome") == "context_requested"
+        for attempt in attempts
       ):
         # The clock ran out before any analyst answered: that is the deadline,
         # not a rejected item, so report it as such and stop.
@@ -3688,15 +3664,21 @@ def _consolidate_batches(
 
     if rejection_reason is not None:
       # One failed item does not close the lane: tonight's other work
-      # continues. A chat stays queued for a later night. An audit a model
-      # ran on is settled however it failed, so one that always fails is
-      # tried once; one no model ran on (none available) stays queued.
+      # continues. Failed audits retain reasons for the next writer; every
+      # item is attempted at most once in this run, within the same deadline.
       deferred_attempts.extend(candidate_outcome.attempted_agents)
       deferred_reason = rejection_reason
       deferred_detail = rejection_detail
       consecutive_rejections[work_kind] += 1
       if work_kind == "audit":
         if _model_ran(candidate_outcome.attempted_agents):
+          for audit in batch_audits:
+            audit["review_failure"] = {
+              "reason": rejection_reason, "detail": rejection_detail,
+              "attempts": [{key: attempt[key] for key in
+                ("provider", "failure_code", "rejection_code", "detail") if key in attempt}
+                for attempt in candidate_outcome.attempted_agents],
+            }
           failed_audits.extend(batch_audits)
         remaining_audits = remaining_audits[len(batch_audits):]
       elif work_kind == "chat":
@@ -3754,14 +3736,16 @@ def _consolidate_batches(
 
 
 def _model_ran(attempts: list[dict]) -> bool:
-  """Whether any model actually worked on the item.
+  """Whether a model attempted judgment, rather than only acquiring context.
 
   Skipped providers, the closing work window, and failures that disable a
   provider for the run (missing CLI, usage limit, logged out, model
-  unavailable) all mean no model did.
+  unavailable) do not establish an attempted judgment. A successful body
+  request followed by deadline or quota also leaves the item unfinished.
   """
   return any(
     "skipped_reason" not in attempt
+    and attempt.get("outcome") != "context_requested"
     and not attempt.get("disabled_for_run")
     and attempt.get("failure_code") != "work_window_elapsed"
     for attempt in attempts
@@ -3968,22 +3952,18 @@ async def run() -> int:
     agreed_audits = [
       audit for audit in replayed_audits if audit["read_id"] in agreed_ids
     ]
-    # Only disagreements need the writer's judgment and a graph repair; the
-    # largest ones first, since the work window may end before the last.
     fresh_disagreements = [
       audit for audit in replayed_audits if audit["read_id"] not in agreed_ids
     ]
     replayed_ids = {audit["read_id"] for audit in replayed_audits}
-    backlog_audits = [
-      audit for audit in recovered_backlog
-      if audit["read_id"] not in replayed_ids
-    ]
-    # Stable sort: on equal size tonight's reads go ahead of the backlog.
+    backlog_audits = [audit for audit in recovered_backlog if audit["read_id"] not in replayed_ids]
+    # Unattempted reads first, then least-recently attempted failures. No size
+    # score or age eviction: a failed item goes to the back, not out of the ledger.
     read_audits = sorted(
       [*fresh_disagreements, *backlog_audits],
-      key=lambda audit: -sum(
-        len(audit["deep"].get(key) or ()) for key in ("missed", "overreach")
-      ),
+      key=lambda audit: (bool(audit.get("last_attempt_at")),
+                         audit.get("last_attempt_at") or audit.get("at") or "",
+                         audit["read_id"]),
     )
     consolidation = await asyncio.to_thread(
       _consolidate_batches,
@@ -4004,9 +3984,8 @@ async def run() -> int:
     deferred_detail = consolidation.deferred_detail
     audit_proposal_count = consolidation.audit_batch_count
     chat_proposal_count = consolidation.chat_batch_count
-    # Disagreements no model ran on (the deadline, no available provider)
-    # stay queued. One a model ran on without an accepted verdict is final,
-    # so an item that always fails cannot spend tomorrow's audit lane.
+    # Unfinished reads stay in the ledger; attempted failures move behind
+    # unattempted work on the next run, with their failure evidence.
     reviewed_ids = {audit["read_id"] for audit in proposal_audits}
     rejected_ids = {audit["read_id"] for audit in consolidation.failed_audits}
     unreviewed_audits = [
@@ -4043,7 +4022,7 @@ async def run() -> int:
           chats and not consolidation.rejected_chat_count
         ),
         "read_audit_count": 0,
-        "deferred_read_audit_count": pending_read_audit_count,
+        "deferred_read_audit_count": pending_read_audit_count + len(backlog_audits),
         "proposal_batch_count": 0,
         "deferred_chat_count": len(remaining_chats),
         "provider_summary": _provider_summary([], deferred_attempts),
@@ -4169,7 +4148,6 @@ async def run() -> int:
       "writer_reviewed_read_audit_count": len(proposal_audits),
       "deferred_read_audit_count": (
         deferred_read_audit_count + len(read_audits) - len(proposal_audits)
-        - len(consolidation.failed_audits)
       ),
       "proposal_batch_count": len(proposals),
       "audit_proposal_batch_count": audit_proposal_count,
@@ -4240,7 +4218,7 @@ async def run() -> int:
           "read_audits": [
             *unjudged_verdicts,
             *(
-              {**verdict, "verdict_source": "writer"}
+              {**verdict, "verdict_source": verdict.get("verdict_source", "writer")}
               for verdict in proposal.get("read_audits") or []
             ),
           ],

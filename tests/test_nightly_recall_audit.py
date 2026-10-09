@@ -645,6 +645,8 @@ def test_audit_reads_loads_selected_nodes_from_trace_revision(monkeypatch):
     "traversal": {"opened": [], "frontier_at_stop": []},
   }], [{"read_id": "read-1", "selected": ["notes/quiet-ui.md"], "reason": ""}])
 
+  assert loaded == []
+  audits = [memory_runner._hydrate_audit(audits[0])]
   assert loaded == [("trace-commit", "notes/quiet-ui.md")]
   assert audits[0]["deep"]["missed"] == []
   assert audits[0]["deep"]["overreach"] == []
@@ -732,7 +734,7 @@ def test_keep_does_not_erase_accepted_coaching_change():
   ])["recall_guidance"]["action"] == "clear"
 
 
-def test_unreviewed_log_requeues_only_revisioned_rows_until_reviewed(monkeypatch, tmp_path):
+def test_unreviewed_log_retains_missing_evidence_until_reasoned_disposition(monkeypatch, tmp_path):
   state = tmp_path / "app-state"
   (state / "read-log").mkdir(parents=True)
   monkeypatch.setattr(memory_runner, "STATE", state)
@@ -749,7 +751,7 @@ def test_unreviewed_log_requeues_only_revisioned_rows_until_reviewed(monkeypatch
   )
   graph = {"nodes": [], "edges": []}
   # A row from before deep revisions were recorded can never show the writer
-  # the replay's historical bodies; it must stay provisional, not re-queue.
+  # the replay's historical bodies; keep it visible for reasoned disposition.
   (state / "recall-audit").mkdir()
   (state / "recall-audit" / "2026-09-01.jsonl").write_text(json.dumps({
     "read_id": "legacy", "at": traces[0]["at"],
@@ -766,18 +768,20 @@ def test_unreviewed_log_requeues_only_revisioned_rows_until_reviewed(monkeypatch
 
   for _night in range(2):
     recovered = memory_runner._unreviewed_read_audits()
-    assert [item["read_id"] for item in recovered] == ["pending"]
-    assert recovered[0]["deep"]["revision"] == "b" * 40
-    assert recovered[0]["deep"]["missed_nodes"][0]["content"] == (
+    assert [item["read_id"] for item in recovered] == ["legacy", "pending"]
+    assert recovered[0]["previous_review"]["evidence_missing"]
+    assert recovered[1]["deep"]["revision"] == "b" * 40
+    assert recovered[1]["deep"]["missed_nodes"] == []
+    assert memory_runner._hydrate_audit(recovered[1])["deep"]["missed_nodes"][0]["content"] == (
       "notes/answer.md@" + "b" * 40
     )
 
-  memory_runner._record_recall_audits("run-2", recovered, {"read_audits": [{
+  memory_runner._record_recall_audits("run-2", recovered[1:], {"read_audits": [{
     "read_id": "pending", "outcome": "miss", "overreach": False,
     "missed_nodes": ["notes/answer.md"], "overselected_nodes": [],
     "reason": "fact existed", "verdict_source": "writer",
   }]}, graph)
-  assert memory_runner._unreviewed_read_audits() == []
+  assert [item["read_id"] for item in memory_runner._unreviewed_read_audits()] == ["legacy"]
   stats = json.loads((state / "recall-stats.json").read_text())
   assert (stats["reads_audited"], stats["reads_judged"],
           stats["provisional_reads"]) == (2, 1, 1)
@@ -988,8 +992,8 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   assert [(item["read_id"], item["verdict_source"]) for item in final_verdicts] == [
     ("fresh", "deep_replay_unreviewed"), ("old", "writer"),
   ]
-  # Equal-size disagreements: tonight's read goes ahead of the backlog.
-  assert queued == [["fresh", "old"], ["fresh", "old"]]
+  # Unattempted work is oldest-first; disagreement size is not a priority score.
+  assert queued == [["old", "fresh"], ["old", "fresh"]]
 
 
 @pytest.mark.parametrize("failure", [
@@ -997,12 +1001,11 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   {"provider": "codex", "failure_code": "invalid_output"},
   {"provider": "codex", "failure_code": "timeout"},
 ])
-def test_failed_audit_items_do_not_requeue_and_starve_fresh_reads(
+def test_failed_audits_are_retained_without_starving_unattempted_reads(
   monkeypatch, tmp_path, failure,
 ):
-  # Three large carried-over disagreements always fail writer review, however
-  # they fail. They must be settled on the night they fail, or they reach the
-  # lane rejection limit first every night and the fresh read is never reviewed.
+  # Failed work is retained, but attempted failures move behind unattempted
+  # reads. The existing consecutive-failure stop still bounds each night.
   state = tmp_path / "app-state"
   (state / "read-log").mkdir(parents=True)
   monkeypatch.setattr(memory_runner, "STATE", state)
@@ -1012,7 +1015,7 @@ def test_failed_audit_items_do_not_requeue_and_starve_fresh_reads(
   graph = {"nodes": [], "edges": [], "problems": []}
 
   def trace(read_id):
-    return {"schema": 4, "read_id": read_id, "at": "2026-09-01T00:00:00+00:00",
+    return {"schema": 4, "read_id": read_id, "at": "2026-09-01T00:00:10+00:00" if read_id == "fresh" else "2026-09-01T00:00:00+00:00",
             "question": "Relevant fact?", "commit": "a" * 40, "files": []}
 
   def replay(read_id, size):
@@ -1088,12 +1091,13 @@ def test_failed_audit_items_do_not_requeue_and_starve_fresh_reads(
   assert calls[0] == ["poison1", "poison2", "poison3"]
   calls.append([])
   assert asyncio.run(memory_runner.run()) == 0
-  # Night two: the failed backlog stays settled and the fresh read from
-  # night one is reviewed; tonight's failing read is attempted once.
-  assert calls[1] == ["poison4", "fresh"]
+  # Night two: unattempted reads precede retained failures, which run once.
+  assert calls[1] == ["poison4", "fresh", "poison1", "poison2", "poison3"]
   assert (statuses[-1]["writer_reviewed_read_audit_count"],
-          statuses[-1]["deferred_read_audit_count"]) == (1, 0)
-  assert memory_runner._unreviewed_read_audits() == []
+          statuses[-1]["deferred_read_audit_count"]) == (1, 4)
+  pending = memory_runner._unreviewed_read_audits()
+  assert {item["read_id"] for item in pending} == {"poison1", "poison2", "poison3", "poison4"}
+  assert all(item["last_attempt_at"] and item["previous_review"]["failure"] for item in pending)
   sources = {row["read_id"]: row["verdict_source"]
              for row in memory_runner.latest_audit_rows(state)}
   assert sources == {"poison1": "writer_failed", "poison2": "writer_failed",
@@ -1127,7 +1131,7 @@ def test_audits_no_model_ran_on_stay_queued(monkeypatch, tmp_path, attempts):
   assert result.accepted_audits == []
 
 
-def test_any_failure_a_model_ran_on_settles_the_audit(monkeypatch, tmp_path):
+def test_attempted_failures_are_reported_for_durable_retry_evidence(monkeypatch, tmp_path):
   graph = {"nodes": [], "edges": [], "problems": []}
   monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
   failures = {
@@ -1160,11 +1164,10 @@ def test_any_failure_a_model_ran_on_settles_the_audit(monkeypatch, tmp_path):
   ]
 
 
-def test_unreviewed_backlog_keeps_only_the_newest_readings(monkeypatch, tmp_path):
+def test_unreviewed_backlog_retains_all_identities_and_loads_only_selected_bodies(monkeypatch, tmp_path):
   state = tmp_path / "app-state"
   monkeypatch.setattr(memory_runner, "STATE", state)
   monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
-  monkeypatch.setattr(memory_runner, "_AUDIT_BACKLOG_LIMIT", 2)
   revisions = []
   monkeypatch.setattr(memory_runner, "read_revision_file",
                       lambda commit, path: revisions.append(path) or f"{path}@{commit}")
@@ -1184,18 +1187,13 @@ def test_unreviewed_backlog_keeps_only_the_newest_readings(monkeypatch, tmp_path
   memory_runner._record_recall_audits("run-1", audits, {"read_audits": [
     *map(memory_runner._unreviewed_verdict, audits),
   ]}, {"nodes": [], "edges": []})
-  # Older days' logs are never read: an unreadable one would raise.
-  for day in days[:2]:
-    (state / "read-log" / f"{day}.jsonl").unlink()
-    (state / "read-log" / f"{day}.jsonl").mkdir()
   revisions.clear()
-
   recovered = memory_runner._unreviewed_read_audits()
-  assert [item["read_id"] for item in recovered] == [
-    "read-2026-09-03", "read-2026-09-04",
-  ]
-  # Only the queued readings' bodies are rebuilt.
-  assert sorted(revisions) == ["notes/read-2026-09-03.md", "notes/read-2026-09-04.md"]
+  assert [item["read_id"] for item in recovered] == [f"read-{day}" for day in days]
+  assert revisions == []
+  selected = memory_runner._hydrate_audit(recovered[0])
+  assert revisions == ["notes/read-2026-09-01.md"]
+  assert selected["deep"]["missed_nodes"][0]["content"].endswith("@" + "b" * 40)
 
 
 def test_log_scanners_skip_a_torn_multibyte_line(monkeypatch, tmp_path):
@@ -2312,7 +2310,7 @@ def test_graph_catalog_never_silently_truncates_large_graphs(tmp_path):
   assert scale["catalog_chars"] > 0
 
 
-def test_focused_envelope_loads_only_directly_related_complete_note(tmp_path):
+def test_focused_envelope_loads_only_explicitly_requested_complete_note(tmp_path):
   (tmp_path / "notes").mkdir()
   (tmp_path / "mocs").mkdir()
   (tmp_path / "notes" / "coffee.md").write_text("complete coffee body")
@@ -2331,7 +2329,7 @@ def test_focused_envelope_loads_only_directly_related_complete_note(tmp_path):
   data = json.loads(memory_runner._proposal_data(tmp_path, [{
     "id": "chat-one", "title": "Espresso preferences",
     "messages": [{"role": "user", "text": "Remember my grinder constraints."}],
-  }]))
+  }], extra_note_paths={"notes/coffee.md"}))
 
   assert {
     row[0]
@@ -2370,7 +2368,7 @@ def test_focused_envelope_bounds_broad_shared_term_note_bodies(tmp_path):
   )
 
 
-def test_focused_envelope_keeps_one_graph_distinctive_term(tmp_path):
+def test_distinctive_term_keeps_identity_visible_without_automatic_body_selection(tmp_path):
   (tmp_path / "notes").mkdir()
   (tmp_path / "mocs").mkdir()
   (tmp_path / "notes" / "coffee.md").write_text("complete coffee body")
@@ -2391,12 +2389,11 @@ def test_focused_envelope_keeps_one_graph_distinctive_term(tmp_path):
     "messages": [{"role": "user", "text": "The grinder changed."}],
   }]))
 
-  assert data["existing_note_contents"] == [{
-    "path": "notes/coffee.md", "content": "complete coffee body",
-  }]
+  assert data["existing_note_contents"] == []
+  assert ["notes/coffee.md", "Coffee"] in data["existing_graph"]["notes"]
 
 
-def test_audit_envelope_loads_pruned_candidate_from_original_trace(tmp_path):
+def test_audit_envelope_preserves_pruned_identity_for_explicit_body_request(tmp_path):
   (tmp_path / "notes").mkdir()
   (tmp_path / "mocs").mkdir()
   (tmp_path / "notes" / "candidate.md").write_text("complete candidate body")
@@ -2418,7 +2415,12 @@ def test_audit_envelope_loads_pruned_candidate_from_original_trace(tmp_path):
 
   data = json.loads(memory_runner._proposal_data(tmp_path, [], [audit]))
 
-  assert data["existing_note_contents"] == [{
+  assert data["existing_note_contents"] == []
+  assert data["read_audits"][0]["live"]["frontier_at_stop"][0]["nodes"] == [{"id": "candidate"}]
+  requested = json.loads(memory_runner._proposal_data(
+    tmp_path, [], [audit], extra_note_paths={"notes/candidate.md"},
+  ))
+  assert requested["existing_note_contents"] == [{
     "path": "notes/candidate.md", "content": "complete candidate body",
   }]
 
@@ -2738,3 +2740,47 @@ def test_a_maps_own_publication_followups_do_not_make_it_due_again(
   assert not memory_runner._consolidation_leads(
     ["a-fact"], since=memory_runner._load_consolidation_cursor()["mocs/a.md"],
   )
+
+
+def test_reasoned_unresolved_disposition_is_not_a_judgment_or_retry(monkeypatch, tmp_path):
+  state = tmp_path / "state"
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
+  audit = {"read_id": "unjudgeable", "at": "2026-09-01T00:00:00+00:00",
+           "question": "Unavailable historical question", "live": {"selected": []},
+           "deep": {"selected": [], "missed": [], "overreach": []}}
+  verdict = {"read_id": audit["read_id"], "outcome": "unresolved", "overreach": False,
+             "missed_nodes": [], "overselected_nodes": [],
+             "reason": "The historical question and graph revision were not retained."}
+  proposal = memory_runner._normalize_audit_verdicts(_reviewed({"read_audits": [verdict]}), [audit])
+  assert proposal["read_audits"][0]["verdict_source"] == "writer_unresolved"
+  memory_runner._record_recall_audits("run", [audit], proposal, {"nodes": [], "edges": []})
+  assert memory_runner._unreviewed_read_audits() == []
+  stats = json.loads((state / "recall-stats.json").read_text())
+  assert (stats["reads_judged"], stats["provisional_reads"]) == (0, 1)
+  # Replayed provisional evidence must not reopen an explicit disposition.
+  memory_runner._record_recall_audits("late", [audit], {"read_audits": [
+    memory_runner._unreviewed_verdict(audit),
+  ]}, {"nodes": [], "edges": []})
+  assert memory_runner._unreviewed_read_audits() == []
+  for reason in ("", "   "):
+    with pytest.raises(memory_runner.ProposalValidationError):
+      memory_runner._normalize_audit_verdicts(_reviewed({
+        "read_audits": [{**verdict, "reason": reason}],
+      }), [audit])
+  unjudged = memory_runner._normalize_audit_verdicts(_reviewed({
+      "read_audits": [verdict], "recall_guidance": {
+        "action": "replace", "instruction": "Change behavior.", "reason": "Unjudged",
+        "evidence_read_ids": [audit["read_id"]],
+      },
+    }), [audit])
+  assert unjudged["recall_guidance"] is None
+
+
+def test_expired_window_does_not_load_backlog_bodies(monkeypatch, tmp_path):
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda *_a: [])
+  monkeypatch.setattr(memory_runner, "read_revision_file",
+                      lambda *_a: pytest.fail("expired run hydrated historical bodies"))
+  memory_runner._consolidate_batches(57, tmp_path, {"nodes": []}, [], [{
+    "read_id": "pending", "deep": {"revision": "old", "missed": ["notes/fact.md"]},
+  }], memory_runner.ProviderPool([]), deadline=0)

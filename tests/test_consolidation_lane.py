@@ -257,7 +257,7 @@ def test_clock_running_out_is_reported_as_the_deadline(state, monkeypatch, tmp_p
   assert [chat["id"] for chat in result.remaining_chats] == ["chat-0"]
 
 
-def test_missing_note_body_is_supplied_and_the_same_analyst_retries(
+def test_explicit_body_request_continues_same_item_before_any_edit(
   state, monkeypatch, tmp_path,
 ):
   staging = tmp_path / "staging"
@@ -271,6 +271,8 @@ def test_missing_note_body_is_supplied_and_the_same_analyst_retries(
 
   def text(_choice, prompt, **_kwargs):
     prompts.append(prompt)
+    if len(prompts) == 1:
+      return TextResult(json.dumps({"request_note_bodies": ["notes/alpha-fact.md"]}))
     return TextResult(json.dumps(_reviewed({"updates": [update]})))
 
   monkeypatch.setattr(memory_runner, "run_text", text)
@@ -294,8 +296,8 @@ def test_missing_note_body_is_supplied_and_the_same_analyst_retries(
     entry["path"] == "notes/alpha-fact.md"
     for entry in json.loads(prompts[1].split("DATA:\n", 1)[1])["existing_note_contents"]
   )
-  assert outcome.attempted_agents[0]["rejection_code"] == "note_body_not_supplied"
-  assert outcome.attempted_agents[0]["retried_with_note_body"] == "notes/alpha-fact.md"
+  assert outcome.attempted_agents[0]["outcome"] == "context_requested"
+  assert outcome.attempted_agents[0]["requested_note_paths"] == ["notes/alpha-fact.md"]
   assert outcome.attempted_agents[1]["outcome"] == "accepted"
 
 
@@ -380,3 +382,170 @@ def test_only_the_supplied_map_becomes_writable(state, tmp_path):
     )
   assert error.value.code == "malformed_frontmatter"
   assert memory_runner._editable_map(None) is None
+
+
+def test_shared_vocabulary_never_prefills_unrequested_bodies(state, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": [f"same-memory-project-{i}" for i in range(40)]})
+  data = json.loads(memory_runner._proposal_data(staging, [{
+    "id": "known", "title": "same memory project", "summary": "same memory project",
+    "captures": [{"text": "same memory project"}],
+  }]))
+  assert data["existing_note_contents"] == []
+  assert len(data["existing_graph"]["notes"]) == 40
+  assert all(len(row) == 2 and row[1] for row in data["existing_graph"]["notes"])
+
+
+def test_audit_receives_exact_live_and_deep_current_bodies_not_unselected_frontier(state, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["live", "deep", "pruned"]})
+  data = json.loads(memory_runner._proposal_data(staging, [], [{
+    "live": {"selected": ["notes/live.md"], "frontier_at_stop": [{"path": "notes/pruned.md"}]},
+    "deep": {"selected": ["notes/deep.md"]},
+  }]))
+  assert {row["path"] for row in data["existing_note_contents"]} == {"notes/live.md", "notes/deep.md"}
+
+
+@pytest.mark.parametrize("response,code", [
+  ({"request_note_bodies": []}, "invalid_note_body_request"),
+  ({"request_note_bodies": ["../../outside.md"]}, "invalid_note_body_request"),
+  ({"request_note_bodies": ["notes/missing.md"]}, "invalid_note_body_request"),
+  ({"request_note_bodies": [42]}, "invalid_note_body_request"),
+  ({"request_note_bodies": ["notes/alpha.md"], "deletes": ["notes/alpha.md"]}, "invalid_note_body_request"),
+])
+def test_invalid_requests_cannot_edit_or_escape_catalogue(state, monkeypatch, tmp_path, response, code):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha"]})
+  before = (staging / "notes/alpha.md").read_bytes()
+  monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps(response)))
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
+  assert outcome.status == "degraded"
+  assert outcome.attempted_agents[0]["rejection_code"] == code
+  assert (staging / "notes/alpha.md").read_bytes() == before
+
+
+def test_repeated_request_without_new_context_cannot_loop(state, monkeypatch, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha"]})
+  monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps({"request_note_bodies": ["notes/alpha.md"]})))
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
+  assert outcome.status == "degraded"
+  assert len(outcome.attempted_agents) == 2
+  assert outcome.attempted_agents[-1]["rejection_code"] == "invalid_note_body_request"
+
+
+def test_context_safety_boundary_does_not_silently_truncate_requested_notes(state, monkeypatch, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha"]})
+  monkeypatch.setattr(memory_runner, "_MAX_RELATED_NOTE_CONTENT_CHARS", 1)
+  monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps({"request_note_bodies": ["notes/alpha.md"]})))
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
+  assert outcome.status == "degraded"
+  assert outcome.attempted_agents[0]["rejection_code"] == "note_context_limit"
+
+
+def test_context_request_at_deadline_remains_unfinished_not_failed_judgment(state, monkeypatch, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha"]})
+  clock = [0]
+  monkeypatch.setattr(memory_runner.time, "monotonic", lambda: clock[0])
+  def request(*args, **kwargs):
+    clock[0] = 10
+    return TextResult(json.dumps({"request_note_bodies": ["notes/alpha.md"]}))
+  monkeypatch.setattr(memory_runner, "run_text", request)
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]), deadline=10)
+  assert outcome.status == "degraded"
+  assert outcome.attempted_agents[-1]["failure_code"] == "work_window_elapsed"
+  assert memory_runner._model_ran(outcome.attempted_agents) is False
+
+
+def test_unseen_note_edit_remains_rejected_instead_of_becoming_body_request(state, monkeypatch, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha"]})
+  content = (staging / "notes/alpha.md").read_text()
+  monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps(_reviewed({
+    "updates": [{"path": "notes/alpha.md", "content": content}],
+  }))))
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
+  assert outcome.status == "degraded"
+  assert outcome.attempted_agents[0]["rejection_code"] == "note_body_not_supplied"
+
+
+def test_unseen_note_cannot_be_deleted_from_title_alone(state, monkeypatch, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha"]})
+  monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps(_reviewed({
+    "deletes": ["notes/alpha.md"],
+  }))))
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
+  assert outcome.status == "degraded"
+  assert outcome.attempted_agents[0]["rejection_code"] == "note_body_not_supplied"
+  assert (staging / "notes/alpha.md").is_file()
+
+
+def test_successive_new_body_requests_are_not_an_arbitrary_one_retry_quota(state, monkeypatch, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha", "beta"]})
+  responses = iter([
+    {"request_note_bodies": ["notes/alpha.md"]},
+    {"request_note_bodies": ["notes/beta.md"]},
+    _reviewed({}),
+  ])
+  monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps(next(responses))))
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
+  assert outcome.status == "ok"
+  assert [a["outcome"] for a in outcome.attempted_agents] == ["context_requested", "context_requested", "accepted"]
+
+
+def _root_item(staging):
+  graph = _graph(staging, {"projects": ["alpha"]})
+  graph["nodes"].append({"id": "index", "path": "index.md", "type": "moc"})
+  (staging / "graph.json").write_text(json.dumps(graph))
+  root = ("---\ntype: moc\ntitle: Home\n---\n# Home\n\nStale prose.\n"
+          "- [[projects]] — Projects\n\n"
+          + memory_runner._UNFILED_START + "\n- [[memory-unfiled]] — Unfiled\n"
+          + memory_runner._UNFILED_END + "\n")
+  (staging / "index.md").write_text(root)
+  return root, memory_runner._consolidation_item(staging, "index.md", {})
+
+
+def test_root_joins_existing_review_rotation_and_can_correct_prose(state, tmp_path):
+  staging = tmp_path / "staging"
+  root, item = _root_item(staging)
+  assert "index.md" in memory_runner._consolidation_candidates(staging)
+  assert item["moc"]["content"] == root
+  rewrite = root.replace("Stale prose.", "Accurate guidance.")
+  value = memory_runner._normalize_proposal(_reviewed({
+    "updates": [{"path": "index.md", "content": rewrite}],
+  }), allowed_chat_ids=set(), editable_map=memory_runner._editable_map(item))
+  assert value["updates"][0]["content"] == rewrite
+  memory_runner._record_consolidation_fingerprint(staging, "index.md")
+  assert "index.md" in memory_runner._read_consolidation_cursor()["fingerprints"]
+
+
+@pytest.mark.parametrize("change,code", [
+  ("unlink", "map_member_unlinked"),
+  ("managed", "managed_root_block_changed"),
+  ("duplicate_marker", "managed_root_block_changed"),
+  ("delete", "invalid_deletion"),
+  ("blind", "invalid_memory_file"),
+  ("conflicting", "conflicting_root_edits"),
+])
+def test_root_review_preserves_routing_managed_block_and_authority(state, tmp_path, change, code):
+  root, item = _root_item(tmp_path / "staging")
+  content = root
+  if change == "unlink":
+    content = root.replace("[[projects]]", "Projects")
+  elif change == "managed":
+    content = root.replace("— Unfiled", "— Changed")
+  elif change == "duplicate_marker":
+    content += memory_runner._UNFILED_START
+  proposal = _reviewed({"updates": [{"path": "index.md", "content": content}]})
+  if change == "conflicting":
+    proposal["links"] = [{"from": "index.md", "to": "mocs/projects.md", "cue": "Changed cue"}]
+  if change == "delete":
+    proposal.update(updates=[], deletes=["index.md"])
+  with pytest.raises(memory_runner.ProposalValidationError) as error:
+    memory_runner._normalize_proposal(proposal, allowed_chat_ids=set(),
+      editable_map=None if change == "blind" else memory_runner._editable_map(item))
+  assert error.value.code == code

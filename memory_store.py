@@ -810,11 +810,12 @@ def _note_creation_times() -> dict[str, str]:
   return created
 
 
-# Verdict sources for readings no writer judged: excluded from rates, and in
-# note retention evidence they credit only what live and deep agreed on. An
-# unreviewed reading may come back for review; a writer_failed one was
-# attempted by a model and is final, so it never re-queues.
-PROVISIONAL_VERDICT_SOURCES = frozenset({"deep_replay_unreviewed", "writer_failed"})
+# Unjudged readings never become recall scores or benchmark expectations.
+# writer_failed remains queued; writer_unresolved is an explicit reasoned
+# disposition, retained as provisional evidence but no longer retried.
+PROVISIONAL_VERDICT_SOURCES = frozenset({
+  "deep_replay_unreviewed", "writer_failed", "writer_unresolved",
+})
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -844,6 +845,7 @@ def read_jsonl(path: Path) -> list[dict]:
 # bulk of each row, and no rate, retention or re-queue decision reads them.
 AUDIT_ROW_FIELDS = frozenset({
   "schema", "run_id", "read_id", "at", "question_sha256", "outcome",
+  "last_attempt_at", "review_failure",
   "overreach", "miss_class", "reason", "host_selection_override",
   "usefulness", "hindsight_reason", "verdict_source",
   "live_selected", "missed_nodes", "overselected_nodes",
@@ -868,8 +870,9 @@ def latest_audit_rows(state: Path = STATE) -> list[dict]:
       prior = latest.get(key)
       if (
         prior is not None
-        and prior.get("verdict_source") not in PROVISIONAL_VERDICT_SOURCES
-        and row.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES
+        and (prior.get("verdict_source") not in PROVISIONAL_VERDICT_SOURCES
+             or prior.get("verdict_source") == "writer_unresolved")
+        and row.get("verdict_source") in {"deep_replay_unreviewed", "writer_failed"}
       ):
         continue
       latest[key] = row
