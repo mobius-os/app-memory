@@ -935,6 +935,7 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   verdict = {"read_id": "old", "outcome": "miss", "overreach": False,
              "missed_nodes": ["notes/fact.md"], "overselected_nodes": []}
   fresh = {**audit, "read_id": "fresh", "at": "2026-09-02T00:00:00+00:00"}
+  audit["previous_review"] = {"source": "deep_replay_unreviewed", "question_missing": False}
   proposal = {"read_audits": [verdict], "updates": [], "deletes": [],
               "recall_guidance": {"action": "replace", "instruction": "Find facts",
                                   "reason": "Reviewed", "evidence_read_ids": ["old"]}}
@@ -992,8 +993,8 @@ def test_failed_publication_does_not_apply_coaching_or_settle_review(monkeypatch
   assert [(item["read_id"], item["verdict_source"]) for item in final_verdicts] == [
     ("fresh", "deep_replay_unreviewed"), ("old", "writer"),
   ]
-  # Unattempted work is oldest-first; disagreement size is not a priority score.
-  assert queued == [["old", "fresh"], ["old", "fresh"]]
+  # Tonight's disagreement precedes the older backlog; size is not a priority score.
+  assert queued == [["fresh", "old"], ["fresh", "old"]]
 
 
 @pytest.mark.parametrize("failure", [
@@ -1033,6 +1034,12 @@ def test_failed_audits_are_retained_without_starving_unattempted_reads(
   memory_runner._record_recall_audits("run-0", backlog, {"read_audits": [
     *map(memory_runner._unreviewed_verdict, backlog),
   ]}, graph)
+  # A historical row whose question was never retained: nothing can judge it.
+  (state / "recall-audit" / "2026-08-31.jsonl").write_text(json.dumps({
+    "read_id": "lost", "at": "2026-08-31T00:00:00+00:00",
+    "verdict_source": "deep_replay_unreviewed", "deep_revision": "b" * 40,
+    "deep_selected": ["notes/answer.md"],
+  }) + "\n")
 
   nights = [["fresh"], ["poison4"]]
   calls = []
@@ -1087,14 +1094,17 @@ def test_failed_audits_are_retained_without_starving_unattempted_reads(
   monkeypatch.setattr(memory_runner, "_mark_consolidated_through_publication", lambda *_a: None)
 
   calls.append([])
-  assert asyncio.run(memory_runner.run()) == 2
-  assert calls[0] == ["poison1", "poison2", "poison3"]
-  calls.append([])
   assert asyncio.run(memory_runner.run()) == 0
-  # Night two: unattempted reads precede retained failures, which run once.
-  assert calls[1] == ["poison4", "fresh", "poison1", "poison2", "poison3"]
+  # Tonight's evidenced disagreement precedes the older retained backlog, and
+  # the unjudgeable read is closed by the host without a writer call.
+  assert calls[0] == ["fresh", "poison1", "poison2", "poison3"]
   assert (statuses[-1]["writer_reviewed_read_audit_count"],
-          statuses[-1]["deferred_read_audit_count"]) == (1, 4)
+          statuses[-1]["deferred_read_audit_count"]) == (1, 3)
+  calls.append([])
+  assert asyncio.run(memory_runner.run()) == 2
+  # Night two: the new read precedes retained failures, which run once until
+  # the consecutive-failure stop.
+  assert calls[1] == ["poison4", "poison1", "poison2"]
   pending = memory_runner._unreviewed_read_audits()
   assert {item["read_id"] for item in pending} == {"poison1", "poison2", "poison3", "poison4"}
   assert all(item["last_attempt_at"] and item["previous_review"]["failure"] for item in pending)
@@ -1102,9 +1112,53 @@ def test_failed_audits_are_retained_without_starving_unattempted_reads(
              for row in memory_runner.latest_audit_rows(state)}
   assert sources == {"poison1": "writer_failed", "poison2": "writer_failed",
                      "poison3": "writer_failed", "poison4": "writer_failed",
-                     "fresh": "writer"}
+                     "fresh": "writer", "lost": "writer_unresolved"}
   stats = json.loads((state / "recall-stats.json").read_text())
-  assert (stats["reads_judged"], stats["provisional_reads"]) == (1, 4)
+  assert (stats["reads_judged"], stats["provisional_reads"]) == (1, 5)
+
+
+def test_legacy_failure_without_attempt_time_waits_behind_unattempted_backlog(monkeypatch, tmp_path):
+  state = tmp_path / "state"
+  (state / "recall-audit").mkdir(parents=True)
+  (state / "read-log").mkdir()
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  rows = [
+    {"read_id": "legacy-failed", "at": "2026-08-01T00:00:00+00:00",
+     "verdict_source": "writer_failed"},
+    {"read_id": "unattempted", "at": "2026-08-15T00:00:00+00:00",
+     "verdict_source": "deep_replay_unreviewed"},
+    {"read_id": "newer-failed", "at": "2026-07-01T00:00:00+00:00",
+     "verdict_source": "writer_failed", "last_attempt_at": "2026-10-01T00:00:00+00:00"},
+  ]
+  for row in rows:
+    row["deep_revision"] = "b" * 40
+    (state / "recall-audit" / f"{row['at'][:10]}.jsonl").write_text(json.dumps(row) + "\n")
+    (state / "read-log" / f"{row['at'][:10]}.jsonl").write_text(json.dumps({
+      "schema": 4, "read_id": row["read_id"], "at": row["at"],
+      "question": "Relevant fact?", "commit": "a" * 40, "files": [],
+    }) + "\n")
+  recovered = {audit["read_id"]: audit for audit in memory_runner._unreviewed_read_audits()}
+  assert recovered["legacy-failed"]["last_attempt_at"]
+  assert not recovered["unattempted"]["last_attempt_at"]
+  assert [audit["read_id"] for audit in memory_runner._review_order(
+    [], list(recovered.values()),
+  )] == ["unattempted", "legacy-failed", "newer-failed"]
+
+
+def test_failure_detail_is_kept_for_the_next_writer(monkeypatch, tmp_path):
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+  monkeypatch.setattr(memory_runner, "_proposal", lambda *_a, **_k: memory_runner.ProposalOutcome(
+    "degraded", None, None, None,
+    [{"provider": "codex", "failure_code": "invalid_output", "failure_detail": "unclosed brace"}],
+  ))
+  result = memory_runner._consolidate_batches(
+    57, tmp_path, {"nodes": [], "edges": [], "problems": []}, [], [{"read_id": "a"}],
+    memory_runner.ProviderPool([]),
+  )
+  [failed] = result.failed_audits
+  assert failed["review_failure"]["attempts"] == [
+    {"provider": "codex", "failure_code": "invalid_output", "failure_detail": "unclosed brace"},
+  ]
 
 
 @pytest.mark.parametrize("attempts", [
@@ -2775,27 +2829,6 @@ def test_reasoned_unresolved_disposition_is_not_a_judgment_or_retry(monkeypatch,
       },
     }), [audit])
   assert unjudged["recall_guidance"] is None
-
-
-def test_recovered_read_without_question_can_only_be_unresolved(monkeypatch, tmp_path):
-  state = tmp_path / "state"
-  (state / "recall-audit").mkdir(parents=True)
-  monkeypatch.setattr(memory_runner, "STATE", state)
-  (state / "recall-audit" / "2026-09-01.jsonl").write_text(json.dumps({
-    "read_id": "lost", "at": "2026-09-01T00:00:00+00:00",
-    "verdict_source": "deep_replay_unreviewed", "deep_revision": "b" * 40,
-    "deep_selected": ["notes/answer.md"],
-  }) + "\n")
-  [audit] = memory_runner._unreviewed_read_audits()
-  assert audit["previous_review"]["question_missing"] is True
-  verdict = {"read_id": "lost", "outcome": "ok", "overreach": False,
-             "missed_nodes": [], "overselected_nodes": [], "reason": "looks fine"}
-  with pytest.raises(memory_runner.ProposalValidationError):
-    memory_runner._normalize_audit_verdicts(_reviewed({"read_audits": [verdict]}), [audit])
-  accepted = memory_runner._normalize_audit_verdicts(_reviewed({"read_audits": [
-    {**verdict, "outcome": "unresolved", "reason": "original question was not retained"},
-  ]}), [audit])
-  assert accepted["read_audits"][0]["verdict_source"] == "writer_unresolved"
 
 
 def test_expired_window_does_not_load_backlog_bodies(monkeypatch, tmp_path):

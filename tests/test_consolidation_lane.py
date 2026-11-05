@@ -465,7 +465,9 @@ def test_over_budget_body_cannot_be_requested_again(state, monkeypatch, tmp_path
   monkeypatch.setattr(memory_runner, "_MAX_RELATED_NOTE_CONTENT_CHARS", 1)
   monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps({"request_note_bodies": ["notes/alpha.md"]})))
   outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
-  assert [a.get("rejection_code") for a in outcome.attempted_agents] == [None, "invalid_note_body_request"]
+  assert [a.get("rejection_code") for a in outcome.attempted_agents] == [
+    None, "note_body_request_after_budget_full",
+  ]
 
 
 def test_initial_audit_bodies_respect_ceiling_and_name_deferred_evidence(state, monkeypatch, tmp_path):
@@ -523,7 +525,7 @@ def test_unseen_note_cannot_be_deleted_from_title_alone(state, monkeypatch, tmp_
   assert (staging / "notes/alpha.md").is_file()
 
 
-def test_successive_new_body_requests_are_not_an_arbitrary_one_retry_quota(state, monkeypatch, tmp_path):
+def test_successive_fitting_body_requests_are_not_an_arbitrary_quota(state, monkeypatch, tmp_path):
   staging = tmp_path / "staging"
   _graph(staging, {"projects": ["alpha", "beta"]})
   responses = iter([
@@ -535,6 +537,33 @@ def test_successive_new_body_requests_are_not_an_arbitrary_one_retry_quota(state
   outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
   assert outcome.status == "ok"
   assert [a["outcome"] for a in outcome.attempted_agents] == ["context_requested", "context_requested", "accepted"]
+
+
+def test_request_after_over_budget_answer_ends_item_without_another_round(state, monkeypatch, tmp_path):
+  # Each request resends the whole prompt; the budget, not a count, ends them.
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha", "beta"]})
+  _note(staging / "notes/beta.md", "beta", "projects", "b" * 500)
+  monkeypatch.setattr(memory_runner, "_MAX_RELATED_NOTE_CONTENT_CHARS",
+                      len((staging / "notes/alpha.md").read_text()) + 1)
+  prompts = []
+  responses = iter([
+    {"request_note_bodies": ["notes/beta.md"]},
+    {"request_note_bodies": ["notes/alpha.md"]},
+    _reviewed({}),
+  ])
+  def answer(choice, prompt, **kwargs):
+    prompts.append(prompt)
+    return TextResult(json.dumps(next(responses)))
+  monkeypatch.setattr(memory_runner, "run_text", answer)
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
+  assert outcome.status == "degraded"
+  assert len(prompts) == 2
+  first, second = outcome.attempted_agents
+  assert first["over_budget_note_paths"] == ["notes/beta.md"]
+  assert second["rejection_code"] == "note_body_request_after_budget_full"
+  # A model answered, so the item is a recorded failure, not a deadline deferral.
+  assert memory_runner._model_ran(outcome.attempted_agents) is True
 
 
 def _root_item(staging):

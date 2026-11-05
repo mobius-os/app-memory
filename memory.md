@@ -134,7 +134,9 @@ item receives its neighborhood. A body request continues the same work item,
 does not apply edits, and remains inside the nightly deadline and host context
 safety boundary. A body that does not fit that boundary is never truncated:
 it is named as over budget, and the writer finishes without editing it and
-leaves a follow-up. Request plausibly useful notes together; do not fill a quota.
+leaves a follow-up. That answer means the item's context is full: a further
+request ends the item unedited, with that reason kept for the next attempt.
+Request plausibly useful notes together; do not fill a quota.
 It may propose note upserts, note deletions, and described link operations. The
 trusted host applies links to an existing root or MOC without handing the model
 an unrelated map to rewrite. A link operation adds a missing link or refreshes
@@ -179,8 +181,12 @@ recall rates, and when deciding which notes to retire a note the replay
 picked still counts as needed. Unfinished readings stay in the existing audit ledger until reviewed or
 explicitly closed as unjudgeable. Recover compact identities without an age/count
 cutoff; load pinned historical bodies only for the selected item. Missing
-historical evidence remains visible, never replaced with today's text. Process
-unattempted reads oldest first, then least-recently attempted failures. An item
+historical evidence remains visible, never replaced with today's text. Tonight's
+fully evidenced disagreements go first, then the retained backlog; within each,
+unattempted reads oldest first, then least-recently attempted failures (a
+failure recorded before attempts were timestamped counts as attempted). A read
+whose original question was not retained cannot be judged, so the host closes
+it as `unresolved` without a writer call. An item
 is attempted at most once per run, and the existing deadline and consecutive
 failure stop bound nightly effort. A failed model attempt keeps its reason and
 goes behind unattempted work, not out of the queue. On review, the writer judges

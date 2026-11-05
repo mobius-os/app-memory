@@ -659,7 +659,11 @@ def _unreviewed_read_audits() -> list[dict]:
               "reason": row.get("deep_reason") or "prior deep replay"}
     audit = _audit_reads(row.get("deep_revision") or "", [trace], [replay])[0]
     audit["question_sha256"] = row.get("question_sha256")
-    audit["last_attempt_at"] = row.get("last_attempt_at") or ""
+    # Failure rows written before attempts were timestamped are still attempted;
+    # their read time is the earliest their attempt can have been.
+    audit["last_attempt_at"] = row.get("last_attempt_at") or (
+      row["at"] if row.get("verdict_source") == "writer_failed" else ""
+    )
     audit["previous_review"] = {
       "source": row.get("verdict_source"), "reason": row.get("reason"),
       "failure": row.get("review_failure"),
@@ -942,6 +946,37 @@ def _failed_verdict(audit: dict) -> dict:
     "verdict_source": "writer_failed",
     "review_failure": audit.get("review_failure"),
   }
+
+
+def _unknowable_verdict(audit: dict) -> dict:
+  """Close a read whose question was not retained without asking a model.
+
+  No relevance verdict exists without the question, so the host records the
+  same explicit unresolved disposition a writer would, with no recall verdict.
+  """
+  return {
+    **_unreviewed_verdict(audit),
+    "outcome": "unresolved",
+    "overreach": False,
+    "missed_nodes": [],
+    "overselected_nodes": [],
+    "reason": "original question was not retained; no relevance verdict exists",
+    "verdict_source": "writer_unresolved",
+  }
+
+
+def _review_order(fresh: list[dict], backlog: list[dict]) -> list[dict]:
+  """Tonight's fully evidenced disagreements first, then the retained backlog.
+
+  Within each, unattempted reads come first, then least-recently attempted
+  failures. No size score or age eviction: a failed item goes to the back,
+  not out of the ledger.
+  """
+  def key(audit: dict) -> tuple:
+    return (bool(audit.get("last_attempt_at")),
+            audit.get("last_attempt_at") or audit.get("at") or "",
+            audit["read_id"])
+  return [*sorted(fresh, key=key), *sorted(backlog, key=key)]
 
 
 def _host_selection_override(traversal: object, selected_paths: list[str]) -> bool:
@@ -1948,6 +1983,8 @@ request it instead. Read an existing note before proposing its deletion as well.
 `note_bodies_over_budget` names notes whose complete bodies do not fit this
 item's context budget: they are unavailable here, so do not request them again;
 finish without editing or deleting them and leave a follow-up when they matter.
+Once a request is answered over budget, this item's context is full: any
+further request ends the item without edits, so finish with what you hold.
 `existing_note_routes` supplies current incoming map/root lines for
 those notes. When correcting a claim, also correct contradicted routing cues
 in the SAME proposal using `links`. A links operation creates a missing link or
@@ -2033,9 +2070,7 @@ Complete all four nightly duties in one coherent pass:
    without a recall verdict or benchmark expectation; do not use it merely to
    save work, hide a repairable failure, or report success. Missing bodies appear
    in `unavailable_evidence`; never substitute current content for historical
-   evidence. Unresolved cases cannot coach the selector. When
-   `previous_review.question_missing` is true the original question is
-   unknowable and the outcome must be `unresolved`.
+   evidence. Unresolved cases cannot coach the selector.
 3. Coach the live selector from this batch as a whole. `recall_guidance`
    may `replace` the current bounded guidance with one concise, general lesson,
    `clear` guidance that the evidence shows is harmful or stale, or `keep` it
@@ -2160,6 +2195,10 @@ def _proposal(
   # Request order is priority order: earlier bodies stay supplied.
   supplied_note_paths: list[str] = []
   prompt, editable_note_paths, over_budget_paths = build_prompt(supplied_note_paths)
+  # Each request resends the whole prompt. Requests stay open while they add
+  # bodies that fit; once one is answered over budget the item's context is
+  # full, so it must finish with what it holds.
+  context_full = False
   source_handles = _source_handles(chats)
   deleted_handles = _deleted_source_handles(chats)
   allowed_chat_ids = set(source_handles.values()) | _known_chat_sources(staging)
@@ -2224,6 +2263,10 @@ def _proposal(
     if value is not None:
       try:
         if "request_note_bodies" in value:
+          if context_full:
+            # Not a deadline: the item ends unedited and keeps this reason.
+            attempt["rejection_code"] = "note_body_request_after_budget_full"
+            break
           requested = value["request_note_bodies"]
           if (
             set(value) != {"request_note_bodies"}
@@ -2250,6 +2293,7 @@ def _proposal(
           attempt["requested_note_paths"] = sorted(set(requested))
           if set(requested) & over_budget:
             attempt["over_budget_note_paths"] = sorted(set(requested) & over_budget)
+            context_full = True
           choice_index -= 1
           continue
         value = _normalize_proposal(
@@ -2345,11 +2389,6 @@ def _normalize_audit_verdicts(
     str(item.get("read_id")) for item in read_audits
     if isinstance(item, dict) and isinstance(item.get("read_id"), str)
   }
-  question_missing = {
-    str(item.get("read_id")) for item in read_audits
-    if isinstance(item, dict)
-    and (item.get("previous_review") or {}).get("question_missing") is True
-  }
   raw = proposal.get("read_audits", [])
   if not isinstance(raw, list):
     raise ProposalValidationError(
@@ -2386,7 +2425,6 @@ def _normalize_audit_verdicts(
       or (not overreach and bool(overselected_nodes))
       or not isinstance(reason, str)
       or (outcome == "unresolved" and (not reason.strip() or overreach))
-      or (read_id in question_missing and outcome != "unresolved")
       or usefulness not in {"helpful", "mixed", "unused", "harmful", "unknown"}
       or not isinstance(hindsight_reason, str)
     ):
@@ -3696,7 +3734,7 @@ def _consolidate_batches(
             audit["review_failure"] = {
               "reason": rejection_reason, "detail": rejection_detail,
               "attempts": [{key: attempt[key] for key in
-                ("provider", "failure_code", "rejection_code", "detail") if key in attempt}
+                ("provider", "failure_code", "failure_detail", "rejection_code") if key in attempt}
                 for attempt in candidate_outcome.attempted_agents],
             }
           failed_audits.extend(batch_audits)
@@ -3976,15 +4014,20 @@ async def run() -> int:
       audit for audit in replayed_audits if audit["read_id"] not in agreed_ids
     ]
     replayed_ids = {audit["read_id"] for audit in replayed_audits}
-    backlog_audits = [audit for audit in recovered_backlog if audit["read_id"] not in replayed_ids]
-    # Unattempted reads first, then least-recently attempted failures. No size
-    # score or age eviction: a failed item goes to the back, not out of the ledger.
-    read_audits = sorted(
-      [*fresh_disagreements, *backlog_audits],
-      key=lambda audit: (bool(audit.get("last_attempt_at")),
-                         audit.get("last_attempt_at") or audit.get("at") or "",
-                         audit["read_id"]),
-    )
+    unreplayed_backlog = [
+      audit for audit in recovered_backlog if audit["read_id"] not in replayed_ids
+    ]
+    # Without the original question no model can judge relevance: the host
+    # closes those reads itself rather than spending a writer call on them.
+    unknowable_audits = [
+      audit for audit in unreplayed_backlog
+      if audit["previous_review"].get("question_missing")
+    ]
+    backlog_audits = [
+      audit for audit in unreplayed_backlog
+      if not audit["previous_review"].get("question_missing")
+    ]
+    read_audits = _review_order(fresh_disagreements, backlog_audits)
     consolidation = await asyncio.to_thread(
       _consolidate_batches,
       app_id,
@@ -4013,11 +4056,13 @@ async def run() -> int:
       if audit["read_id"] not in reviewed_ids | rejected_ids
     ]
     settled_backlog = [
-      audit for audit in backlog_audits
-      if audit["read_id"] in reviewed_ids | rejected_ids
+      *unknowable_audits,
+      *(audit for audit in backlog_audits
+        if audit["read_id"] in reviewed_ids | rejected_ids),
     ]
     unjudged_verdicts = [
       *agreed_verdicts,
+      *map(_unknowable_verdict, unknowable_audits),
       *map(_unreviewed_verdict, unreviewed_audits),
       *map(_failed_verdict, consolidation.failed_audits),
     ]
