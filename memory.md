@@ -132,7 +132,9 @@ edit; host keyword overlap never decides which facts are relevant. Audit items
 also receive current copies of the exact selections being judged, and a map
 item receives its neighborhood. A body request continues the same work item,
 does not apply edits, and remains inside the nightly deadline and host context
-safety boundary. Request plausibly useful notes together; do not fill a quota.
+safety boundary. A body that does not fit that boundary is never truncated:
+it is named as over budget, and the writer finishes without editing it and
+leaves a follow-up. Request plausibly useful notes together; do not fill a quota.
 It may propose note upserts, note deletions, and described link operations. The
 trusted host applies links to an existing root or MOC without handing the model
 an unrelated map to rewrite. A link operation adds a missing link or refreshes

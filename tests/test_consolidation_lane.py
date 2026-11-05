@@ -434,14 +434,54 @@ def test_repeated_request_without_new_context_cannot_loop(state, monkeypatch, tm
   assert outcome.attempted_agents[-1]["rejection_code"] == "invalid_note_body_request"
 
 
-def test_context_safety_boundary_does_not_silently_truncate_requested_notes(state, monkeypatch, tmp_path):
+def test_full_neighborhood_answers_request_as_over_budget_not_failure(state, monkeypatch, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["alpha", "beta"]})
+  _note(staging / "notes/alpha.md", "alpha", "projects", "a" * 500)
+  ceiling = len((staging / "notes/alpha.md").read_text()) + 1
+  monkeypatch.setattr(memory_runner, "_MAX_RELATED_NOTE_CONTENT_CHARS", ceiling)
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
+  assert item["omitted_member_paths"] == ["notes/beta.md"]
+  prompts = []
+  responses = iter([{"request_note_bodies": ["notes/beta.md"]}, _reviewed({})])
+  def answer(choice, prompt, **kwargs):
+    prompts.append(prompt)
+    return TextResult(json.dumps(next(responses)))
+  monkeypatch.setattr(memory_runner, "run_text", answer)
+  outcome = memory_runner._proposal(
+    57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]),
+    consolidation=item,
+  )
+  assert outcome.status == "ok"
+  assert [a["outcome"] for a in outcome.attempted_agents] == ["context_requested", "accepted"]
+  assert outcome.attempted_agents[0]["over_budget_note_paths"] == ["notes/beta.md"]
+  assert '"note_bodies_over_budget": ["notes/beta.md"]' in prompts[1]
+  assert "rejection_code" not in outcome.attempted_agents[0]
+
+
+def test_over_budget_body_cannot_be_requested_again(state, monkeypatch, tmp_path):
   staging = tmp_path / "staging"
   _graph(staging, {"projects": ["alpha"]})
   monkeypatch.setattr(memory_runner, "_MAX_RELATED_NOTE_CONTENT_CHARS", 1)
   monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps({"request_note_bodies": ["notes/alpha.md"]})))
   outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
-  assert outcome.status == "degraded"
-  assert outcome.attempted_agents[0]["rejection_code"] == "note_context_limit"
+  assert [a.get("rejection_code") for a in outcome.attempted_agents] == [None, "invalid_note_body_request"]
+
+
+def test_initial_audit_bodies_respect_ceiling_and_name_deferred_evidence(state, monkeypatch, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"projects": ["live", "deep"]})
+  for slug in ("live", "deep"):
+    _note(staging / f"notes/{slug}.md", slug, "projects", "x" * 90_000)
+  data = json.loads(memory_runner._proposal_data(staging, [], [{
+    "live": {"selected": ["notes/live.md"]}, "deep": {"selected": ["notes/deep.md"]},
+  }]))
+  assert [row["path"] for row in data["existing_note_contents"]] == ["notes/deep.md"]
+  assert data["existing_note_contents"][0]["content"].endswith("x" * 90_000 + "\n")
+  assert data["note_bodies_over_budget"] == ["notes/live.md"]
+  assert sum(len(row["content"]) for row in data["existing_note_contents"]) <= (
+    memory_runner._MAX_RELATED_NOTE_CONTENT_CHARS
+  )
 
 
 def test_context_request_at_deadline_remains_unfinished_not_failed_judgment(state, monkeypatch, tmp_path):

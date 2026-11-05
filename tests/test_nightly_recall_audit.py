@@ -2777,6 +2777,27 @@ def test_reasoned_unresolved_disposition_is_not_a_judgment_or_retry(monkeypatch,
   assert unjudged["recall_guidance"] is None
 
 
+def test_recovered_read_without_question_can_only_be_unresolved(monkeypatch, tmp_path):
+  state = tmp_path / "state"
+  (state / "recall-audit").mkdir(parents=True)
+  monkeypatch.setattr(memory_runner, "STATE", state)
+  (state / "recall-audit" / "2026-09-01.jsonl").write_text(json.dumps({
+    "read_id": "lost", "at": "2026-09-01T00:00:00+00:00",
+    "verdict_source": "deep_replay_unreviewed", "deep_revision": "b" * 40,
+    "deep_selected": ["notes/answer.md"],
+  }) + "\n")
+  [audit] = memory_runner._unreviewed_read_audits()
+  assert audit["previous_review"]["question_missing"] is True
+  verdict = {"read_id": "lost", "outcome": "ok", "overreach": False,
+             "missed_nodes": [], "overselected_nodes": [], "reason": "looks fine"}
+  with pytest.raises(memory_runner.ProposalValidationError):
+    memory_runner._normalize_audit_verdicts(_reviewed({"read_audits": [verdict]}), [audit])
+  accepted = memory_runner._normalize_audit_verdicts(_reviewed({"read_audits": [
+    {**verdict, "outcome": "unresolved", "reason": "original question was not retained"},
+  ]}), [audit])
+  assert accepted["read_audits"][0]["verdict_source"] == "writer_unresolved"
+
+
 def test_expired_window_does_not_load_backlog_bodies(monkeypatch, tmp_path):
   monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda *_a: [])
   monkeypatch.setattr(memory_runner, "read_revision_file",

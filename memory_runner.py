@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -663,6 +664,8 @@ def _unreviewed_read_audits() -> list[dict]:
       "source": row.get("verdict_source"), "reason": row.get("reason"),
       "failure": row.get("review_failure"),
       "evidence_missing": read_id not in traces or not row.get("deep_revision"),
+      # Host-known: without the original question no relevance verdict exists.
+      "question_missing": read_id not in traces,
     }
     result.append(audit)
   return result
@@ -1092,23 +1095,28 @@ def _work_item_note_contents(
   read_audits: list[dict],
   *,
   consolidation: dict | None = None,
-  extra_note_paths: set[str] | frozenset[str] = frozenset(),
-) -> list[dict]:
-  """Return every complete note body the analyst may edit for this work item.
+  extra_note_paths: Iterable[str] = (),
+) -> tuple[list[dict], list[str]]:
+  """Return the complete note bodies the analyst may edit, and those over budget.
 
   Consolidation supplies its map neighborhood; audits start with the exact
   selections being judged. Other bodies are chosen explicitly by the analyst
-  from the complete identity catalogue, never by host keyword overlap.
+  from the complete identity catalogue, never by host keyword overlap, and keep
+  their request order so a later request never displaces an earlier body.
+  Bodies are never truncated: one that would exceed the host ceiling is named
+  in the second list so the analyst knows it is unavailable for this item.
   """
   if consolidation is not None:
     contents = list(consolidation.get("note_contents") or [])
   else:
     contents = []
+  total = sum(len(str(item.get("content") or "")) for item in contents)
   present = {str(item.get("path")) for item in contents}
+  over_budget: list[str] = []
   known_paths = {item["path"] for item in catalog}
-  paths = _audit_note_paths(read_audits) | set(extra_note_paths)
-  for path in sorted(paths & known_paths):
-    if path in present or not _NOTE_PATH.fullmatch(path):
+  paths = dict.fromkeys([*sorted(_audit_note_paths(read_audits)), *extra_note_paths])
+  for path in paths:
+    if path in present or path not in known_paths or not _NOTE_PATH.fullmatch(path):
       continue
     source = staging / path
     if source.is_symlink() or not source.is_file():
@@ -1117,9 +1125,13 @@ def _work_item_note_contents(
       content = source.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
       continue
-    contents.append({"path": path, "content": content})
     present.add(path)
-  return contents
+    if total + len(content) > _MAX_RELATED_NOTE_CONTENT_CHARS:
+      over_budget.append(path)
+      continue
+    contents.append({"path": path, "content": content})
+    total += len(content)
+  return contents, over_budget
 
 
 def _read_consolidation_cursor() -> dict:
@@ -1747,7 +1759,7 @@ def _proposal_envelope(
   read_audits: list[dict] | None = None,
   *,
   consolidation: dict | None = None,
-  extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  extra_note_paths: Iterable[str] = (),
   current_recall_guidance: dict | None = None,
 ) -> tuple[str, list[dict]]:
   """Encode one focused work item without a graph-wide character envelope."""
@@ -1755,6 +1767,10 @@ def _proposal_envelope(
   audits = [
     audit for audit in (read_audits or []) if isinstance(audit, dict)
   ]
+  note_contents, over_budget = _work_item_note_contents(
+    staging, catalog, chats, audits,
+    consolidation=consolidation, extra_note_paths=extra_note_paths,
+  )
   payload = {
     "maintenance_flags": _maintenance_flags(staging),
     "current_recall_guidance": (
@@ -1763,12 +1779,11 @@ def _proposal_envelope(
     ),
     "read_audits": [_audit_prompt_view(audit) for audit in audits],
     "existing_graph": _prompt_graph_index(catalog),
-    "existing_note_contents": _work_item_note_contents(
-      staging, catalog, chats, audits,
-      consolidation=consolidation, extra_note_paths=extra_note_paths,
-    ),
+    "existing_note_contents": note_contents,
     "captured_chats": [],
   }
+  if over_budget:
+    payload["note_bodies_over_budget"] = over_budget
   payload["existing_note_routes"] = _note_routes(
     staging, {item["path"] for item in payload["existing_note_contents"]},
   )
@@ -1813,7 +1828,7 @@ def _proposal_data(
   read_audits: list[dict] | None = None,
   *,
   consolidation: dict | None = None,
-  extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  extra_note_paths: Iterable[str] = (),
   current_recall_guidance: dict | None = None,
 ) -> str:
   """Encode one focused, structurally valid JSON work item."""
@@ -1893,7 +1908,7 @@ def _proposal_prompt(
   read_audits: list[dict] | None = None,
   *,
   consolidation: dict | None = None,
-  extra_note_paths: set[str] | frozenset[str] = frozenset(),
+  extra_note_paths: Iterable[str] = (),
   current_recall_guidance: dict | None = None,
 ) -> str:
   try:
@@ -1930,6 +1945,9 @@ proposal and must not include edits or verdicts. You may request more unseen
 notes after reading them. Never replace an existing note before its complete
 current text is supplied. Do not defer a correction merely to obtain a body;
 request it instead. Read an existing note before proposing its deletion as well.
+`note_bodies_over_budget` names notes whose complete bodies do not fit this
+item's context budget: they are unavailable here, so do not request them again;
+finish without editing or deleting them and leave a follow-up when they matter.
 `existing_note_routes` supplies current incoming map/root lines for
 those notes. When correcting a claim, also correct contradicted routing cues
 in the SAME proposal using `links`. A links operation creates a missing link or
@@ -2015,7 +2033,9 @@ Complete all four nightly duties in one coherent pass:
    without a recall verdict or benchmark expectation; do not use it merely to
    save work, hide a repairable failure, or report success. Missing bodies appear
    in `unavailable_evidence`; never substitute current content for historical
-   evidence. Unresolved cases cannot coach the selector.
+   evidence. Unresolved cases cannot coach the selector. When
+   `previous_review.question_missing` is true the original question is
+   unknowable and the outcome must be `unresolved`.
 3. Coach the live selector from this batch as a whole. `recall_guidance`
    may `replace` the current bounded guidance with one concise, general lesson,
    `clear` guidance that the evidence shows is harmful or stale, or `keep` it
@@ -2126,22 +2146,20 @@ def _proposal(
   }
   audits = [audit for audit in (read_audits or []) if isinstance(audit, dict)]
 
-  def build_prompt(extra_note_paths: set[str]) -> tuple[str, set[str]]:
-    editable = {
-      str(item.get("path"))
-      for item in _work_item_note_contents(
-        staging, catalog, chats, audits,
-        consolidation=consolidation, extra_note_paths=extra_note_paths,
-      )
-    }
+  def build_prompt(extra_note_paths: list[str]) -> tuple[str, set[str], set[str]]:
+    contents, over_budget = _work_item_note_contents(
+      staging, catalog, chats, audits,
+      consolidation=consolidation, extra_note_paths=extra_note_paths,
+    )
     return _proposal_prompt(
       staging, chats, read_audits,
       consolidation=consolidation, extra_note_paths=extra_note_paths,
       current_recall_guidance=current_recall_guidance,
-    ), editable
+    ), {str(item.get("path")) for item in contents}, set(over_budget)
 
-  supplied_note_paths: set[str] = set()
-  prompt, editable_note_paths = build_prompt(supplied_note_paths)
+  # Request order is priority order: earlier bodies stay supplied.
+  supplied_note_paths: list[str] = []
+  prompt, editable_note_paths, over_budget_paths = build_prompt(supplied_note_paths)
   source_handles = _source_handles(chats)
   deleted_handles = _deleted_source_handles(chats)
   allowed_chat_ids = set(source_handles.values()) | _known_chat_sources(staging)
@@ -2212,30 +2230,26 @@ def _proposal(
             or not isinstance(requested, list) or not requested
             or any(not isinstance(path, str) or path not in existing_note_paths
                    for path in requested)
-            or not (set(requested) - editable_note_paths)
+            or not (set(requested) - editable_note_paths - over_budget_paths)
           ):
             raise ProposalValidationError(
               "invalid_note_body_request",
               "request only existing, not-yet-supplied note bodies without edits",
             )
-          requested_paths = supplied_note_paths | set(requested)
-          contents = _work_item_note_contents(
-            staging, catalog, chats, audits,
-            consolidation=consolidation, extra_note_paths=requested_paths,
-          )
-          delivered = {item["path"] for item in contents}
-          if not set(requested) <= delivered:
+          requested_paths = list(dict.fromkeys([*supplied_note_paths, *requested]))
+          next_prompt, delivered, over_budget = build_prompt(requested_paths)
+          if not set(requested) <= delivered | over_budget:
             raise ProposalValidationError(
               "note_body_unavailable", "requested complete note body is unavailable",
             )
-          if sum(len(item["content"]) for item in contents) > _MAX_RELATED_NOTE_CONTENT_CHARS:
-            raise ProposalValidationError(
-              "note_context_limit", "requested complete bodies exceed the host safety ceiling",
-            )
+          # A body that does not fit is answered as over budget, not treated as
+          # a failed proposal: the analyst finishes or defers with that answer.
           supplied_note_paths = requested_paths
-          prompt, editable_note_paths = build_prompt(supplied_note_paths)
+          prompt, editable_note_paths, over_budget_paths = next_prompt, delivered, over_budget
           attempt["outcome"] = "context_requested"
           attempt["requested_note_paths"] = sorted(set(requested))
+          if set(requested) & over_budget:
+            attempt["over_budget_note_paths"] = sorted(set(requested) & over_budget)
           choice_index -= 1
           continue
         value = _normalize_proposal(
@@ -2331,6 +2345,11 @@ def _normalize_audit_verdicts(
     str(item.get("read_id")) for item in read_audits
     if isinstance(item, dict) and isinstance(item.get("read_id"), str)
   }
+  question_missing = {
+    str(item.get("read_id")) for item in read_audits
+    if isinstance(item, dict)
+    and (item.get("previous_review") or {}).get("question_missing") is True
+  }
   raw = proposal.get("read_audits", [])
   if not isinstance(raw, list):
     raise ProposalValidationError(
@@ -2367,6 +2386,7 @@ def _normalize_audit_verdicts(
       or (not overreach and bool(overselected_nodes))
       or not isinstance(reason, str)
       or (outcome == "unresolved" and (not reason.strip() or overreach))
+      or (read_id in question_missing and outcome != "unresolved")
       or usefulness not in {"helpful", "mixed", "unused", "harmful", "unknown"}
       or not isinstance(hindsight_reason, str)
     ):
