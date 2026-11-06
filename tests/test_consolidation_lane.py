@@ -431,7 +431,7 @@ def test_repeated_request_without_new_context_cannot_loop(state, monkeypatch, tm
   outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
   assert outcome.status == "degraded"
   assert len(outcome.attempted_agents) == 2
-  assert outcome.attempted_agents[-1]["rejection_code"] == "invalid_note_body_request"
+  assert outcome.attempted_agents[-1]["rejection_code"] == "note_body_request_limit"
 
 
 def test_full_neighborhood_answers_request_as_over_budget_not_failure(state, monkeypatch, tmp_path):
@@ -466,7 +466,7 @@ def test_over_budget_body_cannot_be_requested_again(state, monkeypatch, tmp_path
   monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps({"request_note_bodies": ["notes/alpha.md"]})))
   outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
   assert [a.get("rejection_code") for a in outcome.attempted_agents] == [
-    None, "note_body_request_after_budget_full",
+    None, "note_body_request_limit",
   ]
 
 
@@ -525,96 +525,50 @@ def test_unseen_note_cannot_be_deleted_from_title_alone(state, monkeypatch, tmp_
   assert (staging / "notes/alpha.md").is_file()
 
 
-def test_successive_fitting_body_requests_are_not_an_arbitrary_quota(state, monkeypatch, tmp_path):
+def test_one_body_request_round_then_the_next_answer_is_final(state, monkeypatch, tmp_path):
+  # Each request resends the whole prompt and items run one at a time, so a
+  # writer that keeps asking for small bodies cannot hold the lanes.
   staging = tmp_path / "staging"
-  _graph(staging, {"projects": ["alpha", "beta"]})
-  responses = iter([
-    {"request_note_bodies": ["notes/alpha.md"]},
-    {"request_note_bodies": ["notes/beta.md"]},
-    _reviewed({}),
-  ])
-  monkeypatch.setattr(memory_runner, "run_text", lambda *a, **kw: TextResult(json.dumps(next(responses))))
-  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
-  assert outcome.status == "ok"
-  assert [a["outcome"] for a in outcome.attempted_agents] == ["context_requested", "context_requested", "accepted"]
-
-
-def test_request_after_over_budget_answer_ends_item_without_another_round(state, monkeypatch, tmp_path):
-  # Each request resends the whole prompt; the budget, not a count, ends them.
-  staging = tmp_path / "staging"
-  _graph(staging, {"projects": ["alpha", "beta"]})
-  _note(staging / "notes/beta.md", "beta", "projects", "b" * 500)
-  monkeypatch.setattr(memory_runner, "_MAX_RELATED_NOTE_CONTENT_CHARS",
-                      len((staging / "notes/alpha.md").read_text()) + 1)
+  _graph(staging, {"projects": [f"fact-{i}" for i in range(60)]})
   prompts = []
-  responses = iter([
-    {"request_note_bodies": ["notes/beta.md"]},
-    {"request_note_bodies": ["notes/alpha.md"]},
-    _reviewed({}),
-  ])
   def answer(choice, prompt, **kwargs):
     prompts.append(prompt)
-    return TextResult(json.dumps(next(responses)))
+    return TextResult(json.dumps({"request_note_bodies": [f"notes/fact-{len(prompts)}.md"]}))
   monkeypatch.setattr(memory_runner, "run_text", answer)
-  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([{"provider": "codex"}]))
+  outcome = memory_runner._proposal(57, staging, [], [], memory_runner.ProviderPool([
+    {"provider": "codex"}, {"provider": "claude"},
+  ]))
   assert outcome.status == "degraded"
   assert len(prompts) == 2
   first, second = outcome.attempted_agents
-  assert first["over_budget_note_paths"] == ["notes/beta.md"]
-  assert second["rejection_code"] == "note_body_request_after_budget_full"
+  assert first["outcome"] == "context_requested"
+  assert second["rejection_code"] == "note_body_request_limit"
   # A model answered, so the item is a recorded failure, not a deadline deferral.
   assert memory_runner._model_ran(outcome.attempted_agents) is True
 
 
-def _root_item(staging):
+def test_writer_prose_cannot_replace_root_contract_text(state, tmp_path):
+  staging = tmp_path / "staging"
   graph = _graph(staging, {"projects": ["alpha"]})
   graph["nodes"].append({"id": "index", "path": "index.md", "type": "moc"})
   (staging / "graph.json").write_text(json.dumps(graph))
-  root = ("---\ntype: moc\ntitle: Home\n---\n# Home\n\nStale prose.\n"
-          "- [[projects]] — Projects\n\n"
-          + memory_runner._UNFILED_START + "\n- [[memory-unfiled]] — Unfiled\n"
-          + memory_runner._UNFILED_END + "\n")
+  root = ("---\ntype: moc\ntitle: Home\n---\n# Home\n\nSystem contract.\n"
+          "- [[projects]] — Projects\n")
   (staging / "index.md").write_text(root)
-  return root, memory_runner._consolidation_item(staging, "index.md", {})
 
-
-def test_root_joins_existing_review_rotation_and_can_correct_prose(state, tmp_path):
-  staging = tmp_path / "staging"
-  root, item = _root_item(staging)
-  assert "index.md" in memory_runner._consolidation_candidates(staging)
-  assert item["moc"]["content"] == root
-  rewrite = root.replace("Stale prose.", "Accurate guidance.")
-  value = memory_runner._normalize_proposal(_reviewed({
-    "updates": [{"path": "index.md", "content": rewrite}],
-  }), allowed_chat_ids=set(), editable_map=memory_runner._editable_map(item))
-  assert value["updates"][0]["content"] == rewrite
-  memory_runner._record_consolidation_fingerprint(staging, "index.md")
-  assert "index.md" in memory_runner._read_consolidation_cursor()["fingerprints"]
-
-
-@pytest.mark.parametrize("change,code", [
-  ("unlink", "map_member_unlinked"),
-  ("managed", "managed_root_block_changed"),
-  ("duplicate_marker", "managed_root_block_changed"),
-  ("delete", "invalid_deletion"),
-  ("blind", "invalid_memory_file"),
-  ("conflicting", "conflicting_root_edits"),
-])
-def test_root_review_preserves_routing_managed_block_and_authority(state, tmp_path, change, code):
-  root, item = _root_item(tmp_path / "staging")
-  content = root
-  if change == "unlink":
-    content = root.replace("[[projects]]", "Projects")
-  elif change == "managed":
-    content = root.replace("— Unfiled", "— Changed")
-  elif change == "duplicate_marker":
-    content += memory_runner._UNFILED_START
-  proposal = _reviewed({"updates": [{"path": "index.md", "content": content}]})
-  if change == "conflicting":
-    proposal["links"] = [{"from": "index.md", "to": "mocs/projects.md", "cue": "Changed cue"}]
-  if change == "delete":
-    proposal.update(updates=[], deletes=["index.md"])
-  with pytest.raises(memory_runner.ProposalValidationError) as error:
-    memory_runner._normalize_proposal(proposal, allowed_chat_ids=set(),
-      editable_map=None if change == "blind" else memory_runner._editable_map(item))
-  assert error.value.code == code
+  assert "index.md" not in memory_runner._consolidation_candidates(staging)
+  assert memory_runner._editable_map(
+    memory_runner._consolidation_item(staging, "index.md", {}),
+  ) is None
+  rewrite = _reviewed({"updates": [{
+    "path": "index.md", "content": root.replace("System contract.", "Writer prose."),
+  }]})
+  for editable in (None, memory_runner._editable_map(
+    memory_runner._consolidation_item(staging, "mocs/projects.md", {}),
+  )):
+    with pytest.raises(memory_runner.ProposalValidationError) as error:
+      memory_runner._normalize_proposal(
+        rewrite, allowed_chat_ids=set(), editable_map=editable,
+      )
+    assert error.value.code == "invalid_memory_file"
+  assert (staging / "index.md").read_text() == root

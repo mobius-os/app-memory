@@ -132,11 +132,12 @@ edit; host keyword overlap never decides which facts are relevant. Audit items
 also receive current copies of the exact selections being judged, and a map
 item receives its neighborhood. A body request continues the same work item,
 does not apply edits, and remains inside the nightly deadline and host context
-safety boundary. A body that does not fit that boundary is never truncated:
-it is named as over budget, and the writer finishes without editing it and
-leaves a follow-up. That answer means the item's context is full: a further
-request ends the item unedited, with that reason kept for the next attempt.
-Request plausibly useful notes together; do not fill a quota.
+safety boundary. Each request resends the whole prompt and items run one at a
+time, so an item gets one request round: the answer after it is final, and a
+second request ends the item unedited with that reason kept. A body that does
+not fit the boundary is never truncated: it is named as over budget, and the
+writer finishes without editing it and leaves a follow-up. Request plausibly
+useful notes together; do not fill a quota.
 It may propose note upserts, note deletions, and described link operations. The
 trusted host applies links to an existing root or MOC without handing the model
 an unrelated map to rewrite. A link operation adds a missing link or refreshes
@@ -148,10 +149,9 @@ note may be replaced only when its complete current text was supplied. In a map-
 the map in full as well, so it may rewrite that one map — repairing cues,
 orphaned fragments, and dangling lines — provided every member it is not
 deleting or re-filing in the same proposal stays linked; the host rejects a
-rewrite that would silently orphan a fact. The root joins this same map-review
-lane with its complete text; root edits preserve every outgoing link and the
-exact host-managed Unfiled block. Root deletion remains forbidden. This allows
-stale top-level prose to be corrected without a separate graph-writing path.
+rewrite that would silently orphan a fact. The root `index.md` is never
+rewritten this way: its contract text is read first by every lookup, so the
+writer reaches it only through `links`.
 It tries the configured background-agent order through confined, text-only
 Claude and Codex adapters. If none produces valid JSON, the run is recorded as
 degraded and the published commit does not move.
@@ -178,18 +178,18 @@ deadline approaches, then publishes once. Any disagreements the writer does
 not reach are recorded as unreviewed replay readings.
 Those readings are provisional, not judged misses: they do not count in
 recall rates, and when deciding which notes to retire a note the replay
-picked still counts as needed. Unfinished readings stay in the existing audit ledger until reviewed or
-explicitly closed as unjudgeable. Recover compact identities without an age/count
-cutoff; load pinned historical bodies only for the selected item. Missing
+picked still counts as needed. Unfinished readings stay in the existing audit
+ledger until reviewed, without an age or count cutoff; compact identities are
+recovered and pinned historical bodies load only for the selected item. Missing
 historical evidence remains visible, never replaced with today's text. Tonight's
 fully evidenced disagreements go first, then the retained backlog; within each,
-unattempted reads oldest first, then least-recently attempted failures (a
-failure recorded before attempts were timestamped counts as attempted). A read
-whose original question was not retained cannot be judged, so the host closes
-it as `unresolved` without a writer call. An item
+unattempted reads oldest first, then least-recently attempted failures. An item
 is attempted at most once per run, and the existing deadline and consecutive
 failure stop bound nightly effort. A failed model attempt keeps its reason and
-goes behind unattempted work, not out of the queue. On review, the writer judges
+goes behind unattempted work; after its second failed review it is final, so an
+item that always fails cannot spend every night. Readings recorded before
+attempts were counted, and readings whose original question is no longer in the
+read log, are settled history and never re-queue. On review, the writer judges
 from evidence or explicitly records `unresolved` with a specific reason when no
 honest judgment is possible. That closes the work without a recall verdict or
 benchmark expectation, and cannot coach the selector. Do not use it simply to
