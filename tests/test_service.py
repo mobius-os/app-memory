@@ -120,3 +120,20 @@ def test_tools_need_the_platforms_chat_identity(recorded):
 def test_malformed_arguments_are_tool_errors(recorded, path, arguments):
   assert service.dispatch(_request(path, arguments))["status"] == 422
   assert recorded == []
+
+
+def test_search_sees_only_the_hosts_limited_providers(monkeypatch):
+  # Patch the module object service.py dispatches to. Other test files pop and
+  # re-import memory_search, so a fresh `import` here can be a different object.
+  memory_search = service.memory_search
+  monkeypatch.setenv("MOBIUS_LIMITED_PROVIDERS", "")
+  seen = []
+  monkeypatch.setattr(
+    memory_search, "run", lambda _args: seen.append(memory_search._host_limited_providers()) or 0,
+  )
+  request = _request("/tools/search", {"query": "prefs"})
+  request["body"]["limited_providers"] = ["claude"]
+  assert service.dispatch(request)["status"] == 200
+  spoof = _request("/tools/search", {"query": "prefs", "limited_providers": ["claude"]})
+  assert service.dispatch(spoof)["status"] == 200
+  assert seen == [{"claude"}, set()]
