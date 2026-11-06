@@ -84,6 +84,12 @@ def dispatch(request: dict) -> dict:
     os.environ["MOBIUS_RUN_TOKEN"] = call["run_id"]
   else:
     os.environ.pop("MOBIUS_RUN_TOKEN", None)
+  # Host-owned, never a tool argument. Requests are forked from one preloaded
+  # process, so set or clear it on every call.
+  limited = body.get("limited_providers")
+  os.environ["MOBIUS_LIMITED_PROVIDERS"] = ",".join(
+    name for name in limited if isinstance(name, str)
+  ) if isinstance(limited, list) else ""
   return handler(arguments, chat_id)
 
 

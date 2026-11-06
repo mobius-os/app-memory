@@ -404,9 +404,6 @@ def test_live_reader_auto_fails_over_before_lexical_fallback(monkeypatch):
   calls = []
   monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
   monkeypatch.setattr(
-    memory_search, "_live_capacity", lambda providers: (providers, []),
-  )
-  monkeypatch.setattr(
     memory_search,
     "run_text",
     lambda provider, _prompt, **_kwargs: (
@@ -442,9 +439,6 @@ def test_live_reader_auto_fails_over_before_lexical_fallback(monkeypatch):
 def test_live_reader_remembers_terminal_provider_failure(monkeypatch):
   calls = []
   monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
-  monkeypatch.setattr(
-    memory_search, "_live_capacity", lambda providers: (providers, []),
-  )
 
   def run(provider, _prompt, **_kwargs):
     calls.append(provider)
@@ -468,22 +462,9 @@ def test_live_reader_remembers_terminal_provider_failure(monkeypatch):
   assert calls == ["claude", "codex", "codex"]
 
 
-def test_live_reader_skips_provider_exhausted_in_fresh_usage_snapshot(monkeypatch):
+def test_live_reader_skips_providers_the_host_reports_limited(monkeypatch):
   calls = []
   monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
-  monkeypatch.setattr(
-    memory_search,
-    "_live_capacity",
-    lambda providers: (
-      [provider for provider in providers if provider != "claude"],
-      [{
-        "provider": "claude",
-        "outcome": "usage_snapshot_exhausted",
-        "skipped": True,
-        "elapsed_ms": 21,
-      }],
-    ),
-  )
   monkeypatch.setattr(
     memory_search,
     "run_text",
@@ -492,80 +473,16 @@ def test_live_reader_skips_provider_exhausted_in_fresh_usage_snapshot(monkeypatc
     ),
   )
   monkeypatch.setenv("MEMORY_READER_PROVIDER", "auto")
+  monkeypatch.setenv("MOBIUS_LIMITED_PROVIDERS", "claude")
 
-  text_call = memory_search._live_text_call()
-  assert text_call is not None
-  result = text_call("navigate")
+  result = memory_search._live_text_call()("navigate")
 
   assert calls == ["codex"]
   assert result.attempts[0] == {
-    "provider": "claude",
-    "outcome": "usage_snapshot_exhausted",
-    "skipped": True,
-    "elapsed_ms": 21,
+    "provider": "claude", "outcome": "usage_limit",
+    "skipped": True, "elapsed_ms": 0,
   }
-  assert result.attempts[1]["provider"] == "codex"
   assert result.attempts[1]["outcome"] == "ok"
-
-
-def test_live_usage_snapshot_is_fresh_for_each_recall(monkeypatch):
-  checks = []
-  monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "codex")
-
-  def capacity(providers):
-    checks.append(list(providers))
-    return providers, []
-
-  monkeypatch.setattr(memory_search, "_live_capacity", capacity)
-  monkeypatch.setattr(
-    memory_search,
-    "run_text",
-    lambda _provider, _prompt, **_kwargs: TextResult('{"finish":true}'),
-  )
-  monkeypatch.setenv("MEMORY_READER_PROVIDER", "codex")
-
-  first = memory_search._live_text_call()
-  second = memory_search._live_text_call()
-  assert first is not None and second is not None
-  first("one")
-  first("two")
-  second("three")
-
-  assert checks == [["codex"], ["codex"]]
-
-
-def test_usage_snapshot_only_blocks_provider_wide_allowance_windows(monkeypatch):
-  snapshots = iter([
-    {
-      "state": "ready",
-      "windows": [{"id": "seven_day_opus", "used_percent": 100}],
-    },
-    {
-      "state": "ready",
-      "windows": [{"id": "seven_day", "used_percent": 100}],
-    },
-  ])
-
-  class Response:
-    def __enter__(self):
-      return self
-
-    def __exit__(self, *_args):
-      return False
-
-    def read(self):
-      return json.dumps(next(snapshots)).encode()
-
-  monkeypatch.setattr(
-    memory_search.urllib.request,
-    "urlopen",
-    lambda *_args, **_kwargs: Response(),
-  )
-  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
-  monkeypatch.setenv("AGENT_TOKEN", "owner-token")
-
-  assert memory_search._provider_usage_state("claude")[0] == "ready"
-  assert memory_search._provider_usage_state("claude")[0] == "exhausted"
 
 
 def test_record_read_separates_opened_and_selected_and_keeps_replay_query(
@@ -697,7 +614,6 @@ def test_empty_receipt_is_an_explicit_no_relevant_result():
 def test_live_reader_uses_the_cli_default_model_unless_settings_name_one(monkeypatch, tmp_path):
   models = []
   monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
-  monkeypatch.setattr(memory_search, "_live_capacity", lambda providers: (providers, []))
   monkeypatch.setattr(
     memory_search,
     "run_text",
@@ -729,7 +645,6 @@ def test_live_reader_retries_on_cli_default_when_reader_model_is_unavailable(
 ):
   calls = []
   monkeypatch.setattr(memory_search, "available_provider", lambda _requested: "claude")
-  monkeypatch.setattr(memory_search, "_live_capacity", lambda providers: (providers, []))
   monkeypatch.setenv("APP_STORAGE_DIR", str(tmp_path))
   (tmp_path / "settings.json").write_text(json.dumps({"reader_models": {"claude": "haiku"}}))
 

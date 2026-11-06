@@ -11,9 +11,6 @@ import re
 import secrets
 import sys
 import time
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,6 +27,7 @@ from memory_store import (
   safe_chat_id,
 )
 from memory_text_provider import (
+  ProviderFailure,
   RunProviderHealth,
   available_provider,
   json_object,
@@ -42,7 +40,6 @@ from memory_text_provider import (
 MAX_OPENED_NODES = 64
 MAX_OPENED_CONTENT_CHARS = 160_000
 AGENT_TIMEOUT = int(os.environ.get("MEMORY_READER_TIMEOUT", "90"))
-USAGE_PREFLIGHT_TIMEOUT = 1.25
 
 RESULT_PREFIX = "MOBIUS_APP_ACTIVITY_V1:"
 SEARCH_ACTIVITY_ID = "memory-search"
@@ -726,87 +723,18 @@ extra plausible note, but do not pad with notes that merely share a topic. There
 is no count target. An empty selection is correct when nothing applies."""
 
 
-def _usage_preflight_timeout() -> float:
-  try:
-    value = float(os.environ.get(
-      "MEMORY_USAGE_PREFLIGHT_TIMEOUT", USAGE_PREFLIGHT_TIMEOUT,
-    ))
-  except (TypeError, ValueError):
-    return USAGE_PREFLIGHT_TIMEOUT
-  return max(0.1, min(3.0, value))
+HOST_LIMITED = ProviderFailure("usage_limit", terminal=True, scope="provider")
 
 
-def _provider_usage_state(provider: str) -> tuple[str, int]:
-  """Return live allowance state without retaining it beyond this recall."""
-  base = os.environ.get("API_BASE_URL", "").rstrip("/")
-  token = os.environ.get("AGENT_TOKEN", "").strip()
-  if not base or not token:
-    return "unknown", 0
-  started = time.monotonic()
-  headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-  try:
-    request = urllib.request.Request(
-      f"{base}/api/settings/provider-usage/{provider}", headers=headers,
-    )
-    with urllib.request.urlopen(
-      request, timeout=_usage_preflight_timeout(),
-    ) as response:
-      snapshot = json.load(response)
-  except (
-    OSError, ValueError, TimeoutError, urllib.error.HTTPError,
-    urllib.error.URLError,
-  ):
-    return "unknown", max(0, round((time.monotonic() - started) * 1000))
-  elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
-  if not isinstance(snapshot, dict) or snapshot.get("state") != "ready":
-    return "unknown", elapsed_ms
-  windows = snapshot.get("windows")
-  if not isinstance(windows, list):
-    return "unknown", elapsed_ms
-  # Model-specific windows do not necessarily constrain the reader's default
-  # model. Only provider-wide allowance windows can safely suppress a call.
-  blocking_ids = (
-    {"five_hour", "seven_day", "monthly", "seven_day_oauth_apps",
-     "monthly_agent_sdk", "agent_sdk_monthly"}
-    if provider == "claude" else
-    {"primary", "secondary"}
-  )
-  for window in windows:
-    if not isinstance(window, dict) or window.get("id") not in blocking_ids:
-      continue
-    used = window.get("used_percent")
-    if isinstance(used, (int, float)) and not isinstance(used, bool) and used >= 100:
-      return "exhausted", elapsed_ms
-  return "ready", elapsed_ms
+def _host_limited_providers() -> set[str]:
+  """Providers whose runs the platform saw hit a usage or rate limit.
 
-
-def _live_capacity(
-  providers: list[str],
-) -> tuple[list[str], list[dict]]:
-  """Drop only providers a fresh allowance read says are exhausted."""
-  if (
-    not providers
-    or not os.environ.get("API_BASE_URL")
-    or not os.environ.get("AGENT_TOKEN")
-  ):
-    return providers, []
-  with ThreadPoolExecutor(max_workers=len(providers)) as pool:
-    states = list(pool.map(_provider_usage_state, providers))
-  available = []
-  skipped = []
-  for provider, (state, elapsed_ms) in zip(providers, states, strict=True):
-    if state == "exhausted":
-      skipped.append({
-        "provider": provider,
-        "outcome": "usage_snapshot_exhausted",
-        "skipped": True,
-        "elapsed_ms": elapsed_ms,
-      })
-    else:
-      # Unknown must fail open: an unavailable allowance endpoint is not proof
-      # that the provider itself is unavailable.
-      available.append(provider)
-  return available, skipped
+  Möbius passes this with each tool call; the service exposes it for this
+  request only. Absence (standalone readers, older hosts) means unknown, so
+  normal per-recall provider health still applies.
+  """
+  raw = os.environ.get("MOBIUS_LIMITED_PROVIDERS", "")
+  return {name for name in raw.split(",") if name}
 
 
 # Live navigation runs on each provider CLI's own default model. A cheaper
@@ -858,17 +786,12 @@ def _live_text_call() -> Callable[[str], NavigatorCall] | None:
     # back to lexical matching, whose semantic judgment is intentionally weak.
     providers.extend(name for name in ("claude", "codex") if name != provider)
   health = RunProviderHealth()
+  for name in _host_limited_providers():
+    health.observe(name, None, HOST_LIMITED)
   models = reader_models()
-  prepared = False
-  preflight_attempts: list[dict] = []
 
   def call(prompt: str) -> NavigatorCall:
-    nonlocal prepared, providers, preflight_attempts
-    if not prepared:
-      providers, preflight_attempts = _live_capacity(providers)
-      prepared = True
-    attempts = list(preflight_attempts)
-    preflight_attempts = []
+    attempts = []
     for name in providers:
       unavailable = health.unavailable(name)
       if unavailable is not None:

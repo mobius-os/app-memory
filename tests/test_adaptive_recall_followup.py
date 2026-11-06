@@ -135,11 +135,6 @@ class AdaptiveRecallFollowupTests(unittest.TestCase):
         "available_provider",
         return_value="claude",
       ),
-      mock.patch.object(
-        memory_search,
-        "_live_capacity",
-        side_effect=lambda providers: (providers, []),
-      ),
       mock.patch.object(memory_search, "run_text", side_effect=run_text),
       mock.patch.dict(os.environ, {"MEMORY_READER_PROVIDER": "auto"}),
     ):
