@@ -115,9 +115,345 @@ def test_candidates_rotate_least_recently_consolidated_first(state, tmp_path):
   memory_runner._record_consolidation_attempt("mocs/people.md")
   memory_runner._record_consolidation_attempt("mocs/projects.md")
 
-  assert memory_runner._consolidation_candidates(staging) == [
+  assert memory_runner._consolidation_candidates(staging, {}) == [
     "mocs/tools.md", "mocs/people.md", "mocs/projects.md",
   ]
+
+
+def _shared_graph(staging: Path) -> None:
+  """Two maps that share one note, as a fact filed under two questions is."""
+  graph = _graph(staging, {"people": ["shared-fact", "b"], "projects": ["c"]})
+  (staging / "mocs" / "projects.md").write_text(
+    "# projects\n\n- [[c]] — cue\n- [[shared-fact]] — cue\n", encoding="utf-8",
+  )
+  for node in graph["nodes"]:
+    if node["id"] == "shared-fact":
+      node["mocs"] = ["people", "projects"]
+  (staging / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+
+def _settle(staging: Path, *mocs: str, usage: dict | None = None) -> None:
+  """Record maps as the writer left them after an accepted consolidation."""
+  for moc in mocs:
+    memory_runner._record_consolidation_attempt(f"mocs/{moc}.md")
+    memory_runner._record_consolidation_fingerprint(
+      staging, f"mocs/{moc}.md", usage or {},
+    )
+  memory_runner._mark_consolidated_through_publication(
+    [f"mocs/{moc}.md" for moc in mocs],
+  )
+
+
+def _reviewed_long_ago(moc: str) -> None:
+  """Backdate a map's last successful review, as after many busy nights."""
+  cursor = json.loads(memory_runner._CONSOLIDATION_CURSOR.read_text())
+  for key in ("attempted", "reviewed"):
+    cursor[key][f"mocs/{moc}.md"] = "2026-09-30T04:30:00+00:00"
+  memory_runner._CONSOLIDATION_CURSOR.write_text(json.dumps(cursor))
+
+
+def _publish_followups(
+  state: Path, followups: list[str], *, consolidated: list[str],
+  day: str = "2026-10-30", **fields,
+) -> None:
+  """Append one writer update record and close it as publication does."""
+  from datetime import UTC, datetime
+
+  log = state / "update-log"
+  log.mkdir(exist_ok=True)
+  record = {
+    "timestamp": datetime.now(UTC).isoformat(),
+    "followups": followups,
+    "consolidated_mocs": [f"mocs/{moc}.md" for moc in consolidated],
+    **fields,
+  }
+  with (log / f"{day}.jsonl").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+  memory_runner._mark_consolidated_through_publication(
+    [f"mocs/{moc}.md" for moc in consolidated],
+  )
+
+
+def test_a_review_that_found_nothing_new_cannot_wake_its_neighbors(state, tmp_path):
+  staging = tmp_path / "staging"
+  _shared_graph(staging)
+  _settle(staging, "people", "projects")
+
+  # A night re-reads `people` alone, changes nothing and restates a standing
+  # note about the fact it shares with `projects`.
+  _publish_followups(
+    state, ["STANDING (people): keep shared-fact apart from b."],
+    consolidated=["people"], input_leads=[],
+  )
+
+  assert memory_runner._consolidation_candidates(staging, {}) == []
+  # The lead is not lost: `projects` still receives it when next consolidated.
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
+  assert item["leads"] == ["STANDING (people): keep shared-fact apart from b."]
+
+
+LEAD = "Filed a saved fact; check shared-fact's cue in projects."
+
+
+@pytest.mark.parametrize("fields", [
+  {"input_leads": [LEAD]},  # written while filing a fact or judging a lookup
+  {},  # an update record written before input leads were kept
+])
+def test_followups_written_while_acting_on_new_input_wake_the_maps_they_name(
+  state, tmp_path, fields,
+):
+  staging = tmp_path / "staging"
+  _shared_graph(staging)
+  _settle(staging, "people", "projects")
+
+  _publish_followups(state, [LEAD], consolidated=["people"], **fields)
+
+  assert memory_runner._consolidation_candidates(staging, {}) == [
+    "mocs/projects.md",
+  ]
+
+
+def test_a_map_review_on_a_night_that_filed_facts_cannot_wake_neighbors(
+  state, tmp_path,
+):
+  staging = tmp_path / "staging"
+  _shared_graph(staging)
+  _settle(staging, "people", "projects")
+
+  # The same night filed a fact (its own lead names nothing here) and
+  # re-read `people`, restating a standing note about the shared fact.
+  _publish_followups(
+    state, ["Filed under people.", "STANDING (people): keep shared-fact."],
+    consolidated=["people"], input_leads=["Filed under people."],
+  )
+
+  assert memory_runner._consolidation_candidates(staging, {}) == []
+
+
+def test_a_lead_reaches_its_map_however_many_nights_pass_first(state, tmp_path):
+  staging = tmp_path / "staging"
+  _shared_graph(staging)
+  _settle(staging, "people", "projects")
+  _reviewed_long_ago("projects")
+  _publish_followups(
+    state, ["Projects' cue for c reads stale."], consolidated=["people"],
+    day="2026-10-01", input_leads=[],
+  )
+  # Busy nights elsewhere push it out of the three most recent update logs.
+  for day in ("2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"):
+    _publish_followups(
+      state, ["Routine note about b."], consolidated=["people"], day=day,
+      input_leads=[],
+    )
+
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
+
+  assert "Projects' cue for c reads stale." in item["leads"]
+
+
+def test_a_map_starved_for_nights_still_wakes_for_an_input_lead(state, tmp_path):
+  staging = tmp_path / "staging"
+  _shared_graph(staging)
+  _settle(staging, "people", "projects")
+  _reviewed_long_ago("projects")
+  lead = "Filed a fact; c in projects needs a sharper cue."
+  _publish_followups(
+    state, [lead], consolidated=["people"], day="2026-10-01", input_leads=[lead],
+  )
+  for day in ("2026-10-02", "2026-10-03", "2026-10-04"):
+    _publish_followups(
+      state, ["Routine note about b."], consolidated=["people"], day=day,
+      input_leads=[],
+    )
+
+  assert memory_runner._consolidation_candidates(staging, {}) == [
+    "mocs/projects.md",
+  ]
+
+
+@pytest.mark.parametrize("upgraded", [False, True])
+def test_a_lead_only_map_whose_review_fails_is_retried_with_its_lead(
+  state, monkeypatch, tmp_path, upgraded,
+):
+  staging = tmp_path / "staging"
+  _shared_graph(staging)
+  _settle(staging, "people", "projects")
+  if upgraded:
+    # A cursor written before successful reviews were kept apart.
+    cursor = json.loads(memory_runner._CONSOLIDATION_CURSOR.read_text())
+    cursor.pop("reviewed", None)
+    memory_runner._CONSOLIDATION_CURSOR.write_text(json.dumps(cursor))
+  lead = "Filed a fact; c in projects needs a sharper cue."
+  _publish_followups(state, [lead], consolidated=["people"], input_leads=[lead])
+  assert memory_runner._consolidation_candidates(staging, {}) == [
+    "mocs/projects.md",
+  ]
+
+  # The writer fails on that one item: nothing is accepted.
+  graph = json.loads((staging / "graph.json").read_text())
+  monkeypatch.setattr(
+    memory_runner, "_proposal",
+    lambda *_args, **_kwargs: memory_runner.ProposalOutcome(
+      status="degraded", proposal=None, provider=None, model=None,
+      attempted_agents=[{"provider": "claude", "model": "m", "supported": True}],
+    ),
+  )
+  result = memory_runner._consolidate_batches(
+    7, staging, graph, [], [], memory_runner.ProviderPool([]),
+  )
+  assert (result.accepted_mocs, result.rejected_moc_count) == ([], 1)
+
+  # The next night retries it, and the lead still reaches the review.
+  assert memory_runner._consolidation_candidates(staging, {}) == [
+    "mocs/projects.md",
+  ]
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
+  assert lead in item["leads"]
+
+  # Once a review succeeds, the same lead wakes nothing again.
+  _settle(staging, "projects")
+  assert memory_runner._consolidation_candidates(staging, {}) == []
+
+
+def test_a_failed_review_still_wakes_and_delivers_after_busy_nights(
+  state, monkeypatch, tmp_path,
+):
+  staging = tmp_path / "staging"
+  _shared_graph(staging)
+  _settle(staging, "people", "projects")
+  _reviewed_long_ago("projects")
+  lead = "Filed a fact; c in projects needs a sharper cue."
+  _publish_followups(
+    state, [lead], consolidated=["people"], day="2026-10-01", input_leads=[lead],
+  )
+  graph = json.loads((staging / "graph.json").read_text())
+  monkeypatch.setattr(
+    memory_runner, "_proposal",
+    lambda *_args, **_kwargs: memory_runner.ProposalOutcome(
+      status="degraded", proposal=None, provider=None, model=None,
+      attempted_agents=[{"provider": "claude", "model": "m", "supported": True}],
+    ),
+  )
+  memory_runner._consolidate_batches(
+    7, staging, graph, [], [], memory_runner.ProviderPool([]),
+  )
+  # Busy nights elsewhere push the lead out of the three most recent logs.
+  for day in ("2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"):
+    _publish_followups(
+      state, ["Routine note about b."], consolidated=["people"], day=day,
+      input_leads=[],
+    )
+
+  assert memory_runner._consolidation_candidates(staging, {}) == [
+    "mocs/projects.md",
+  ]
+  item = memory_runner._consolidation_item(staging, "mocs/projects.md", {})
+  assert lead in item["leads"]
+
+
+def test_rotation_waits_for_usage_evidence_the_writer_has_not_seen(state, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"people": ["a"], "projects": ["b"]})
+  usage = {
+    "notes/a.md": {"needed": 1, "overreach": 0, "lookups_since_created": 2},
+    "notes/b.md": {"needed": 0, "overreach": 0, "lookups_since_created": 2},
+  }
+  _settle(staging, "people", "projects", usage=usage)
+
+  assert memory_runner._consolidation_candidates(staging, usage) == []
+
+  # A note first appearing in the usage record carries no lookup evidence.
+  usage["notes/new.md"] = {"needed": 0, "overreach": 0, "lookups_since_created": 0}
+  assert memory_runner._consolidation_candidates(staging, usage) == []
+
+  # A lookup that needed b, for the first time, reopens only b's map.
+  needed_b = {**usage, "notes/b.md": {
+    "needed": 1, "overreach": 0, "lookups_since_created": 3,
+  }, "notes/a.md": {**usage["notes/a.md"], "lookups_since_created": 3}}
+  assert memory_runner._consolidation_candidates(staging, needed_b) == [
+    "mocs/projects.md",
+  ]
+  _settle(staging, "projects", usage=needed_b)
+  assert memory_runner._consolidation_candidates(staging, needed_b) == []
+
+  # Needed again and again, b reopens its map only as that count doubles.
+  def needed(count: int) -> dict:
+    return {**needed_b, "notes/b.md": {**needed_b["notes/b.md"], "needed": count}}
+  assert memory_runner._consolidation_candidates(staging, needed(2)) == [
+    "mocs/projects.md",
+  ]
+  _settle(staging, "projects", usage=needed(2))
+  assert memory_runner._consolidation_candidates(staging, needed(3)) == []
+
+  # Lookups that need neither note reopen a map only as that count doubles:
+  # each map rotates in once, oldest first, then it is quiet again.
+  doubled = {
+    path: {**entry, "lookups_since_created": 4} for path, entry in needed_b.items()
+  }
+  assert memory_runner._consolidation_candidates(staging, doubled) == [
+    "mocs/people.md",
+  ]
+  _settle(staging, "people", usage=doubled)
+  assert memory_runner._consolidation_candidates(staging, doubled) == [
+    "mocs/projects.md",
+  ]
+  _settle(staging, "projects", usage=doubled)
+  assert memory_runner._consolidation_candidates(staging, doubled) == []
+  more = {
+    path: {**entry, "lookups_since_created": 7} for path, entry in doubled.items()
+  }
+  assert memory_runner._consolidation_candidates(staging, more) == []
+
+
+def test_rotation_still_serves_waiting_members_and_owed_maintenance(state, tmp_path):
+  staging = tmp_path / "staging"
+  graph = _graph(staging, {"people": ["a", "b"], "projects": ["c"]})
+  _settle(staging, "people", "projects")
+  assert memory_runner._consolidation_candidates(staging, {}) == []
+
+  # An oversized map left members out last time: it keeps rotating in.
+  memory_runner._record_consolidation_attempt(
+    "mocs/projects.md", omitted=["notes/c.md"],
+  )
+  assert memory_runner._consolidation_candidates(staging, {}) == [
+    "mocs/projects.md",
+  ]
+  memory_runner._record_consolidation_attempt("mocs/projects.md")
+  assert memory_runner._consolidation_candidates(staging, {}) == []
+
+  # A fixable flag on a note in no map cannot be cleared by any item.
+  graph["nodes"].append({
+    "id": "loose", "path": "notes/loose.md", "type": "note", "mocs": ["gone"],
+  })
+  graph["problems"] = [
+    {"kind": "bare_map_entry", "severity": "warning", "node": "loose"},
+  ]
+  (staging / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+  assert memory_runner._consolidation_candidates(staging, {}) == []
+
+  # A fixable flag on a member keeps that map in rotation until it clears.
+  graph["problems"].append(
+    {"kind": "description_too_long", "severity": "warning", "node": "b"},
+  )
+  (staging / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+  assert memory_runner._consolidation_candidates(staging, {}) == [
+    "mocs/people.md",
+  ]
+
+
+def test_maps_settled_before_usage_was_recorded_rotate_once_each(state, tmp_path):
+  staging = tmp_path / "staging"
+  _graph(staging, {"people": ["a"], "projects": ["b"]})
+  _settle(staging, "people", "projects")
+  cursor = json.loads(memory_runner._CONSOLIDATION_CURSOR.read_text())
+  cursor.pop("usage")
+  memory_runner._CONSOLIDATION_CURSOR.write_text(json.dumps(cursor))
+
+  assert memory_runner._consolidation_candidates(staging, {}) == ["mocs/people.md"]
+  _settle(staging, "people")
+  assert memory_runner._consolidation_candidates(staging, {}) == ["mocs/projects.md"]
+  _settle(staging, "projects")
+  assert memory_runner._consolidation_candidates(staging, {}) == []
 
 
 def test_oversized_neighborhood_visits_every_member_before_repeating(state, tmp_path):

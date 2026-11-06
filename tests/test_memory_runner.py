@@ -92,7 +92,234 @@ def _proposal(chat_id="chat-1"):
   })
 
 
+def _shared_seed(path: Path):
+  """A clean graph whose maps share notes, as long-lived graphs do."""
+  _seed(path)
+  (path / "notes" / "memory-is-visible-to-the-partner.md").unlink()
+  (path / "index.md").write_text(
+    "# Memory\n\n- [[maintaining-memory]] — how Memory works\n"
+    "- [[about-the-user]] — who the partner is\n"
+    "- [[building-mobius-apps]] — what they build\n"
+    "- [[mobius-platform]] — where it runs\n",
+    encoding="utf-8",
+  )
+  maps = {
+    "about-the-user": ("About the user", ["contributes-code", "self-hosts"]),
+    "building-mobius-apps": ("Building apps", ["contributes-code"]),
+    "mobius-platform": ("The Mobius platform", ["self-hosts"]),
+  }
+  for slug, (title, members) in maps.items():
+    (path / "mocs" / f"{slug}.md").write_text(
+      f"---\ntitle: {title}\ntype: moc\n---\n# {title}\n\n"
+      + "".join(f"- [[{member}]] — {member} cue\n" for member in members),
+      encoding="utf-8",
+    )
+  for slug, mocs in (
+    ("contributes-code", "about-the-user, building-mobius-apps"),
+    ("self-hosts", "about-the-user, mobius-platform"),
+  ):
+    (path / "notes" / f"{slug}.md").write_text(
+      f"---\ntype: note\ntitle: {slug}\ndescription: The partner {slug}.\n"
+      f"mocs: [{mocs}]\n---\nThe partner {slug}.\n",
+      encoding="utf-8",
+    )
+
+
+def _standing_writer(
+  runner, calls: list, *, fact_map: str = "building-mobius-apps",
+  fact_followups: tuple = ("OPEN: self-hosts may need a fresh as-of.",),
+):
+  """A writer like the live one: it changes nothing but restates, for every
+  map it reviews, a standing follow-up naming each note it holds. A saved
+  fact is filed as a new note under `fact_map`."""
+  def writer(_app_id, _staging, batch, _audits, *_rest, **kwargs):
+    item = kwargs.get("consolidation")
+    if item is not None:
+      moc = item["moc"]["path"]
+      calls.append(moc)
+      members = ", ".join(Path(path).stem for path in item["member_paths"])
+      proposal = {
+        "summary": "clean neighborhood",
+        "followups": [f"STANDING ({Path(moc).stem}): keep {members} as they are."],
+        "updates": [], "deletes": [],
+      }
+    else:
+      chat_id = batch[0]["id"]
+      calls.append("chat")
+      proposal = {
+        "summary": "filed one saved fact",
+        "followups": list(fact_followups),
+        "updates": [{
+          "path": f"notes/saved-fact-{chat_id}.md",
+          "content": (
+            f"---\ntype: note\ntitle: Saved fact {chat_id}\n"
+            f"description: A preference from {chat_id}.\n"
+            f"mocs: [{fact_map}]\nsource: [chat:{chat_id}]\n---\n"
+            f"A preference from {chat_id}.\n"
+          ),
+        }],
+        "links": [{
+          "from": f"mocs/{fact_map}.md",
+          "to": f"notes/saved-fact-{chat_id}.md",
+          "cue": "a saved preference",
+        }],
+        "deletes": [],
+      }
+    return runner.ProposalOutcome("ok", _reviewed(proposal), "test", None, [])
+  return writer
+
+
 class MemoryRunnerTests(unittest.TestCase):
+  def test_a_quiet_night_publishes_without_a_writer_and_keeps_its_leads(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _shared_seed(seed)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([])
+      calls: list = []
+      runner._proposal = _standing_writer(runner, calls)
+
+      self.assertEqual(asyncio.run(runner.run()), 0)
+      self.assertTrue(calls, "the first night reviews every new map")
+      update_log = store.STATE / "update-log"
+      logged = {path.name: path.read_text() for path in update_log.glob("*.jsonl")}
+      calls.clear()
+
+      self.assertEqual(asyncio.run(runner.run()), 0)
+
+      self.assertEqual(calls, [])
+      status = json.loads((store.STATE / "run-status.json").read_text())
+      self.assertEqual(status["status"], "published")
+      self.assertIsNone(status["provider"])
+      self.assertEqual(status["proposal_batch_count"], 0)
+      self.assertEqual(status["model_work"]["attempt_count"], 0)
+      self.assertEqual(status["commit"], store.ready_pointer()["commit"])
+      # The writer's log, and the follow-ups it holds, are left as they were.
+      self.assertEqual(
+        {path.name: path.read_text() for path in update_log.glob("*.jsonl")},
+        logged,
+      )
+
+  def test_a_night_of_agreed_lookups_records_them_without_a_writer(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _shared_seed(seed)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      runner._collect_capture_intake = lambda: runner.CaptureIntake([])
+      calls: list = []
+      runner._proposal = _standing_writer(runner, calls)
+      self.assertEqual(asyncio.run(runner.run()), 0)
+      calls.clear()
+
+      # One lookup since, which the deep replay fully agreed with.
+      audit = {
+        "read_id": "agreed", "at": "2026-10-30T10:00:00+00:00",
+        "question": "Does the partner self-host?",
+        "live": {"selected": ["notes/self-hosts.md"]},
+        "deep": {"selected": ["notes/self-hosts.md"], "missed": [], "overreach": []},
+      }
+      runner._pending_read_traces = lambda: [{"read_id": "agreed"}]
+      runner._deep_replays = lambda *_args: []
+      runner._audit_reads = lambda *_args: [audit]
+      recorded = []
+      runner._record_recall_audits = (
+        lambda _run, audits, proposal, _graph: recorded.append((audits, proposal))
+      )
+
+      self.assertEqual(asyncio.run(runner.run()), 0)
+
+      self.assertEqual(calls, [])
+      status = json.loads((store.STATE / "run-status.json").read_text())
+      self.assertEqual(status["status"], "published")
+      self.assertEqual(status["agreed_read_audit_count"], 1)
+      [(audits, proposal)] = recorded
+      self.assertEqual([item["read_id"] for item in audits], ["agreed"])
+      self.assertEqual(
+        [(v["read_id"], v["verdict_source"]) for v in proposal["read_audits"]],
+        [("agreed", "deep_replay")],
+      )
+
+  def test_standing_followups_cannot_keep_the_writer_busy_on_quiet_nights(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _shared_seed(seed)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      runner._collect_archived_source_lifecycle = lambda *_args: ([], set())
+      runner._fetch_chat_detail = lambda _chat_id: (None, None)
+      night = {"n": 0}
+      runner._collect_capture_intake = lambda: runner.CaptureIntake(
+        [{"id": "chat-5", "messages": []}] if night["n"] == 5 else [],
+      )
+      calls: list = []
+      runner._proposal = _standing_writer(runner, calls)
+
+      writer_calls = {}
+      for n in range(1, 11):
+        night["n"] = n
+        calls.clear()
+        self.assertEqual(asyncio.run(runner.run()), 0, f"night {n}")
+        status = json.loads((store.STATE / "run-status.json").read_text())
+        self.assertEqual(status["status"], "published", f"night {n}")
+        writer_calls[n] = list(calls)
+
+      self.assertTrue(writer_calls[1], "the first night reviews every new map")
+      # Restated standing notes about shared facts wake nothing by themselves.
+      for n in (2, 3, 4, 8, 9, 10):
+        self.assertEqual(writer_calls[n], [], f"night {n} had nothing new")
+      # A saved fact is filed. The next night reviews, once each, the map it
+      # changed and the maps holding self-hosts, which its follow-up named.
+      self.assertEqual(writer_calls[5], ["chat"])
+      self.assertEqual(sorted(writer_calls[6]), [
+        "mocs/about-the-user.md", "mocs/building-mobius-apps.md",
+        "mocs/mobius-platform.md",
+      ])
+      # Those reviews restate their standing notes, which wake nothing.
+      self.assertEqual(writer_calls[7], [])
+      self.assertTrue(store.read_revision_file(
+        store.ready_pointer()["commit"], "notes/saved-fact-chat-5.md",
+      ))
+
+  def test_daily_saved_facts_do_not_let_map_reviews_wake_their_neighbors(self):
+    with tempfile.TemporaryDirectory() as raw:
+      store, runner = _load(Path(raw))
+      seed = Path(raw) / "seed"
+      _shared_seed(seed)
+      runner.SEED_DIR = seed
+      runner._app_id = lambda: 7
+      runner._app_active = lambda _app_id: True
+      runner._collect_archived_source_lifecycle = lambda *_args: ([], set())
+      runner._fetch_chat_detail = lambda _chat_id: (None, None)
+      night = {"n": 0}
+      runner._collect_capture_intake = lambda: runner.CaptureIntake(
+        [{"id": f"chat-{night['n']}", "messages": []}] if night["n"] > 1 else [],
+      )
+      calls: list = []
+      runner._proposal = _standing_writer(
+        runner, calls, fact_map="mobius-platform", fact_followups=(),
+      )
+
+      reviewed = []
+      for n in range(1, 13):
+        night["n"] = n
+        calls.clear()
+        self.assertEqual(asyncio.run(runner.run()), 0, f"night {n}")
+        reviewed.extend(call for call in calls if n > 1 and call != "chat")
+
+      # Facts arrive every night, but only the map they are filed under is
+      # reviewed; the standing notes those reviews restate about shared
+      # notes never wake about-the-user or building-mobius-apps.
+      self.assertTrue(reviewed)
+      self.assertEqual(set(reviewed), {"mocs/mobius-platform.md"})
+
   def test_proposal_prompt_does_not_treat_assistant_completion_as_fact(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))

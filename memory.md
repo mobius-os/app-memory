@@ -201,14 +201,22 @@ provisional evidence once per read. Every log
 reader skips a torn or undecodable line instead of failing the run.
 Consolidation takes only maps with something new to act on: the map or a note
 filed under it changed since the writer last consolidated it (a filed saved
-fact, an audit repair, a deletion), or a follow-up naming it was written since.
-The host fingerprints each neighborhood as the writer leaves it, so unchanged
-maps are not re-read; one map that is not due still rotates in each night,
-oldest first, so usage evidence reaches every neighborhood. When the lanes run
-dry the night ends early. Each item hands the writer the complete bodies of
-every note in that map, the open leads that name them, and each member's usage
-record, so merging, superseding, and retiring are always possible for that
-neighborhood. Each proposal is
+fact, an audit repair, a deletion), or a follow-up naming it was written since
+while filing saved facts or judging lookups. A follow-up from reviewing a map
+carries nothing new for its neighbors, even on a night that also filed facts,
+so it reaches the maps it names at their next consolidation without making
+them due. The host fingerprints each neighborhood, and the usage evidence it
+was shown, as the writer leaves it, so unchanged maps are not re-read; one map
+that is not due still rotates in, oldest first, when one of its notes' usage
+counts (lookups that needed it, that overreached on it, or all lookups since
+it was written) has doubled since, when members of an oversized map are still
+waiting, or while it or a member carries writer-fixable maintenance, so usage
+evidence reaches every neighborhood as it grows. When the lanes run dry the night ends
+early; a night with nothing for the writer publishes without a model call and
+is not a degraded run. Each item hands the writer the complete bodies of every
+note in that map, every open lead naming them written since the map was last
+reviewed, and each member's usage record, so merging, superseding, and
+retiring are always possible for that neighborhood. Each proposal is
 transactional: if it would demote a specifically routed node into Unfiled,
 only that proposal is rolled back and its source remains queued. A rejected
 item is deferred to a later night; the lane continues, and stops for the night
@@ -319,8 +327,9 @@ the generated Unfiled MOC.
 
 Finish by rebuilding `graph.json`, fixing every publish-blocking error,
 committing the complete graph, advancing `.ready`, and appending a compact JSONL update
-record. Per-chat Summary/Digest notes remain base-platform continuity and are
-not managed by this app. Memory stores compact metadata only for chats cited by durable notes.
+record of the writer's work; a night without writer work leaves that log, and
+the follow-ups it holds, untouched. Per-chat Summary/Digest notes remain
+base-platform continuity and are not managed by this app. Memory stores compact metadata only for chats cited by durable notes.
 
 Memory owns the review of its own writer: the nightly self-reviews, recall
 audits, and consolidation leads are its evidence and its loop. Reflection reads

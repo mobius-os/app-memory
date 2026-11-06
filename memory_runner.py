@@ -185,6 +185,8 @@ class BatchConsolidation:
   accepted_mocs: list[str] = field(default_factory=list)
   rejected_moc_count: int = 0
   consolidation_batch_count: int = 0
+  # Leads the writer wrote while filing saved facts or judging lookups.
+  input_leads: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1183,6 +1185,21 @@ def _load_consolidation_cursor() -> dict[str, str]:
   return {str(key): str(when) for key, when in attempted.items()}
 
 
+def _review_progress() -> dict[str, str]:
+  """When each map's writer review last succeeded, through its publication.
+
+  Leads are counted from here, never from a mere attempt: a failed or
+  rejected review leaves the leads that made its map due still pending. A map
+  with no recorded success falls back to its attempt time.
+  """
+  reviewed = _read_consolidation_cursor().get("reviewed")
+  reviewed = reviewed if isinstance(reviewed, dict) else {}
+  return {
+    **_load_consolidation_cursor(),
+    **{str(key): str(when) for key, when in reviewed.items()},
+  }
+
+
 def _previously_omitted_members(moc_path: str) -> list[str]:
   omitted = _read_consolidation_cursor().get("omitted")
   if not isinstance(omitted, dict):
@@ -1196,6 +1213,10 @@ def _record_consolidation_attempt(
 ) -> None:
   cursor = _read_consolidation_cursor()
   attempted = _load_consolidation_cursor()
+  reviewed = cursor.get("reviewed")
+  reviewed = dict(reviewed) if isinstance(reviewed, dict) else {}
+  # Keep the last known progress before this attempt can overwrite it.
+  reviewed.setdefault(moc_path, attempted.get(moc_path, ""))
   attempted[moc_path] = datetime.now(UTC).isoformat()
   omitted_by_moc = cursor.get("omitted")
   if not isinstance(omitted_by_moc, dict):
@@ -1208,11 +1229,12 @@ def _record_consolidation_attempt(
     omitted_by_moc.pop(moc_path, None)
   _write_consolidation_cursor({
     **cursor, "schema": 1, "attempted": attempted, "omitted": omitted_by_moc,
+    "reviewed": reviewed,
   })
 
 
 def _mark_consolidated_through_publication(moc_paths: list[str]) -> None:
-  """Move consolidated maps' attempt time past this run's own update log.
+  """Move consolidated maps' attempt and review times past this run's log.
 
   The run's follow-ups are written at publication, after each map's item. A
   map's own follow-ups are not new leads for it, so only later ones count.
@@ -1221,9 +1243,14 @@ def _mark_consolidated_through_publication(moc_paths: list[str]) -> None:
     return
   cursor = _read_consolidation_cursor()
   attempted = _load_consolidation_cursor()
+  reviewed = cursor.get("reviewed")
+  reviewed = dict(reviewed) if isinstance(reviewed, dict) else {}
   now = datetime.now(UTC).isoformat()
   attempted.update({path: now for path in moc_paths})
-  _write_consolidation_cursor({**cursor, "attempted": attempted})
+  reviewed.update({path: now for path in moc_paths})
+  _write_consolidation_cursor({
+    **cursor, "attempted": attempted, "reviewed": reviewed,
+  })
 
 
 def _write_consolidation_cursor(cursor: dict) -> None:
@@ -1271,20 +1298,59 @@ def _map_fingerprint(staging: Path, moc_path: str, members: list[str]) -> str:
   return digest.hexdigest()
 
 
-def _consolidation_candidates(staging: Path) -> list[str]:
+def _usage_fingerprint(paths: list[str], usage: dict[str, dict]) -> str:
+  """Identity of the lookup evidence the writer sees for these notes.
+
+  Each usage count (lookups that needed a note, that overreached on it, and
+  all lookups since it was written) takes part only each time it doubles.
+  Retiring a note turns on whether it is needed at all and how often it is
+  overreach, so evidence reaches each neighborhood as it grows without one
+  lookup reopening every map, or a note looked up daily reopening its map
+  every night. A note first appearing in the usage record after its
+  publication carries no lookup evidence.
+  """
+  rows = []
+  for path in paths:
+    entry = usage.get(path) or {}
+    rows.append([path, *(
+      int(entry.get(count) or 0).bit_length()
+      for count in ("needed", "overreach", "lookups_since_created")
+    )])
+  return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
+
+
+def _consolidation_candidates(
+  staging: Path, usage: dict[str, dict] | None = None,
+) -> list[str]:
   """Maps with something new to act on, oldest first, plus one in rotation.
 
   A map is due when it or a note filed under it changed since the writer last
   consolidated it (a filed saved fact, an audit repair, a deletion), or when a
-  follow-up naming it was written since. Everything else waits, so a quiet
-  night finishes early instead of re-reading unchanged maps. One map that is
-  not due still rotates in each night, oldest first, so usage evidence (notes
+  follow-up naming it was written since its last review while filing saved
+  facts or judging lookups. A follow-up from reviewing a map carries nothing new for its
+  neighbors, even on a night that also filed facts; it reaches them at their
+  next consolidation instead of making them due, so one map's standing notes
+  cannot keep re-waking another. One map that is not due still rotates in,
+  oldest first, when a usage count of its notes has doubled since it was
+  last consolidated, members of an oversized map are still waiting, or it or
+  a member carries maintenance the writer can fix, so usage evidence (notes
   nobody needs) reaches every neighborhood without any fixed age rule.
+  Everything else waits: a night with nothing new makes no writer call.
+
+  `usage` is `note_usage_evidence()`, read once per run by the caller.
   """
+  usage = note_usage_evidence() if usage is None else usage
   cursor = _read_consolidation_cursor()
   attempted = _load_consolidation_cursor()
+  progress = _review_progress()
   fingerprints = cursor.get("fingerprints")
   fingerprints = fingerprints if isinstance(fingerprints, dict) else {}
+  usage_seen = cursor.get("usage")
+  usage_seen = usage_seen if isinstance(usage_seen, dict) else {}
+  omitted = cursor.get("omitted")
+  omitted = omitted if isinstance(omitted, dict) else {}
+  # A flag can be cleared only from an item that holds the flagged node.
+  flagged = {str(item.get("path") or "") for item in _maintenance_flags(staging)}
   due: list[str] = []
   idle: list[str] = []
   for moc_path, members in _map_members(staging).items():
@@ -1293,31 +1359,68 @@ def _consolidation_candidates(staging: Path) -> list[str]:
     )
     led = bool(_consolidation_leads(
       [Path(moc_path).stem, *(Path(path).stem for path in members)],
-      since=attempted.get(moc_path, ""),
+      since=progress.get(moc_path, ""),
+      new_input_only=True,
+      reach_back=progress.get(moc_path, ""),
     ))
-    (due if changed or led else idle).append(moc_path)
+    if changed or led:
+      due.append(moc_path)
+    elif (
+      moc_path in flagged
+      or flagged.intersection(members)
+      or omitted.get(moc_path)
+      or usage_seen.get(moc_path) != _usage_fingerprint([moc_path, *members], usage)
+    ):
+      idle.append(moc_path)
   order = lambda path: (attempted.get(path, ""), path)
   return sorted(due, key=order) + sorted(idle, key=order)[:1]
 
 
-def _record_consolidation_fingerprint(staging: Path, moc_path: str) -> None:
-  """Remember the neighborhood exactly as the writer left it."""
+def _record_consolidation_fingerprint(
+  staging: Path, moc_path: str, usage: dict[str, dict] | None = None,
+) -> None:
+  """Remember the neighborhood, and the usage evidence, as the writer left it."""
   members = _map_members(staging).get(moc_path)
   if members is None:
     return
+  usage = note_usage_evidence() if usage is None else usage
   cursor = _read_consolidation_cursor()
   fingerprints = cursor.get("fingerprints")
   fingerprints = dict(fingerprints) if isinstance(fingerprints, dict) else {}
   fingerprints[moc_path] = _map_fingerprint(staging, moc_path, members)
+  usage_seen = cursor.get("usage")
+  usage_seen = dict(usage_seen) if isinstance(usage_seen, dict) else {}
+  usage_seen[moc_path] = _usage_fingerprint([moc_path, *members], usage)
   cursor["fingerprints"] = fingerprints
+  cursor["usage"] = usage_seen
   _write_consolidation_cursor(cursor)
 
 
-def _consolidation_leads(ids: list[str], since: str = "") -> list[str]:
+def _lead_texts(followups: object, self_reviews: object) -> list[str]:
+  """The writer's follow-ups plus the open parts of its self-reviews."""
+  texts = [item for item in followups or [] if isinstance(item, str)]
+  for review in self_reviews if isinstance(self_reviews, list) else []:
+    if not isinstance(review, dict):
+      continue
+    for key in ("next_experiment", "possibly_missed"):
+      value = review.get(key)
+      if isinstance(value, str) and value.strip().lower() != "none":
+        texts.append(value)
+  return texts
+
+
+def _consolidation_leads(
+  ids: list[str], since: str = "", *, new_input_only: bool = False,
+  reach_back: str = "",
+) -> list[str]:
   """Return Memory's own recent follow-ups and experiments naming these nodes.
 
   `since` keeps only leads written after that time, so a lead the writer has
-  already seen does not make its map due again.
+  already seen does not make its map due again. `new_input_only` keeps only
+  leads written while filing saved facts or judging lookups; it decides
+  whether a map is due, never which leads its consolidation receives. The
+  last three update logs are read, plus every log since `reach_back`, so a
+  consolidation receives every lead written since its map was last reviewed.
 
   The writer records what it could not finish or wanted to test. Feeding those
   leads back into the neighborhood they concern closes that loop inside Memory;
@@ -1327,24 +1430,26 @@ def _consolidation_leads(ids: list[str], since: str = "") -> list[str]:
   if not needles:
     return []
   try:
-    files = sorted((STATE / "update-log").glob("*.jsonl"))[-3:]
+    files = sorted((STATE / "update-log").glob("*.jsonl"))
   except OSError:
     return []
+  recent = files[-3:]
+  files = [
+    path for path in files
+    if path in recent or (reach_back and path.stem >= reach_back[:10])
+  ]
   leads: list[str] = []
   for path in reversed(files):
     for record in reversed(read_jsonl(path)):
       if since and str(record.get("timestamp") or "") <= since:
         continue
-      texts = [
-        item for item in (record.get("followups") or []) if isinstance(item, str)
-      ]
-      for review in record.get("writer_self_reviews") or []:
-        if not isinstance(review, dict):
-          continue
-        for key in ("next_experiment", "possibly_missed"):
-          value = review.get(key)
-          if isinstance(value, str) and value.strip().lower() != "none":
-            texts.append(value)
+      if new_input_only and isinstance(record.get("input_leads"), list):
+        # Records written before input leads were kept wake as they did.
+        texts = [item for item in record["input_leads"] if isinstance(item, str)]
+      else:
+        texts = _lead_texts(
+          record.get("followups"), record.get("writer_self_reviews"),
+        )
       for text in texts:
         if any(needle in text for needle in needles) and text not in leads:
           leads.append(text[:600])
@@ -1419,7 +1524,10 @@ def _consolidation_item(
     },
     "member_paths": [item["path"] for item in note_contents],
     "omitted_member_paths": omitted,
-    "leads": _consolidation_leads([moc_id, *member_ids]),
+    "leads": _consolidation_leads(
+      [moc_id, *member_ids],
+      reach_back=_review_progress().get(moc_path, ""),
+    ),
     "member_usage": {
       item["path"]: usage.get(item["path"], {"needed": 0, "overreach": 0})
       for item in note_contents
@@ -3121,6 +3229,7 @@ def _append_update_log(
   recall_guidance: dict,
   *,
   consolidated_mocs: list[str] | None = None,
+  input_leads: list[str] | None = None,
 ) -> None:
   STATE.mkdir(parents=True, exist_ok=True)
   path = STATE / "update-log" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
@@ -3140,6 +3249,9 @@ def _append_update_log(
     "changed_paths": changed,
     "deleted_paths": deleted,
     "consolidated_mocs": list(consolidated_mocs or []),
+    # Leads written while filing saved facts or judging lookups; only these
+    # make the maps they name due.
+    "input_leads": list(dict.fromkeys(input_leads or []))[:100],
     "counts": {
       "nodes": len(graph.get("nodes") or []),
       "edges": len(graph.get("edges") or []),
@@ -3589,11 +3701,12 @@ def _consolidate_batches(
   remaining_chats = list(chats)
   accepted_chats: list[dict] = []
   deferred_chats: list[dict] = []
-  remaining_mocs = _consolidation_candidates(staging)
   # Audits are recorded and notes published only after this loop, so one
   # reading of the evidence serves every consolidation item.
-  usage = note_usage_evidence() if remaining_mocs else {}
+  usage = note_usage_evidence()
+  remaining_mocs = _consolidation_candidates(staging, usage)
   accepted_mocs: list[str] = []
+  input_leads: list[str] = []
   proposals: list[dict] = []
   provider_outcomes: list[ProposalOutcome] = []
   changed: list[str] = []
@@ -3736,6 +3849,10 @@ def _consolidate_batches(
     accepted_graph = accepted_candidate
     consecutive_rejections[work_kind] = 0
     batches[work_kind] += 1
+    if work_kind in ("audit", "chat"):
+      input_leads.extend(_lead_texts(
+        proposal.get("followups"), [proposal.get("self_review")],
+      ))
     if work_kind == "audit":
       accepted_audits.extend(batch_audits)
       remaining_audits = remaining_audits[len(batch_audits):]
@@ -3744,7 +3861,7 @@ def _consolidate_batches(
       remaining_chats = _without_chats(remaining_chats, batch)
     elif moc_path is not None:
       accepted_mocs.append(moc_path)
-      _record_consolidation_fingerprint(staging, moc_path)
+      _record_consolidation_fingerprint(staging, moc_path, usage)
 
   return BatchConsolidation(
     proposals=proposals,
@@ -3765,6 +3882,7 @@ def _consolidate_batches(
     accepted_mocs=accepted_mocs,
     rejected_moc_count=rejected["consolidate"],
     consolidation_batch_count=batches["consolidate"],
+    input_leads=input_leads,
   )
 
 
@@ -4040,7 +4158,12 @@ async def run() -> int:
       *map(_unreviewed_verdict, unreviewed_audits),
       *map(_failed_verdict, consolidation.failed_audits),
     ]
-    if not proposals or not consolidation.provider_outcomes:
+    # Nothing queued and nothing attempted: a quiet night, not a failed one.
+    # It publishes the deterministic work above without a writer call.
+    writer_needed = bool(
+      proposals or deferred_attempts or deferred_reason or chats or read_audits
+    )
+    if writer_needed and (not proposals or not consolidation.provider_outcomes):
       degraded = {
         "schema": 1,
         "run_id": run_id,
@@ -4085,7 +4208,10 @@ async def run() -> int:
       )
       return 2
     proposal = _combined_proposal(proposals)
-    outcome = consolidation.provider_outcomes[-1]
+    outcome = (
+      consolidation.provider_outcomes[-1]
+      if consolidation.provider_outcomes else None
+    )
     candidate = consolidation.accepted_graph
     changed.extend(consolidation.changed)
     deleted.extend(consolidation.deleted)
@@ -4171,8 +4297,8 @@ async def run() -> int:
         or lifecycle_commit_created
         or bool(pointer.get("changed"))
       ),
-      "provider": outcome.provider,
-      "model": outcome.model,
+      "provider": outcome.provider if outcome else None,
+      "model": outcome.model if outcome else None,
       "changed_paths": changed,
       "deleted_paths": deleted,
       "source_chat_count": len(proposal_chats),
@@ -4230,22 +4356,26 @@ async def run() -> int:
         status["deferred_detail"] = deferred_detail
     try:
       _record_run_status(status)
-      _append_update_log(
-        run_id,
-        run_previous_commit,
-        pointer,
-        proposal,
-        changed,
-        deleted,
-        baseline,
-        graph,
-        outcome.provider,
-        outcome.model,
-        status["model_work"],
-        recall_guidance_status,
-        consolidated_mocs=list(consolidation.accepted_mocs),
-      )
-      _mark_consolidated_through_publication(list(consolidation.accepted_mocs))
+      # The update log records the writer's work and holds its follow-ups.
+      # A night without a writer leaves it, and those leads, untouched.
+      if outcome is not None:
+        _append_update_log(
+          run_id,
+          run_previous_commit,
+          pointer,
+          proposal,
+          changed,
+          deleted,
+          baseline,
+          graph,
+          outcome.provider,
+          outcome.model,
+          status["model_work"],
+          recall_guidance_status,
+          consolidated_mocs=list(consolidation.accepted_mocs),
+          input_leads=consolidation.input_leads,
+        )
+        _mark_consolidated_through_publication(list(consolidation.accepted_mocs))
       _record_recall_audits(
         run_id,
         [*replayed_audits, *settled_backlog],
