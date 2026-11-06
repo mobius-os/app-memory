@@ -128,6 +128,9 @@ _CONSOLIDATION_CURSOR = STATE / "consolidation-cursor.json"
 # A lane stops for the night only after several consecutive failed items, so
 # one malformed analyst answer costs one item instead of the whole lane.
 _LANE_REJECTION_LIMIT = 3
+# Unfinished disagreements kept queued for a later writer review; the writer
+# reaches only a few audit items per night.
+_AUDIT_BACKLOG_LIMIT = 10
 # Failed writer reviews before a disagreement is final: one retry, which sees
 # the first failure's reason in `previous_review`.
 _AUDIT_REVIEW_ATTEMPTS = 2
@@ -634,25 +637,37 @@ def _pending_read_traces() -> list[dict]:
 
 
 def _unreviewed_read_audits() -> list[dict]:
-  """Recover unfinished disagreements; their bodies load only when selected.
+  """Re-queue the newest unfinished disagreements without another deep replay.
 
-  A reading no model judged stays queued without an age or count cutoff, and
-  a failed review is retried until `_AUDIT_REVIEW_ATTEMPTS` failures make it
-  final, so an item that always fails cannot spend every night. Rows written
-  before attempts were counted are settled history and never come back, nor
-  does a reading whose original question is no longer in the read log.
+  Only readings that recorded their deep replay revision come back, so the
+  writer sees the exact bodies the replay chose; they load only when selected.
+  A reading no model judged is unfinished, and a failed review is retried
+  until `_AUDIT_REVIEW_ATTEMPTS` failures make it final, so an item that always
+  fails cannot spend every night. Failures recorded before attempts were
+  counted are final history. Only the newest `_AUDIT_BACKLOG_LIMIT` unfinished
+  readings stay queued; every other one stays provisional for good (excluded
+  from rates; see `note_usage_evidence`), so the queue, its nightly cost and
+  the age of its evidence stay bounded.
   """
-  pending = {
-    row["read_id"]: row for row in latest_audit_rows(STATE)
+  pending = [
+    row for row in latest_audit_rows(STATE)
     if isinstance(row.get("read_id"), str)
     and isinstance(row.get("at"), str)
-    and isinstance(row.get("review_attempts"), int)
+    and isinstance(row.get("deep_revision"), str) and row["deep_revision"]
+    and isinstance(row.get("deep_selected"), list)
+    and all(isinstance(path, str) for path in row["deep_selected"])
     and (
       row.get("verdict_source") == "deep_replay_unreviewed"
       or (row.get("verdict_source") == "writer_failed"
+          and isinstance(row.get("review_attempts"), int)
           and row["review_attempts"] < _AUDIT_REVIEW_ATTEMPTS)
     )
+  ]
+  pending = {
+    row["read_id"]: row
+    for row in sorted(pending, key=lambda row: row["at"])[-_AUDIT_BACKLOG_LIMIT:]
   }
+  # Read logs are daily files, so only the days of the queued reads are read.
   traces: dict[str, dict] = {}
   for day in sorted({row["at"][:10] for row in pending.values()}):
     for trace in read_jsonl(STATE / "read-log" / f"{day}.jsonl"):
@@ -662,10 +677,11 @@ def _unreviewed_read_audits() -> list[dict]:
   for read_id, row in pending.items():
     if read_id not in traces:
       continue
-    replay = {"read_id": read_id, "selected": row.get("deep_selected") or [],
+    replay = {"read_id": read_id, "selected": row["deep_selected"],
               "reason": row.get("deep_reason") or "prior deep replay"}
-    audit = _audit_reads(row.get("deep_revision") or "", [traces[read_id]], [replay])[0]
-    audit["review_attempts"] = row["review_attempts"]
+    audit = _audit_reads(row["deep_revision"], [traces[read_id]], [replay])[0]
+    attempts = row.get("review_attempts")
+    audit["review_attempts"] = attempts if isinstance(attempts, int) else 0
     audit["last_attempt_at"] = row.get("last_attempt_at") or ""
     audit["previous_review"] = {
       "source": row.get("verdict_source"), "reason": row.get("reason"),
@@ -954,8 +970,7 @@ def _review_order(fresh: list[dict], backlog: list[dict]) -> list[dict]:
   """Tonight's fully evidenced disagreements first, then the retained backlog.
 
   Within each, unattempted reads come first, then least-recently attempted
-  failures. No size score or age eviction: a failed item goes to the back,
-  not out of the ledger.
+  failures, so a failed item goes behind work no model has tried yet.
   """
   def key(audit: dict) -> tuple:
     return (bool(audit.get("last_attempt_at")),
@@ -4010,6 +4025,16 @@ async def run() -> int:
       audit for audit in backlog_audits
       if audit["read_id"] in reviewed_ids | rejected_ids
     ]
+    # Deferred: replays the window did not reach, plus queued disagreements
+    # the writer did not settle. A failure that used its last attempt is final.
+    exhausted_failures = sum(
+      int(audit.get("review_attempts") or 0) + 1 >= _AUDIT_REVIEW_ATTEMPTS
+      for audit in consolidation.failed_audits
+    )
+    deferred_read_audit_count = (
+      max(0, pending_read_audit_count - len(replayed_audits))
+      + len(read_audits) - exhausted_failures
+    )
     unjudged_verdicts = [
       *agreed_verdicts,
       *map(_unreviewed_verdict, unreviewed_audits),
@@ -4036,7 +4061,7 @@ async def run() -> int:
           chats and not consolidation.rejected_chat_count
         ),
         "read_audit_count": 0,
-        "deferred_read_audit_count": pending_read_audit_count + len(backlog_audits),
+        "deferred_read_audit_count": deferred_read_audit_count,
         "proposal_batch_count": 0,
         "deferred_chat_count": len(remaining_chats),
         "provider_summary": _provider_summary([], deferred_attempts),
@@ -4059,9 +4084,6 @@ async def run() -> int:
         f"{degraded['reason']}"
       )
       return 2
-    deferred_read_audit_count = max(
-      0, pending_read_audit_count - len(replayed_audits),
-    )
     proposal = _combined_proposal(proposals)
     outcome = consolidation.provider_outcomes[-1]
     candidate = consolidation.accepted_graph
@@ -4161,7 +4183,7 @@ async def run() -> int:
       "agreed_read_audit_count": len(agreed_audits),
       "writer_reviewed_read_audit_count": len(proposal_audits),
       "deferred_read_audit_count": (
-        deferred_read_audit_count + len(read_audits) - len(proposal_audits)
+        deferred_read_audit_count - len(proposal_audits)
       ),
       "proposal_batch_count": len(proposals),
       "audit_proposal_batch_count": audit_proposal_count,

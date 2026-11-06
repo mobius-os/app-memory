@@ -734,7 +734,7 @@ def test_keep_does_not_erase_accepted_coaching_change():
   ])["recall_guidance"]["action"] == "clear"
 
 
-def test_unreviewed_log_requeues_counted_rows_but_never_legacy_history(monkeypatch, tmp_path):
+def test_unreviewed_log_requeues_rows_with_their_replay_revision(monkeypatch, tmp_path):
   state = tmp_path / "app-state"
   (state / "read-log").mkdir(parents=True)
   monkeypatch.setattr(memory_runner, "STATE", state)
@@ -750,8 +750,8 @@ def test_unreviewed_log_requeues_counted_rows_but_never_legacy_history(monkeypat
     "".join(json.dumps(trace) + "\n" for trace in traces),
   )
   graph = {"nodes": [], "edges": []}
-  # A row from before review attempts were counted is settled history: an
-  # upgrade must not resurrect it.
+  # A row without its replay revision cannot show the replayed bodies, so it
+  # stays provisional.
   (state / "recall-audit").mkdir()
   (state / "recall-audit" / "2026-09-01.jsonl").write_text(json.dumps({
     "read_id": "legacy", "at": traces[0]["at"],
@@ -1022,7 +1022,8 @@ def test_failed_audits_are_retained_without_starving_unattempted_reads(
     return {"read_id": read_id, "reason": "fact", "attempts": [],
             "selected": [f"notes/{read_id}-{index}.md" for index in range(size)]}
 
-  sizes = {"poison1": 5, "poison2": 4, "poison3": 3, "poison4": 2, "fresh": 1}
+  sizes = {"poison1": 5, "poison2": 4, "poison3": 3, "poison4": 2, "fresh": 1,
+           "fresh2": 1}
   (state / "read-log" / "2026-09-01.jsonl").write_text(
     "".join(json.dumps(trace(read_id)) + "\n" for read_id in sizes),
   )
@@ -1033,14 +1034,14 @@ def test_failed_audits_are_retained_without_starving_unattempted_reads(
   memory_runner._record_recall_audits("run-0", backlog, {"read_audits": [
     *map(memory_runner._unreviewed_verdict, backlog),
   ]}, graph)
-  # A historical row from before attempts were counted is never resurrected.
+  # A failure from before attempts were counted is final history.
   (state / "recall-audit" / "2026-08-31.jsonl").write_text(json.dumps({
     "read_id": "lost", "at": "2026-08-31T00:00:00+00:00",
-    "verdict_source": "deep_replay_unreviewed", "deep_revision": "b" * 40,
+    "verdict_source": "writer_failed", "deep_revision": "b" * 40,
     "deep_selected": ["notes/answer.md"],
   }) + "\n")
 
-  nights = [["fresh"], ["poison4"], []]
+  nights = [["fresh"], ["poison4"], ["fresh2"]]
   calls = []
   statuses = []
   def propose(_app, _path, _chats, audits, _providers, _deadline, **_kwargs):
@@ -1095,41 +1096,47 @@ def test_failed_audits_are_retained_without_starving_unattempted_reads(
   calls.append([])
   assert asyncio.run(memory_runner.run()) == 0
   # Tonight's evidenced disagreement precedes the older retained backlog, and
-  # the legacy row is not re-queued.
+  # the legacy failure is not re-queued.
   assert calls[0] == ["fresh", "poison1", "poison2", "poison3"]
   assert (statuses[-1]["writer_reviewed_read_audit_count"],
           statuses[-1]["deferred_read_audit_count"]) == (1, 3)
   calls.append([])
   assert asyncio.run(memory_runner.run()) == 2
   # Night two: the new read precedes retained failures, which run once until
-  # the consecutive-failure stop.
+  # the consecutive-failure stop. Only poison3 (never reached) and poison4
+  # (one failure) are still deferred; poison1 and poison2 used their attempts.
   assert calls[1] == ["poison4", "poison1", "poison2"]
+  assert statuses[-1]["deferred_read_audit_count"] == 2
   pending = memory_runner._unreviewed_read_audits()
   # poison1 and poison2 failed their second review, so they are final.
   assert {item["read_id"] for item in pending} == {"poison3", "poison4"}
   assert all(item["last_attempt_at"] and item["previous_review"]["failure"] for item in pending)
   calls.append([])
-  asyncio.run(memory_runner.run())
-  assert calls[2] == ["poison3", "poison4"]
+  assert asyncio.run(memory_runner.run()) == 0
+  assert calls[2] == ["fresh2", "poison3", "poison4"]
+  # Published: the reviewed read and both final failures defer nothing.
+  assert (statuses[-1]["writer_reviewed_read_audit_count"],
+          statuses[-1]["deferred_read_audit_count"]) == (1, 0)
   assert memory_runner._unreviewed_read_audits() == []
   rows = {row["read_id"]: row for row in memory_runner.latest_audit_rows(state)}
   assert {read_id: row["verdict_source"] for read_id, row in rows.items()} == {
     "poison1": "writer_failed", "poison2": "writer_failed",
     "poison3": "writer_failed", "poison4": "writer_failed",
-    "fresh": "writer", "lost": "deep_replay_unreviewed",
+    "fresh": "writer", "fresh2": "writer", "lost": "writer_failed",
   }
   assert all(rows[f"poison{index}"]["review_attempts"] == 2 for index in range(1, 5))
   stats = json.loads((state / "recall-stats.json").read_text())
-  assert (stats["reads_judged"], stats["provisional_reads"]) == (1, 5)
+  assert (stats["reads_judged"], stats["provisional_reads"]) == (2, 5)
 
 
-def test_backlog_skips_legacy_and_exhausted_rows_and_orders_failures_last(monkeypatch, tmp_path):
+def test_backlog_keeps_queued_legacy_reads_but_not_legacy_or_exhausted_failures(monkeypatch, tmp_path):
   state = tmp_path / "state"
   (state / "recall-audit").mkdir(parents=True)
   (state / "read-log").mkdir()
   monkeypatch.setattr(memory_runner, "STATE", state)
   rows = [
-    # Written before attempts were counted: settled history, never resurrected.
+    # Written before attempts were counted: a failure is final history, but a
+    # reading the base queue still held stays queued after the upgrade.
     {"read_id": "legacy-failed", "at": "2026-08-01T00:00:00+00:00",
      "verdict_source": "writer_failed"},
     {"read_id": "legacy-unreviewed", "at": "2026-08-02T00:00:00+00:00",
@@ -1146,6 +1153,7 @@ def test_backlog_skips_legacy_and_exhausted_rows_and_orders_failures_last(monkey
   ]
   for row in rows:
     row["deep_revision"] = "b" * 40
+    row["deep_selected"] = ["notes/answer.md"]
     (state / "recall-audit" / f"{row['at'][:10]}.jsonl").write_text(json.dumps(row) + "\n")
     (state / "read-log" / f"{row['at'][:10]}.jsonl").write_text(json.dumps({
       "schema": 4, "read_id": row["read_id"], "at": row["at"],
@@ -1153,8 +1161,11 @@ def test_backlog_skips_legacy_and_exhausted_rows_and_orders_failures_last(monkey
     }) + "\n")
   recovered = memory_runner._unreviewed_read_audits()
   assert [audit["read_id"] for audit in memory_runner._review_order([], recovered)] == [
-    "unattempted", "failed-once",
+    "legacy-unreviewed", "unattempted", "failed-once",
   ]
+  assert {audit["read_id"]: audit["review_attempts"] for audit in recovered}[
+    "legacy-unreviewed"
+  ] == 0
 
 
 def test_failure_detail_is_kept_for_the_next_writer(monkeypatch, tmp_path):
@@ -1230,14 +1241,15 @@ def test_attempted_failures_are_reported_for_durable_retry_evidence(monkeypatch,
   ]
 
 
-def test_unreviewed_backlog_retains_all_identities_and_loads_only_selected_bodies(monkeypatch, tmp_path):
+def test_unreviewed_backlog_keeps_the_newest_reads_and_loads_only_selected_bodies(monkeypatch, tmp_path):
   state = tmp_path / "app-state"
   monkeypatch.setattr(memory_runner, "STATE", state)
   monkeypatch.setattr(memory_runner, "_RECALL_STATS", state / "recall-stats.json")
   revisions = []
   monkeypatch.setattr(memory_runner, "read_revision_file",
                       lambda commit, path: revisions.append(path) or f"{path}@{commit}")
-  days = ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04"]
+  limit = memory_runner._AUDIT_BACKLOG_LIMIT
+  days = [f"2026-09-{day:02d}" for day in range(1, limit + 3)]
   traces = [
     {"schema": 4, "read_id": f"read-{day}", "at": f"{day}T00:00:00+00:00",
      "question": "Relevant fact?", "commit": "a" * 40, "files": []}
@@ -1254,11 +1266,18 @@ def test_unreviewed_backlog_retains_all_identities_and_loads_only_selected_bodie
     *map(memory_runner._unreviewed_verdict, audits),
   ]}, {"nodes": [], "edges": []})
   revisions.clear()
+  # The two oldest readings age out of the queue (they stay provisional), and
+  # their read-log days are not re-read.
+  logs = []
+  read_jsonl = memory_runner.read_jsonl
+  monkeypatch.setattr(memory_runner, "read_jsonl",
+                      lambda path: logs.append(path.name) or read_jsonl(path))
   recovered = memory_runner._unreviewed_read_audits()
-  assert [item["read_id"] for item in recovered] == [f"read-{day}" for day in days]
+  assert logs == [f"{day}.jsonl" for day in days[2:]]
+  assert [item["read_id"] for item in recovered] == [f"read-{day}" for day in days[2:]]
   assert revisions == []
   selected = memory_runner._hydrate_audit(recovered[0])
-  assert revisions == ["notes/read-2026-09-01.md"]
+  assert revisions == [f"notes/read-{days[2]}.md"]
   assert selected["deep"]["missed_nodes"][0]["content"].endswith("@" + "b" * 40)
 
 

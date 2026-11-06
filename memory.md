@@ -178,18 +178,21 @@ deadline approaches, then publishes once. Any disagreements the writer does
 not reach are recorded as unreviewed replay readings.
 Those readings are provisional, not judged misses: they do not count in
 recall rates, and when deciding which notes to retire a note the replay
-picked still counts as needed. Unfinished readings stay in the existing audit
-ledger until reviewed, without an age or count cutoff; compact identities are
-recovered and pinned historical bodies load only for the selected item. Missing
-historical evidence remains visible, never replaced with today's text. Tonight's
-fully evidenced disagreements go first, then the retained backlog; within each,
-unattempted reads oldest first, then least-recently attempted failures. An item
-is attempted at most once per run, and the existing deadline and consecutive
-failure stop bound nightly effort. A failed model attempt keeps its reason and
-goes behind unattempted work; after its second failed review it is final, so an
-item that always fails cannot spend every night. Readings recorded before
-attempts were counted, and readings whose original question is no longer in the
-read log, are settled history and never re-queue. On review, the writer judges
+picked still counts as needed. The ten newest unfinished readings that
+recorded their deep replay revision stay queued for later writer review
+without another deep replay; older readings, and readings without that
+revision, stay provisional for good, so the queue, the read-log days it
+re-reads and its nightly cost stay bounded. Pinned historical bodies load only
+for the selected item; missing historical evidence remains visible, never
+replaced with today's text. Tonight's fully evidenced disagreements go first,
+then the queue; within each, unattempted reads oldest first, then
+least-recently attempted failures. An item is attempted at most once per run,
+and the existing deadline and consecutive failure stop bound nightly effort. A
+failed model attempt keeps its reason and goes behind unattempted work; after
+its second failed review it is final, so an item that always fails cannot
+spend every night. Failures recorded before attempts were counted, and
+readings whose original question is no longer in the read log, are settled
+history and never re-queue. On review, the writer judges
 from evidence or explicitly records `unresolved` with a specific reason when no
 honest judgment is possible. That closes the work without a recall verdict or
 benchmark expectation, and cannot coach the selector. Do not use it simply to
