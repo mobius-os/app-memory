@@ -810,11 +810,12 @@ def _note_creation_times() -> dict[str, str]:
   return created
 
 
-# Verdict sources for readings no writer judged: excluded from rates, and in
-# note retention evidence they credit only what live and deep agreed on. An
-# unreviewed reading may come back for review; a writer_failed one was
-# attempted by a model and is final, so it never re-queues.
-PROVISIONAL_VERDICT_SOURCES = frozenset({"deep_replay_unreviewed", "writer_failed"})
+# Unjudged readings never become recall scores or benchmark expectations.
+# writer_failed is retried until its attempts run out; writer_unresolved is an
+# explicit reasoned disposition, retained as provisional evidence, never retried.
+PROVISIONAL_VERDICT_SOURCES = frozenset({
+  "deep_replay_unreviewed", "writer_failed", "writer_unresolved",
+})
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -844,6 +845,7 @@ def read_jsonl(path: Path) -> list[dict]:
 # bulk of each row, and no rate, retention or re-queue decision reads them.
 AUDIT_ROW_FIELDS = frozenset({
   "schema", "run_id", "read_id", "at", "question_sha256", "outcome",
+  "last_attempt_at", "review_attempts", "review_failure",
   "overreach", "miss_class", "reason", "host_selection_override",
   "usefulness", "hindsight_reason", "verdict_source",
   "live_selected", "missed_nodes", "overselected_nodes",
@@ -854,10 +856,10 @@ AUDIT_ROW_FIELDS = frozenset({
 def latest_audit_rows(state: Path = STATE) -> list[dict]:
   """Return the latest recall-audit row per read, oldest log first.
 
-  A later row supersedes an earlier one for the same read, except that a
-  provisional row never replaces a judged one (a replayed read must not undo a
-  writer verdict); rows without a read id each stand alone. Each row keeps
-  only `AUDIT_ROW_FIELDS`.
+  A later row supersedes an earlier one for the same read, except that an
+  unreviewed or writer_failed row never replaces a judged or writer_unresolved
+  one (a replayed read must not undo a writer's disposition); rows without a
+  read id each stand alone. Each row keeps only `AUDIT_ROW_FIELDS`.
   """
   latest: dict[object, dict] = {}
   for log in sorted((state / "recall-audit").glob("*.jsonl")):
@@ -868,8 +870,9 @@ def latest_audit_rows(state: Path = STATE) -> list[dict]:
       prior = latest.get(key)
       if (
         prior is not None
-        and prior.get("verdict_source") not in PROVISIONAL_VERDICT_SOURCES
-        and row.get("verdict_source") in PROVISIONAL_VERDICT_SOURCES
+        and (prior.get("verdict_source") not in PROVISIONAL_VERDICT_SOURCES
+             or prior.get("verdict_source") == "writer_unresolved")
+        and row.get("verdict_source") in {"deep_replay_unreviewed", "writer_failed"}
       ):
         continue
       latest[key] = row
@@ -882,9 +885,10 @@ def note_usage_evidence() -> dict[str, dict]:
   Built fresh from the append-only recall-audit log, so it needs no counters
   of its own. Every audited reading is a lookup. A judged reading (writer
   review, or full live/deep agreement) `needed` a note it kept or missed. A
-  provisional reading (not reviewed, or writer_failed) credits the notes the
-  deep replay selected, as before, and judges no overreach: an unresolved
-  disagreement leans towards keeping a note rather than retiring it.
+  provisional reading (not reviewed, writer_failed, or writer_unresolved)
+  credits the notes the deep replay selected, as before, and judges no
+  overreach: an unresolved disagreement leans towards keeping a note rather
+  than retiring it.
   """
   created = _note_creation_times()
   usage: dict[str, dict] = {}

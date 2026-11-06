@@ -613,7 +613,7 @@ class MemoryRunnerTests(unittest.TestCase):
         "id": "chat-one",
         "title": "Align the old prior fact",
         "messages": [{"role": "user", "text": "The durable old detail changed."}],
-      }]))
+      }], extra_note_paths={"notes/old.md"}))
       old_row = next(
         row for row in data["existing_note_contents"]
         if row["path"] == "notes/old.md"
@@ -629,7 +629,7 @@ class MemoryRunnerTests(unittest.TestCase):
       )
       self.assertEqual((changed, deleted), (["notes/old.md"], []))
 
-  def test_prompt_uses_compact_graph_identities_and_complete_related_notes(self):
+  def test_prompt_supplies_semantic_identities_and_only_requested_complete_notes(self):
     with tempfile.TemporaryDirectory() as raw:
       _store, runner = _load(Path(raw))
       staging = Path(raw) / "staging"
@@ -648,7 +648,7 @@ class MemoryRunnerTests(unittest.TestCase):
         "id": "chat-one",
         "title": "Large note detail",
         "messages": [{"role": "user", "text": "The large optional detail changed."}],
-      }]))
+      }], extra_note_paths={"notes/large.md"}))
       route_row = next(
         row for row in data["existing_graph"]["mocs"]
         if row[0] == "mocs/topic.md"

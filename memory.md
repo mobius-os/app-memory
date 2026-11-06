@@ -126,8 +126,18 @@ when their neighborhood is consolidated.
 The Memory app's confined runner owns consolidation. It never rereads chat
 transcripts: its input is the facts working agents saved with the `remember`
 tool, each with its chat's title and short Summary as context and the chat as
-provenance, plus compact graph identities and the complete bodies of notes
-relevant to the focused work item.
+provenance, plus compact graph identities. The writer chooses
+additional complete note bodies by explicit path request before proposing an
+edit; host keyword overlap never decides which facts are relevant. Audit items
+also receive current copies of the exact selections being judged, and a map
+item receives its neighborhood. A body request continues the same work item,
+does not apply edits, and remains inside the nightly deadline and host context
+safety boundary. Each request resends the whole prompt and items run one at a
+time, so an item gets one request round: the answer after it is final, and a
+second request ends the item unedited with that reason kept. A body that does
+not fit the boundary is never truncated: it is named as over budget, and the
+writer finishes without editing it and leaves a follow-up. Request plausibly
+useful notes together; do not fill a quota.
 It may propose note upserts, note deletions, and described link operations. The
 trusted host applies links to an existing root or MOC without handing the model
 an unrelated map to rewrite. A link operation adds a missing link or refreshes
@@ -139,7 +149,9 @@ note may be replaced only when its complete current text was supplied. In a map-
 the map in full as well, so it may rewrite that one map — repairing cues,
 orphaned fragments, and dangling lines — provided every member it is not
 deleting or re-filing in the same proposal stays linked; the host rejects a
-rewrite that would silently orphan a fact.
+rewrite that would silently orphan a fact. The root `index.md` is never
+rewritten this way: its contract text is read first by every lookup, so the
+writer reaches it only through `links`.
 It tries the configured background-agent order through confined, text-only
 Claude and Codex adapters. If none produces valid JSON, the run is recorded as
 degraded and the published commit does not move.
@@ -162,21 +174,30 @@ skips one.
 The night then rotates three lanes of focused work items against one private
 staging graph — one disagreement between live recall and its replay, one chat's
 saved facts, one map neighborhood to consolidate — until the real scheduled-run
-deadline approaches, then publishes once. The largest disagreements go first;
-any the writer does not reach are recorded as unreviewed replay readings.
+deadline approaches, then publishes once. Any disagreements the writer does
+not reach are recorded as unreviewed replay readings.
 Those readings are provisional, not judged misses: they do not count in
 recall rates, and when deciding which notes to retire a note the replay
-picked still counts as needed. The ten newest readings that
+picked still counts as needed. The ten newest unfinished readings that
 recorded their deep replay revision stay queued for later writer review
-without another deep replay, behind tonight's reads of equal size; older
-readings, and readings without that revision, stay provisional for good, so
-the queue and its nightly cost stay bounded. A disagreement a model ran on
-without an accepted verdict (a rejected or unreadable answer, a timeout, a
-crash) is recorded as a final provisional reading and never re-queued, so an
-item that always fails is tried once and cannot crowd out fresh reads; one no
-model ran on (no provider available, out of quota, logged out or missing,
-the window closed first or cut the call short) stays queued. A
-later verdict supersedes the provisional reading once per read. Every log
+without another deep replay; older readings, and readings without that
+revision, stay provisional for good, so the queue, the read-log days it
+re-reads and its nightly cost stay bounded. Pinned historical bodies load only
+for the selected item; missing historical evidence remains visible, never
+replaced with today's text. Tonight's fully evidenced disagreements go first,
+then the queue; within each, unattempted reads oldest first, then
+least-recently attempted failures. An item is attempted at most once per run,
+and the existing deadline and consecutive failure stop bound nightly effort. A
+failed model attempt keeps its reason and goes behind unattempted work; after
+its second failed review it is final, so an item that always fails cannot
+spend every night. Failures recorded before attempts were counted, and
+readings whose original question is no longer in the read log, are settled
+history and never re-queue. On review, the writer judges
+from evidence or explicitly records `unresolved` with a specific reason when no
+honest judgment is possible. That closes the work without a recall verdict or
+benchmark expectation, and cannot coach the selector. Do not use it simply to
+save work or conceal a repairable failure. A later valid verdict supersedes
+provisional evidence once per read. Every log
 reader skips a torn or undecodable line instead of failing the run.
 Consolidation takes only maps with something new to act on: the map or a note
 filed under it changed since the writer last consolidated it (a filed saved
