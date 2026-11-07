@@ -723,7 +723,9 @@ extra plausible note, but do not pad with notes that merely share a topic. There
 is no count target. An empty selection is correct when nothing applies."""
 
 
-HOST_LIMITED = ProviderFailure("usage_limit", terminal=True, scope="provider")
+# The host's list covers both usage and rate limits, so a skip it causes is
+# recorded as the host's report, not as this recall hitting a usage limit.
+HOST_LIMITED = ProviderFailure("host_limited", terminal=True, scope="provider")
 
 
 def _host_limited_providers() -> set[str]:
