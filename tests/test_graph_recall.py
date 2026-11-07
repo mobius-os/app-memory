@@ -479,7 +479,7 @@ def test_live_reader_skips_providers_the_host_reports_limited(monkeypatch):
 
   assert calls == ["codex"]
   assert result.attempts[0] == {
-    "provider": "claude", "outcome": "usage_limit",
+    "provider": "claude", "outcome": "host_limited",
     "skipped": True, "elapsed_ms": 0,
   }
   assert result.attempts[1]["outcome"] == "ok"
