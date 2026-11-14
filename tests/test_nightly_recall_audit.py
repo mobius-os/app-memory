@@ -880,7 +880,7 @@ def test_later_audit_item_sees_staged_coaching_without_publishing(monkeypatch, t
   graph = {"nodes": [], "edges": [], "problems": []}
   seen = []
   writes = []
-  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda *_args: [])
   monkeypatch.setattr(memory_runner, "write_recall_guidance", writes.append)
   monkeypatch.setattr(memory_runner, "load_recall_guidance", lambda: {
     "instruction": "Old lesson", "evidence_read_ids": ["old"],
@@ -1059,7 +1059,7 @@ def test_failed_audits_are_retained_without_starving_unattempted_reads(
                        "overselected_nodes": [], "reason": "fact existed"}],
     }, "codex", "test", [])
   monkeypatch.setattr(memory_runner, "_proposal", propose)
-  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda *_args: [])
   monkeypatch.setattr(memory_runner, "_apply_validated_proposal",
                       lambda _path, value, **_kwargs: (value, [], [], graph))
   monkeypatch.setattr(memory_runner, "_pending_read_traces",
@@ -1196,7 +1196,7 @@ def test_failure_detail_is_kept_for_the_next_writer(monkeypatch, tmp_path):
 ])
 def test_audits_no_model_ran_on_stay_queued(monkeypatch, tmp_path, attempts):
   graph = {"nodes": [], "edges": [], "problems": []}
-  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda *_args: [])
   monkeypatch.setattr(memory_runner, "_proposal", lambda *_a, **_k: (
     memory_runner.ProposalOutcome("degraded", None, None, None, list(attempts))
   ))
@@ -1210,7 +1210,7 @@ def test_audits_no_model_ran_on_stay_queued(monkeypatch, tmp_path, attempts):
 
 def test_attempted_failures_are_reported_for_durable_retry_evidence(monkeypatch, tmp_path):
   graph = {"nodes": [], "edges": [], "problems": []}
-  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda _path: [])
+  monkeypatch.setattr(memory_runner, "_consolidation_candidates", lambda *_args: [])
   failures = {
     "unparseable": [{"provider": "codex", "failure_code": "invalid_output"}],
     "crashed": [{"provider": "codex", "failure_code": "process_exit_1"},
@@ -2761,7 +2761,7 @@ def test_killed_run_resumes_replays_from_cache_for_the_same_commit(
   assert [item["read_id"] for item in fresh] == ["0"]
 
 
-def test_only_changed_or_led_maps_are_due_plus_one_in_rotation(
+def test_only_changed_or_led_maps_are_due_plus_one_with_new_usage_evidence(
   monkeypatch, tmp_path,
 ):
   state = tmp_path / "state"
@@ -2780,25 +2780,37 @@ def test_only_changed_or_led_maps_are_due_plus_one_in_rotation(
     nodes.append({"id": f"{m}-fact", "path": f"notes/{m}-fact.md", "mocs": [m]})
   (staging / "graph.json").write_text(json.dumps({"nodes": nodes}))
 
+  usage = {
+    f"notes/{m}-fact.md": {"needed": 0, "overreach": 0, "lookups_since_created": 0}
+    for m in maps
+  }
   # First night: nothing has been fingerprinted, so every map is due.
-  assert memory_runner._consolidation_candidates(staging) == [
+  assert memory_runner._consolidation_candidates(staging, usage) == [
     "mocs/a.md", "mocs/b.md", "mocs/c.md", "mocs/d.md",
   ]
   for m in maps:
     memory_runner._record_consolidation_attempt(f"mocs/{m}.md")
-    memory_runner._record_consolidation_fingerprint(staging, f"mocs/{m}.md")
+    memory_runner._record_consolidation_fingerprint(staging, f"mocs/{m}.md", usage)
 
-  # Quiet night: only the one oldest map rotates in.
-  assert memory_runner._consolidation_candidates(staging) == ["mocs/a.md"]
+  # Quiet night: nothing changed and no lookup added evidence, so no writer.
+  assert memory_runner._consolidation_candidates(staging, usage) == []
+
+  # A lookup since then is new usage evidence: the oldest map rotates in.
+  looked_up = {
+    path: {**entry, "lookups_since_created": 1} for path, entry in usage.items()
+  }
+  assert memory_runner._consolidation_candidates(staging, looked_up) == [
+    "mocs/a.md",
+  ]
 
   # A saved fact edits b's note; a new follow-up names c's note.
   (staging / "notes/b-fact.md").write_text("fact, corrected\n")
   monkeypatch.setattr(
     memory_runner, "_consolidation_leads",
-    lambda ids, since="": ["check c-fact"] if "c-fact" in ids else [],
+    lambda ids, since="", **_kw: ["check c-fact"] if "c-fact" in ids else [],
   )
 
-  assert memory_runner._consolidation_candidates(staging) == [
+  assert memory_runner._consolidation_candidates(staging, looked_up) == [
     "mocs/b.md", "mocs/c.md", "mocs/a.md",
   ]
 
