@@ -416,10 +416,10 @@ export default function App({ appId, token }) {
   }, [graph]);
 
   const colorForNode = useCallback((n) => {
-    if (n.type === 'moc') return cssVar('--accent', '#a78bfa');
+    if (n.type === 'moc') return cssVar('--accent');
     const primary = Array.isArray(n.mocs) && n.mocs.length ? n.mocs[0] : null;
     if (primary && mocColors[primary]) return mocColors[primary];
-    return cssVar('--muted', '#8a8a93');
+    return cssVar('--muted');
   }, [mocColors]);
 
   // --- Node radius from observed usage. ---
@@ -1564,7 +1564,7 @@ export default function App({ appId, token }) {
                 </button>
                 <div id="mg-legend-body" className="mg-legend-body mg-scroll">
                   <div style={S.legendRow}>
-                    <span style={{ ...S.legendSwatch, background: cssVar('--accent', '#a78bfa') }} />
+                    <span style={{ ...S.legendSwatch, background: 'var(--accent)' }} />
                     <span style={S.legendLabel}>Hub (MOC)</span>
                   </div>
                   {legendItems.slice(0, 12).map((it) => (

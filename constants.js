@@ -228,7 +228,7 @@ export const S = {
     border: '1px solid var(--border)',
   },
   typeMoc: {
-    background: 'var(--accent-dim, rgba(167,139,250,0.15))', color: 'var(--accent)',
+    background: 'var(--accent-dim)', color: 'var(--accent)',
     borderColor: 'transparent',
   },
 
@@ -268,7 +268,7 @@ export const S = {
 
   tagRow: { display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 16px 8px' },
   tag: {
-    fontSize: 11.5, color: 'var(--accent)', background: 'var(--accent-dim, rgba(167,139,250,0.12))',
+    fontSize: 11.5, color: 'var(--accent)', background: 'var(--accent-dim)',
     borderRadius: 999, padding: '2px 9px', fontWeight: 500,
   },
   // The view toggle lives in the note header. This row only mounts for the
@@ -338,6 +338,6 @@ export const S = {
     background: 'var(--accent-hover, var(--accent))', color: 'var(--accent-fg)', fontSize: 14, fontWeight: 600,
     cursor: 'pointer', fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
     justifyContent: 'center', transition: 'filter 0.15s, transform 0.05s',
-    boxShadow: '0 6px 18px var(--accent-dim, rgba(167,139,250,0.35))',
+    boxShadow: '0 6px 18px var(--accent-dim)',
   },
 };

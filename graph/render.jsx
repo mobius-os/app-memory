@@ -214,10 +214,10 @@ export function MemoryGraphRenderer({
   const positionedLinks = positionedGraph.links;
   const nodesById = positionedGraph.nodesById;
   const scale = transform.k || 1;
-  const textColor = cssVar('--text', '#e5e5e5');
-  const backgroundColor = cssVar('--bg', '#0d0d0d');
-  const borderColor = cssVar('--text', '#e5e5e5');
-  const accentColor = cssVar('--accent', '#a78bfa');
+  const textColor = cssVar('--text');
+  const backgroundColor = cssVar('--bg');
+  const borderColor = cssVar('--text');
+  const accentColor = cssVar('--accent');
   const hovered = hoverId || null;
 
   const isFocused = (id) => (
@@ -899,9 +899,9 @@ function safeRendererRadius(radiusForNode, node) {
 
 function safeRendererColor(colorForNode, node) {
   try {
-    return colorForNode?.(node) || cssVar('--muted', '#8a8a93');
+    return colorForNode?.(node) || cssVar('--muted');
   } catch {
-    return cssVar('--muted', '#8a8a93');
+    return cssVar('--muted');
   }
 }
 
