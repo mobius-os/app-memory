@@ -239,8 +239,8 @@ export const CSS = `
 .mg-local-graph { cursor: grab; background: var(--bg); }
 .mg-local-graph:active { cursor: grabbing; }
 .mg-md a[href^="#memory-node-"] {
-  border: 1px solid var(--accent-dim, rgba(167,139,250,0.35));
-  background: var(--accent-dim, rgba(167,139,250,0.12));
+  border: 1px solid var(--accent-dim);
+  background: var(--accent-dim);
   border-radius: 6px;
   padding: 0 5px;
   font-weight: 600;
@@ -924,7 +924,7 @@ export const CSS = `
 .mg-md ul, .mg-md ol { margin: 9px 0; padding-left: 22px; }
 .mg-md li { margin: 4px 0; }
 .mg-md li::marker { color: var(--muted); }
-.mg-md a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim, rgba(167,139,250,0.4)); }
+.mg-md a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
 .mg-md a:hover { border-bottom-color: var(--accent); }
 .mg-md strong { color: var(--text); font-weight: 700; }
 .mg-md code { background: var(--surface-2); border-radius: 5px; padding: 1px 5px; font-family: var(--mono); font-size: 0.85em; border: 1px solid var(--border-light, var(--border)); }
